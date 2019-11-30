@@ -102,3 +102,8 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# custom
+*.dat
+asn_names.json
+data/*

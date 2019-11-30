@@ -27,7 +27,7 @@ def fetch_one(ipv4):
 
 
 def fetch_latest():
-    return mongo.db.ipv4.find({'as': {'$elemMatch': {'asn': {'$ne': null }}}}, {'_id': 0}).sort([('_id', -1)]).limit(50)
+    return mongo.db.ipv4.find({'as': {'$elemMatch': {'asn': {'$ne': None }}}}, {'_id': 0}).sort([('_id', -1)]).limit(50)
 
 
 def asn_lookup(ipv4):

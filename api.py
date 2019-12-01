@@ -6,8 +6,8 @@ import os
 
 from datetime import datetime
 
-from flask import request, jsonify, url_for
-from flask_api import FlaskAPI, status, exceptions
+from flask import jsonify
+from flask_api import FlaskAPI
 from pymongo.errors import DuplicateKeyError
 from flask_pymongo import PyMongo
 
@@ -26,8 +26,14 @@ def fetch_one(ipv4):
     return mongo.db.ipv4.find({'ip': ipv4}, {'_id': 0})
 
 
+def fetch_latest_dns():
+    return mongo.db.dns.find({'updated': {'$exists': True}, 'scan_failed': {'$exists': False}},
+                             {'_id': 0}).sort([('updated', -1)]).limit(50)
+
+
 def fetch_latest():
-    return mongo.db.ipv4.find({'as': {'$elemMatch': {'asn': {'$ne': None }}}}, {'_id': 0}).sort([('_id', -1)]).limit(50)
+    return mongo.db.ipv4.find({'as': {'$elemMatch': {'asn': {'$ne': None}}}},
+                              {'_id': 0}).sort([('as.created', -1)]).limit(50)
 
 
 def asn_lookup(ipv4):
@@ -38,12 +44,17 @@ def asn_lookup(ipv4):
     return {'prefix': prefix, 'name': name, 'asn': asn, 'created': datetime.utcnow()}
 
 
-@app.route('/', methods=['GET'])
+@app.route('/ip', methods=['GET'])
 def explore_data():
     return jsonify(list(fetch_latest()))
 
 
-@app.route('/<string:ipv4>', methods=['GET'])
+@app.route('/dns', methods=['GET'])
+def explore_dns():
+    return jsonify(list(fetch_latest_dns()))
+
+
+@app.route('/ip/<string:ipv4>', methods=['GET'])
 def fetch_data(ipv4):
     data = list(fetch_one(ipv4))
 
@@ -52,14 +63,14 @@ def fetch_data(ipv4):
 
         try:
             host = socket.gethostbyaddr(ipv4)[0]
-        except Exception as e:
+        except Exception:
             host = None
 
-        prop = {'ip': ipv4, 'host': host, 'as': [ res ]}
+        prop = {'ip': ipv4, 'host': host, 'as': [res]}
 
         try:
             mongo.db.ipv4.insert_one(prop)
-        except DuplicateKeyError as e:
+        except DuplicateKeyError:
             pass
 
         if '_id' in prop:

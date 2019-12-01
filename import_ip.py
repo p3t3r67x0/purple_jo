@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import os
-import socket
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -20,23 +19,17 @@ def connect():
 
 
 def main():
-    db = connect()
-    col = db.ip_data
-    col.ipv4.create_index('ip', unique=True)
+    client = connect()
+    db = client.ip_data
+    db.ipv4.create_index('ip', unique=True)
 
-    for i in range(0, 1):
+    for i in range(9000, 9001):
         for line in load('{:02d}'.format(i)):
             try:
-                host = socket.gethostbyaddr(line.strip())[0]
-            except Exception as e:
-                host = None
-
-            try:
-                col.ipv4.insert_one({'ip': line.strip(), 'host': host})
+                db.ipv4.insert_one({'ip': line.strip()})
+                print(line.strip())
             except DuplicateKeyError as e:
                 print(e)
-
-            print(line.strip(), host)
 
 
 if __name__ == '__main__':

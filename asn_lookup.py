@@ -22,10 +22,11 @@ def fetch_all(col):
 def main():
     db = connect()
     col = db.ip_data
+
     for i in fetch_all(col):
         try:
             host = socket.gethostbyaddr(i['ip'])[0]
-        except Exception as e:
+        except Exception:
             host = None
 
         res = asn_lookup(i['ip'])

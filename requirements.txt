@@ -8,6 +8,7 @@ Click==7.0
 constantly==15.1.0
 debtcollector==1.22.0
 dnspython==1.16.0
+fake-useragent==0.1.11
 Flask==1.1.1
 Flask-API==2.0
 Flask-PyMongo==2.3.0
@@ -16,6 +17,7 @@ idna==2.8
 incremental==17.5.0
 itsdangerous==1.1.0
 Jinja2==2.10.3
+lxml==4.4.2
 MarkupSafe==1.1.1
 oslo.i18n==3.25.0
 pyasn==1.6.0b1

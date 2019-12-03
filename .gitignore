@@ -105,5 +105,6 @@ venv.bak/
 
 # custom
 *.dat
-asn_names.json
+*.sock
+*.json
 data/*

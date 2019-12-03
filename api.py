@@ -2,6 +2,7 @@
 
 import pyasn
 import socket
+import sys
 import os
 
 from datetime import datetime
@@ -24,6 +25,10 @@ mongo = PyMongo(app)
 
 def fetch_one(ipv4):
     return mongo.db.ipv4.find({'ip': ipv4}, {'_id': 0})
+
+
+def fetch_one_dns(domain):
+    return mongo.db.dns.find({'domain': domain}, {'_id': 0})
 
 
 def fetch_latest_dns():
@@ -56,6 +61,12 @@ def explore_dns():
     return jsonify(list(fetch_latest_dns()))
 
 
+@app.route('/dns/<string:domain>', methods=['GET'])
+def fetch_data_dns(domain):
+    data = list(fetch_one_dns(domain))
+    return jsonify(data)
+
+
 @app.route('/ip/<string:ipv4>', methods=['GET'])
 def fetch_data(ipv4):
     data = list(fetch_one(ipv4))
@@ -84,4 +95,4 @@ def fetch_data(ipv4):
 
 
 if __name__ == '__main__':
-    app.run(debug=False)
+    app.run(port=sys.argv[1], debug=False)

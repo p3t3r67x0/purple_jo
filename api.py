@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import re
 import pyasn
 import socket
 import sys
@@ -8,14 +9,14 @@ import os
 from datetime import datetime
 
 from flask import jsonify
-from flask_api import FlaskAPI
+from flask_api import FlaskAPI, status
 from pymongo.errors import DuplicateKeyError
 from flask_pymongo import PyMongo
 
 AS_NAMES_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asn_names.json')
 
 
-app = FlaskAPI(__name__)
+app = FlaskAPI(__name__, static_folder=None)
 
 app.config['DEFAULT_RENDERERS'] = ['flask_api.renderers.JSONRenderer']
 app.config['MONGO_URI'] = 'mongodb://127.0.0.1:27017/ip_data'
@@ -23,12 +24,16 @@ app.config['MONGO_URI'] = 'mongodb://127.0.0.1:27017/ip_data'
 mongo = PyMongo(app)
 
 
-def fetch_one(ipv4):
+def fetch_one_ip(ipv4):
     return mongo.db.ipv4.find({'ip': ipv4}, {'_id': 0})
 
 
-def fetch_one_prefix(prefix):
-    return mongo.db.ipv4.find({'as.prefix': prefix}, {'_id': 0})
+def fetch_all_prefix(prefix):
+    return mongo.db.ipv4.find({'as.prefix': prefix}, {'_id': 0}).limit(50)
+
+
+def fetch_all_asn(asn):
+    return mongo.db.ipv4.find({'as.asn': int(asn)}, {'_id': 0}).limit(50)
 
 
 def fetch_one_dns(domain):
@@ -42,7 +47,7 @@ def fetch_latest_dns():
                              {'_id': 0}).sort([('updated', -1)]).limit(50)
 
 
-def fetch_latest():
+def fetch_latest_asn():
     return mongo.db.ipv4.find({'as': {'$elemMatch': {'asn': {'$ne': None}}}},
                               {'_id': 0}).sort([('as.created', -1)]).limit(50)
 
@@ -55,9 +60,25 @@ def asn_lookup(ipv4):
     return {'prefix': prefix, 'name': name, 'asn': asn, 'created': datetime.utcnow()}
 
 
-@app.route('/ip', methods=['GET'])
+@app.route('/asn', methods=['GET'])
 def explore_data():
-    return jsonify(list(fetch_latest()))
+    data = list(fetch_latest_asn())
+
+    if data:
+        return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
+
+
+@app.route('/asn/<string:asn>', methods=['GET'])
+def fetch_data_asn(asn):
+    p = re.compile(r'[a-z]', re.IGNORECASE)
+    data = list(fetch_all_asn(p.sub('', asn.strip())))
+
+    if data:
+        return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
 
 
 @app.route('/dns', methods=['GET'])
@@ -68,18 +89,26 @@ def explore_dns():
 @app.route('/dns/<string:domain>', methods=['GET'])
 def fetch_data_dns(domain):
     data = list(fetch_one_dns(domain))
-    return jsonify(data)
+
+    if data:
+        return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
 
 
 @app.route('/subnet/<string:sub>/<string:prefix>', methods=['GET'])
 def fetch_data_prefix(sub, prefix):
-    data = list(fetch_one_prefix('{}/{}'.format(sub, prefix)))
-    return jsonify(data)
+    data = list(fetch_all_prefix('{}/{}'.format(sub, prefix)))
+
+    if data:
+        return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
 
 
 @app.route('/ip/<string:ipv4>', methods=['GET'])
-def fetch_data(ipv4):
-    data = list(fetch_one(ipv4))
+def fetch_data_ip(ipv4):
+    data = list(fetch_one_ip(ipv4))
 
     if len(data) == 0:
         res = asn_lookup(ipv4)
@@ -101,8 +130,12 @@ def fetch_data(ipv4):
 
         data = [prop]
 
-    return jsonify(data)
+    if data:
+        return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
 
 
 if __name__ == '__main__':
+    # print(app.url_map)
     app.run(port=sys.argv[1], debug=False)

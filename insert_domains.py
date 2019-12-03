@@ -124,6 +124,7 @@ def main():
 
     for url in urls:
         print(u'INFO: the url {} is beeing processed'.format(url))
+        add_domains(db, url)
         domains = get_domains(db, ua, url)
 
         if domains is not None:

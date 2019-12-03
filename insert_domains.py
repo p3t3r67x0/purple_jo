@@ -44,7 +44,7 @@ def add_domains(db, domain):
         post = {'domain': domain.lower(), 'created': now}
         post_id = db.dns.insert_one(post).inserted_id
 
-        print(u'INFO: the domain {}, was succefully saved with the id {}'.format(domain, post_id))
+        print(u'INFO: the domain {} was added with the id {}'.format(domain, post_id))
     except DuplicateKeyError:
         return
 

@@ -49,7 +49,7 @@ def fetch_latest_dns():
 
 def fetch_latest_asn():
     return mongo.db.ipv4.find({'as': {'$elemMatch': {'asn': {'$ne': None}}}},
-                              {'_id': 0}).sort([('as.created', -1)]).limit(50)
+                              {'_id': 0}).sort([('_id', -1)]).limit(50)
 
 
 def asn_lookup(ipv4):

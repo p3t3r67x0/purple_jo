@@ -52,7 +52,10 @@ def extract_certificate(domain):
         issuer[item[0].lower().decode('utf-8')] = item[1].decode('utf-8')
 
     for i in range(x509.get_extension_count()):
-        extensions[x509.get_extension(i).get_short_name().lower().decode('utf-8')] = x509.get_extension(i).__str__()
+        try:
+            extensions[x509.get_extension(i).get_short_name().lower().decode('utf-8')] = x509.get_extension(i).__str__()
+        except CryptoError:
+            pass
 
     post = [{
         'cert': cert,

@@ -8,6 +8,7 @@ import OpenSSL
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
+from OpenSSL.crypto import Error as CryptoError
 from datetime import datetime
 
 socket.setdefaulttimeout(1)
@@ -36,10 +37,9 @@ def extract_certificate(domain):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(1)
         cert = ssl.get_server_certificate((domain, 443))
-    except socket.error:
+        x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, cert)
+    except (CryptoError, socket.error):
         return
-
-    x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, cert)
 
     extensions = {}
     subject = {}

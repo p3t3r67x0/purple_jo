@@ -6,6 +6,8 @@ import certstream
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
+from datetime import datetime
+
 
 def connect():
     return MongoClient('mongodb://127.0.0.1:27017')
@@ -13,7 +15,7 @@ def connect():
 
 def add_domain(db, domain):
     try:
-        db.dns.insert_one({'domain': domain})
+        db.dns.insert_one({'domain': domain, 'created': datetime.utcnow()})
     except DuplicateKeyError as e:
         print(e)
 

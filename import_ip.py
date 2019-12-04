@@ -7,11 +7,8 @@ from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
 
-IP_ADDRESS_FILE_PATH = os.path.join(os.path.dirname(__file__), 'data/')
-
-
 def load(i):
-    with open(IP_ADDRESS_FILE_PATH + 'x' + i, 'r') as f:
+    with open(i) as f:
         return f.readlines()
 
 

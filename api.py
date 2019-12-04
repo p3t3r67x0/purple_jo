@@ -42,7 +42,6 @@ def fetch_one_dns(domain):
 
 def fetch_latest_dns():
     return mongo.db.dns.find({'updated': {'$exists': True},
-                              'header.status': {'$exists': True},
                               'scan_failed': {'$exists': False}},
                              {'_id': 0}).sort([('updated', -1)]).limit(50)
 

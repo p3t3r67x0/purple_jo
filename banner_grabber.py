@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import socket
+import multiprocessing
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -38,7 +39,7 @@ def grab_banner(ip, port):
         return ''
 
 
-def main():
+def worker(skip, limit):
     client = connect()
     db = client.ip_data
 
@@ -51,6 +52,28 @@ def main():
                 update_data(db, record['_id'], ip, {'banner': banner, 'updated': datetime.utcnow()})
             else:
                 update_data(db, record['_id'], ip, {'banner_scan_failed': datetime.utcnow()})
+
+    return
+
+
+def main():
+    client = connect()
+    db = client.ip_data
+
+    jobs = []
+    threads = 16
+    amount = db.dns.count_documents({}) / threads
+    limit = amount
+
+    for f in range(threads):
+        j = multiprocessing.Process(target=worker, args=(limit, amount))
+        jobs.append(j)
+        j.start()
+        limit = limit + amount
+
+    for j in jobs:
+        j.join()
+        print('exitcode = {}'.format(j.exitcode))
 
 
 if __name__ == '__main__':

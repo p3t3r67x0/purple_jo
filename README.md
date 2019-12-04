@@ -3,7 +3,7 @@
 API and backend of Purple Pee an open source ASN lookup project. Made for the public.
 
 
-Example output of latest entries
+Example output of latest ASN entries
 
 ```json
 [{
@@ -34,4 +34,39 @@ Example output of latest entries
 		"created": "2019-11-30T00:29:04.087Z"
 	}]
 }]
+```
+
+## Build Setup
+
+```bash
+# create a virtualenv
+virtualenv -p /usr/bin/python3.6 venv
+
+# activate virtualenv
+. venv/bin/activate
+
+# install dependencies
+$ pip3 install -r requirements
+
+# serve at 127.0.0.1:5000
+$ gunicorn --bind 127.0.0.1:5000 wsgi:app --access-logfile - --error-logfile - --log-level info
+```
+
+
+## Systemd Setup
+
+```bash
+[Unit]
+Description=Gunicorn instance to serve purplejo
+After=network.target
+
+[Service]
+User=<user>
+Group=www-data
+WorkingDirectory=/home/<user>/git/purple_jo
+Environment="PATH=/home/<user>/git/purple_jo/venv/bin"
+ExecStart=/home/<user>/git/purple_jo/venv/bin/gunicorn --workers 4 --bind 127.0.0.1:9000 wsgi:app --access-logfile /var/log/purplejo/access.log --error-logfile /var/log/purplejo/error.log --log-level info
+
+[Install]
+WantedBy=multi-user.target
 ```

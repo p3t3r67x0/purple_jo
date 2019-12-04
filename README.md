@@ -55,6 +55,8 @@ $ gunicorn --bind 127.0.0.1:5000 wsgi:app --access-logfile - --error-logfile - -
 
 ## Systemd Setup
 
+Create a file `/etc/systemd/system/purplejo.service` with following content
+
 ```bash
 [Unit]
 Description=Gunicorn instance to serve purplejo
@@ -69,4 +71,12 @@ ExecStart=/home/<user>/git/purple_jo/venv/bin/gunicorn --workers 4 --bind 127.0.
 
 [Install]
 WantedBy=multi-user.target
+```
+
+
+Start the service and enable the service
+
+```bash
+sudo systemctl start purplepee
+sudo systemctl enable purplepee
 ```

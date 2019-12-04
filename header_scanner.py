@@ -4,6 +4,7 @@ import requests
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import WriteError
 
 from requests.exceptions import InvalidURL
 from requests.exceptions import ReadTimeout
@@ -21,6 +22,9 @@ def update_data(db, doc_id, domain, post):
     try:
         db.dns.update_one({'_id': doc_id}, {'$set': post}, upsert=False)
         print(u'INFO: updated domain {} header'.format(domain))
+    except WriteError:
+        db.dns.update_one({'_id': doc_id},
+                          {'$set': {'header_scan_failed': datetime.utcnow()}}, upsert=False)
     except DuplicateKeyError:
         pass
 

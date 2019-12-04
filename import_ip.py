@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -23,13 +24,12 @@ def main():
     db = client.ip_data
     db.ipv4.create_index('ip', unique=True)
 
-    for i in range(9000, 9001):
-        for line in load('{:02d}'.format(i)):
-            try:
-                db.ipv4.insert_one({'ip': line.strip()})
-                print(line.strip())
-            except DuplicateKeyError as e:
-                print(e)
+    for line in load(sys.argv[1]):
+        try:
+            db.ipv4.insert_one({'ip': line.strip()})
+            print(line.strip())
+        except DuplicateKeyError as e:
+            print(e)
 
 
 if __name__ == '__main__':

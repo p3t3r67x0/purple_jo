@@ -36,8 +36,10 @@ def fetch_all_asn(asn):
     return mongo.db.ipv4.find({'as.asn': int(asn)}, {'_id': 0}).limit(50)
 
 
-def fetch_one_dns(domain):
-    return mongo.db.dns.find({'domain': domain}, {'_id': 0})
+def fetch_all_dns(domain):
+    return mongo.db.dns.find({'$text': {'$search': '\'{}\''.format(domain)}},
+                             {'score': {'$meta': "textScore"}, '_id': 0}).sort(
+                             [('score', {'$meta': 'textScore'})]).limit(50)
 
 
 def fetch_latest_dns():
@@ -87,7 +89,7 @@ def explore_dns():
 
 @app.route('/dns/<string:domain>', methods=['GET'])
 def fetch_data_dns(domain):
-    data = list(fetch_one_dns(domain))
+    data = list(fetch_all_dns(domain))
 
     if data:
         return jsonify(data)

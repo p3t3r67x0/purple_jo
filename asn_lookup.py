@@ -30,7 +30,7 @@ def main():
             host = None
 
         res = asn_lookup(i['ip'])
-        col.ipv4.update_one({'ip': i['ip']}, {'$set': {'host': host}, '$push': { 'as': res }}, upsert=False)
+        col.ipv4.update_one({'ip': i['ip']}, {'$set': {'host': host}, 'updated': datetime.utcnow(), '$push': { 'as': res }}, upsert=False)
 
         print(i['ip'], res, host)
 
@@ -40,7 +40,7 @@ def asn_lookup(ipv4):
     asn, prefix = asndb.lookup(ipv4)
     name = asndb.get_as_name(asn)
 
-    return {'prefix': prefix, 'name': name, 'asn': asn, 'created': datetime.utcnow()}
+    return {'prefix': prefix, 'name': name, 'asn': asn}
 
 
 if __name__ == '__main__':

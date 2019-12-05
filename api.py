@@ -48,7 +48,7 @@ def fetch_latest_dns():
 
 def fetch_latest_asn():
     return mongo.db.ipv4.find({'as': {'$elemMatch': {'asn': {'$ne': None}}}},
-                              {'_id': 0}).sort([('_id', -1)]).limit(50)
+                              {'_id': 0}).sort([('updated', -1)]).limit(50)
 
 
 def asn_lookup(ipv4):
@@ -56,7 +56,7 @@ def asn_lookup(ipv4):
     asn, prefix = asndb.lookup(ipv4)
     name = asndb.get_as_name(asn)
 
-    return {'prefix': prefix, 'name': name, 'asn': asn, 'created': datetime.utcnow()}
+    return {'prefix': prefix, 'name': name, 'asn': asn}
 
 
 @app.route('/asn', methods=['GET'])
@@ -117,7 +117,7 @@ def fetch_data_ip(ipv4):
         except Exception:
             host = None
 
-        prop = {'ip': ipv4, 'host': host, 'as': [res]}
+        prop = {'ip': ipv4, 'host': host, 'updated': datetime.utcnow(), 'as': [res]}
 
         try:
             mongo.db.ipv4.insert_one(prop)

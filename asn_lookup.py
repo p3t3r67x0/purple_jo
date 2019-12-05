@@ -30,7 +30,7 @@ def main():
             host = None
 
         res = asn_lookup(i['ip'])
-        col.ipv4.update_one({'ip': i['ip']}, {'$set': {'host': host}, 'updated': datetime.utcnow(), '$push': { 'as': res }}, upsert=False)
+        col.ipv4.update_one({'ip': i['ip']}, {'$set': {'host': host, 'updated': datetime.utcnow()}, '$push': { 'as': res }}, upsert=False)
 
         print(i['ip'], res, host)
 

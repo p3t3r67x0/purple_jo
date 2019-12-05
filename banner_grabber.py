@@ -21,10 +21,11 @@ def update_data(db, doc_id, domain, ip, post):
         pass
 
 
-def retrieve_documents(db):
+def retrieve_documents(db, skip, limit):
     return db.dns.find({'a_record': {'$exists': True},
                         'banner': {'$exists': False},
-                        'banner_scan_failed': {'$exists': False}}).sort([('updated', -1)])
+                        'banner_scan_failed': {'$exists': False}}).sort(
+                        [('updated', -1)])[limit - skip:limit]
 
 
 def grab_banner(ip, port):
@@ -43,7 +44,7 @@ def worker(skip, limit):
     client = connect()
     db = client.ip_data
 
-    for document in retrieve_documents(db):
+    for document in retrieve_documents(db, limit, skip):
         banner = grab_banner(document['a_record'][0], 22)
 
         if banner:

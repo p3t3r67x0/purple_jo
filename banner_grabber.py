@@ -64,7 +64,7 @@ def main():
 
     jobs = []
     threads = 16
-    amount = db.dns.count_documents({}) / threads
+    amount = db.dns.estimated_document_count() / threads
     limit = amount
 
     for f in range(threads):

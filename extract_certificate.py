@@ -19,7 +19,7 @@ def connect():
 
 
 def retrieve_domains(db):
-    return db.dns.find({'domain': {'$exists': True},
+    return db.dns.find({'domain': 'hjw-kunstwerk.de',
                         'ssl_cert': {'$exists': False},
                         'cert_scan_failed': {'$exists': False}}).sort([('$natural', -1)])
 
@@ -33,6 +33,14 @@ def update_data(db, doc_id, domain, post):
 
 
 def extract_certificate(domain):
+    ctx = ssl.create_default_context()
+    s = ctx.wrap_socket(socket.socket(), server_domain=domain)
+    s.connect((domain, 443))
+
+    cert = s.getpeercert(binary_form=False)
+
+    print(cert)
+
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(1)
@@ -93,9 +101,10 @@ def main():
 
         if cert:
             print(cert)
-            update_data(db, domain['_id'], domain['domain'], {'ssl_cert': cert, 'updated': datetime.utcnow()})
+            # update_data(db, domain['_id'], domain['domain'], {'ssl_cert': cert, 'updated': datetime.utcnow()})
         else:
-            update_data(db, domain['_id'], domain['domain'], {'cert_scan_failed': datetime.utcnow()})
+            pass
+            # update_data(db, domain['_id'], domain['domain'], {'cert_scan_failed': datetime.utcnow()})
 
 
 if __name__ == '__main__':

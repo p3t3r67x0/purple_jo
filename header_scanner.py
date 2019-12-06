@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import requests
+import multiprocessing
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -30,9 +31,10 @@ def update_data(db, doc_id, domain, post):
         pass
 
 
-def retrieve_domains(db):
+def retrieve_domains(db, skip, limit):
     return db.dns.find({'header': {'$exists': False},
-                        'header_scan_failed': {'$exists': False}}).sort([('$natural', -1)])
+                        'header_scan_failed': {'$exists': False}
+                        }).sort([('$natural', -1)])[limit - skip:limit]
 
 
 def grab_http_header(domain):
@@ -57,13 +59,11 @@ def grab_http_header(domain):
         return
 
 
-def main():
+def worker(skip, limit):
     client = connect()
     db = client.ip_data
 
-    domains = retrieve_domains(db)
-
-    for domain in domains:
+    for domain in retrieve_domains(db, limit, skip):
         print(u'INFO: scanning {} header'.format(domain['domain']))
 
         header = grab_http_header(domain['domain'])
@@ -78,4 +78,20 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    client = connect()
+    db = client.ip_data
+
+    jobs = []
+    threads = 16
+    amount = db.dns.estimated_document_count() / threads
+    limit = amount
+
+    for f in range(threads):
+        j = multiprocessing.Process(target=worker, args=(limit, amount))
+        jobs.append(j)
+        j.start()
+        limit = limit + amount
+
+    for j in jobs:
+        j.join()
+        print('exitcode = {}'.format(j.exitcode))

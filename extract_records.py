@@ -101,7 +101,7 @@ if __name__ == '__main__':
 
     jobs = []
     threads = 32
-    amount = db.dns.count_documents({}) / threads
+    amount = db.dns.estimated_document_count() / threads
     limit = amount
 
     for f in range(threads):

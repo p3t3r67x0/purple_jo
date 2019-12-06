@@ -107,11 +107,11 @@ def check_mail(url):
 
 
 def match_all_domains(document):
-    return re.findall(r'(?P<domain>[a-z0-9-]{1,63}\.?[a-z0-9\-.]{1,63}\.[a-z\.]{2,})', document)
+    return re.findall(r'(?P<domain>[\w-]{1,63}\.?[\w\-.]{1,63}\.[\w\-\.]{2,}[\w-]?)', document)
 
 
 def match_domain(domain):
-    return re.match(r'(?P<domain>[a-z0-9-]{1,63}\.?[a-z0-9\-.]{1,63}\.[a-z\.]{2,})', domain)
+    return re.match(r'(?P<domain>[\w-]{1,63}\.?[\w\-.]{1,63}\.[\w\-\.]{2,}[\w-]?)', domain)
 
 
 def main():

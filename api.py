@@ -25,15 +25,15 @@ mongo = PyMongo(app)
 
 
 def fetch_one_ip(ipv4):
-    return mongo.db.ipv4.find({'ip': ipv4}, {'_id': 0})
+    return mongo.db.lookup.find({'ip': ipv4}, {'_id': 0})
 
 
 def fetch_all_prefix(prefix):
-    return mongo.db.ipv4.find({'as.prefix': prefix}, {'_id': 0}).limit(50)
+    return mongo.db.lookup.find({'cidr': {'$in': [prefix]}}, {'_id': 0}).limit(50)
 
 
 def fetch_all_asn(asn):
-    return mongo.db.ipv4.find({'as.asn': int(asn)}, {'_id': 0}).limit(50)
+    return mongo.db.lookup.find({'asn': int(asn)}, {'_id': 0}).limit(50)
 
 
 def fetch_all_dns(domain):
@@ -49,8 +49,8 @@ def fetch_latest_dns():
 
 
 def fetch_latest_asn():
-    return mongo.db.ipv4.find({'as': {'$elemMatch': {'asn': {'$ne': None}}}},
-                              {'_id': 0}).sort([('updated', -1)]).limit(50)
+    return mongo.db.lookup.find({'name': {'$exists': True}},
+                                {'_id': 0}).sort([('updated', -1)]).limit(50)
 
 
 def asn_lookup(ipv4):
@@ -119,10 +119,11 @@ def fetch_data_ip(ipv4):
         except Exception:
             host = None
 
-        prop = {'ip': ipv4, 'host': host, 'updated': datetime.utcnow(), 'as': [res]}
+        prop = {'ip': ipv4, 'host': host, 'updated': datetime.utcnow(),
+                'asn': res['asn'], 'name': res['name'], 'cidr': [res['prefix']]}
 
         try:
-            mongo.db.ipv4.insert_one(prop)
+            mongo.db.lookup.insert_one(prop)
         except DuplicateKeyError:
             pass
 

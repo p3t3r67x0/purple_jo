@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
 from ipwhois.net import Net
-from ipwhois.asn import ASNOrigin
+from ipwhois.asn import ASNOrigin, IPASN
 from ipwhois.exceptions import ASNOriginLookupError
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DocumentTooLarge
 
 from datetime import datetime
 
@@ -15,14 +16,14 @@ def connect():
 
 
 def retrieve_asns(db):
-    return db.lookup.find({})
+    return db.lookup.find({'whois': {'$exists': False}})
 
 
 def update_data(db, asn, post):
     try:
-        db.asn.update_one({'asn': asn}, {'$set': post}, upsert=False)
+        db.lookup.update_one({'asn': asn}, {'$set': post, '$unset': {'subnet': 0}}, upsert=False)
         print(u'INFO: updated whois AS{} document'.format(asn))
-    except DuplicateKeyError:
+    except (DocumentTooLarge, DuplicateKeyError):
         pass
 
 
@@ -34,10 +35,23 @@ if __name__ == '__main__':
         now = datetime.utcnow()
 
         try:
-            whois = ASNOrigin(net=Net(asn['ip'])).lookup(
-                    asn=str(asn['asn']), retry_count=10, asn_methods=['whois'])
-        except ASNOriginLookupError:
+            whois = IPASN(Net(asn['ip'])).lookup(retry_count=10, asn_methods=['whois'])
+        except Exception:
             whois = None
 
-        if whois and len(whois['nets']) > 0:
-            update_data(db, str(asn['asn']), {'updated': now, 'whois': whois['nets']})
+        try:
+            cidr_list = []
+
+            cidr = ASNOrigin(Net(asn['ip'])).lookup(
+                    asn=str(asn['asn']), retry_count=10, asn_methods=['whois'])
+
+            if cidr and len(cidr['nets']) > 0:
+                for c in cidr['nets']:
+                    cidr_list.append(c['cidr'])
+
+            print(cidr_list)
+        except ASNOriginLookupError:
+            cidr_list = None
+
+        if whois and len(whois) > 0:
+            update_data(db, asn['asn'], {'updated': now, 'cidr': cidr_list, 'whois': whois})

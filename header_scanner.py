@@ -11,6 +11,7 @@ from requests.exceptions import ReadTimeout
 from requests.exceptions import ChunkedEncodingError
 from requests.exceptions import ConnectionError
 
+from urllib3.exceptions import InvalidHeader
 from datetime import datetime
 
 
@@ -40,7 +41,7 @@ def grab_http_header(domain):
     try:
         r = requests.head(u'https://{}'.format(domain),
                           timeout=1, allow_redirects=False)
-    except (InvalidURL, ReadTimeout, ConnectionError, ChunkedEncodingError):
+    except (InvalidHeader, InvalidURL, ReadTimeout, ConnectionError, ChunkedEncodingError):
         return
 
     try:

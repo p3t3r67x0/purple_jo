@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
-import pyasn
 import os
+import pyasn
+import multiprocessing
 
 from datetime import datetime
 from pymongo import MongoClient
@@ -14,22 +15,8 @@ def connect():
     return MongoClient('mongodb://127.0.0.1:27017')
 
 
-def fetch_all(db):
-    return db.lookup.find({'name': {'$exists': False}}).sort([('_id', -1)])
-
-
-def main():
-    client = connect()
-    db = client.ip_data
-
-    for i in fetch_all(db):
-        res = asn_lookup(i['ip'])
-
-        db.lookup.update_one({'ip': i['ip']}, {'$set': {
-                             'updated': datetime.utcnow(),
-                             'name': res['name']}}, upsert=False)
-
-        print('INFO: updated document with ip {} and added asn name {}'.format(i['ip'], res['name']))
+def retrieve_ips(db, limit, skip):
+    return db.lookup.find({'name': {'$exists': False}}).sort([('_id', -1)])[limit - skip:limit]
 
 
 def asn_lookup(ipv4):
@@ -40,5 +27,35 @@ def asn_lookup(ipv4):
     return {'name': name}
 
 
+def worker(skip, limit):
+    client = connect()
+    db = client.ip_data
+
+    for i in retrieve_ips(db, limit, skip):
+        res = asn_lookup(i['ip'])
+
+        db.lookup.update_one({'ip': i['ip']}, {'$set': {
+                             'updated': datetime.utcnow(),
+                             'name': res['name']}}, upsert=False)
+
+        print('INFO: updated document with ip {} and added asn name {}'.format(i['ip'], res['name']))
+
+
 if __name__ == '__main__':
-    main()
+    client = connect()
+    db = client.ip_data
+
+    jobs = []
+    threads = 32
+    amount = db.lookup.estimated_document_count() / threads
+    limit = amount
+
+    for f in range(threads):
+        j = multiprocessing.Process(target=worker, args=(limit, amount))
+        jobs.append(j)
+        j.start()
+        limit = limit + amount
+
+    for j in jobs:
+        j.join()
+        print('exitcode = {}'.format(j.exitcode))

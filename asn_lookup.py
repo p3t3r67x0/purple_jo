@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import pyasn
-import socket
 import os
 
 from datetime import datetime
@@ -16,7 +15,7 @@ def connect():
 
 
 def fetch_all(db):
-    return db.ipv4.find({'as': {'$exists': False}}, {'_id': 0}).sort([('_id', -1)])
+    return db.lookup.find({'name': {'$exists': False}}).sort([('_id', -1)])
 
 
 def main():
@@ -24,15 +23,13 @@ def main():
     db = client.ip_data
 
     for i in fetch_all(db):
-        try:
-            host = socket.gethostbyaddr(i['ip'])[0].lower()
-        except Exception:
-            host = None
-
         res = asn_lookup(i['ip'])
-        db.ipv4.update_one({'ip': i['ip']}, {'$set': {'host': host, 'updated': datetime.utcnow()}, '$push': {'as': res}}, upsert=False)
 
-        print(i['ip'], res, host)
+        db.lookup.update_one({'ip': i['ip']}, {'$set': {
+                             'updated': datetime.utcnow(),
+                             'name': res['name']}}, upsert=False)
+
+        print('INFO: updated document with ip {} and added asn name {}'.format(i['ip'], res['name']))
 
 
 def asn_lookup(ipv4):
@@ -40,7 +37,7 @@ def asn_lookup(ipv4):
     asn, prefix = asndb.lookup(ipv4)
     name = asndb.get_as_name(asn)
 
-    return {'prefix': prefix, 'name': name, 'asn': asn}
+    return {'name': name}
 
 
 if __name__ == '__main__':

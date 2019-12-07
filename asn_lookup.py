@@ -31,7 +31,7 @@ def worker(skip, limit):
     client = connect()
     db = client.ip_data
 
-    for i in retrieve_ips(db, limit, skip):
+    for i in retrieve_ips(db, skip, limit):
         res = asn_lookup(i['ip'])
 
         db.lookup.update_one({'ip': i['ip']}, {'$set': {

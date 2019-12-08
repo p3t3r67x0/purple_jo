@@ -28,9 +28,12 @@ def retrieve_asns(db):
 
 def update_data_dns(db, ip, domain, post):
     try:
-        db.lookup.update_one({'a_record': {'$in': [ip]}}, {'$set': post}, upsert=False)
-        print(u'INFO: updated dns whois entry for IP {}'.format(domain))
-    except (DocumentTooLarge, DuplicateKeyError):
+        print(({'a_record': {'$in': [ip]}}, {'$set': post}))
+        data = db.dns.update_many({'a_record': {'$in': [ip]}}, {'$set': post}, upsert=False)
+
+        if data.modified_count > 0:
+            print(u'INFO: updated dns whois entry for domain {}'.format(domain))
+    except DuplicateKeyError:
         pass
 
 
@@ -38,7 +41,7 @@ def update_data_lookup(db, asn, post):
     try:
         db.lookup.update_one({'asn': asn}, {'$set': post, '$unset': {
             'subnet': 0}}, upsert=False)
-        print(u'INFO: updated dns whois entry for AS{}'.format(asn))
+        print(u'INFO: updated dns whois and cidr entry for AS{}'.format(asn))
     except (DocumentTooLarge, DuplicateKeyError):
         pass
 
@@ -90,14 +93,10 @@ if __name__ == '__main__':
             cidr = get_cidr(asn['ip'], asn['asn'])
 
             if whois and cidr and len(whois) > 0:
-                update_data_lookup(db, asn['asn'], {'updated': now,
-                                                    'cidr': cidr,
-                                                    'whois': whois})
+                update_data_lookup(db, asn['asn'], {'updated': now, 'cidr': cidr, 'whois': whois})
     elif args.collection == 'dns':
         for dns in retrieve_dns(db):
             whois = get_whois(dns['a_record'][0])
 
             if whois and len(whois) > 0:
-                update_data_dns(db, dns['a_record'][0], dns['domain'], {
-                                                            'updated': now,
-                                                            'whois': whois})
+                update_data_dns(db, dns['a_record'][0], dns['domain'], {'updated': now, 'whois': whois})

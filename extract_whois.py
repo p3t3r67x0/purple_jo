@@ -28,7 +28,6 @@ def retrieve_asns(db):
 
 def update_data_dns(db, ip, domain, post):
     try:
-        print(({'a_record': {'$in': [ip]}}, {'$set': post}))
         data = db.dns.update_many({'a_record': {'$in': [ip]}}, {'$set': post}, upsert=False)
 
         if data.modified_count > 0:
@@ -81,7 +80,6 @@ def argparser():
 
 if __name__ == '__main__':
     args = argparser()
-    print(args)
 
     client = connect()
     db = client.ip_data

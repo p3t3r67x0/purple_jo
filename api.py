@@ -11,6 +11,7 @@ from datetime import datetime
 from flask import jsonify
 from flask_api import FlaskAPI, status
 from pymongo.errors import DuplicateKeyError
+from werkzeug.routing import PathConverter
 from flask_pymongo import PyMongo
 
 AS_NAMES_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asn_names.json')
@@ -22,6 +23,13 @@ app.config['DEFAULT_RENDERERS'] = ['flask_api.renderers.JSONRenderer']
 app.config['MONGO_URI'] = 'mongodb://127.0.0.1:27017/ip_data'
 
 mongo = PyMongo(app)
+
+
+class EverythingConverter(PathConverter):
+    regex = '.*?'
+
+
+app.url_map.converters['match'] = EverythingConverter
 
 
 def fetch_one_ip(ip):
@@ -142,7 +150,8 @@ def fetch_data_prefix(sub, prefix):
 
 @app.route('/match/<string:query>', methods=['GET'])
 def fetch_data_condition(query):
-    data = list(fetch_match_condition(query.split(':')[0], query.split(':')[1]))
+    q = re.sub(r'[\'"(){}]', '', query).split(':')
+    data = list(fetch_match_condition(q[0], q[1]))
 
     if data:
         return jsonify(data)

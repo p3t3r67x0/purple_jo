@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import ipaddress
 
 from ipwhois.net import Net
 from ipwhois.asn import ASNOrigin, IPASN
@@ -28,10 +29,13 @@ def retrieve_asns(db):
 
 def update_data_dns(db, ip, domain, post):
     try:
-        data = db.dns.update_many({'a_record': {'$in': [ip]}}, {'$set': post}, upsert=False)
+        if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(post['whois']['asn_cidr']):
+            data = db.dns.update_many({'a_record': {'$in': [ip]}}, {'$set': post}, upsert=False)
 
-        if data.modified_count > 0:
-            print(u'INFO: updated dns whois entry for domain {}'.format(domain))
+            if data.modified_count > 0:
+                print(u'INFO: updated dns whois entry for domain {}'.format(domain))
+        else:
+            print('INFO: IP {} is not in subnet {}'.format(ip, post['whois']['asn_cidr']))
     except DuplicateKeyError:
         pass
 

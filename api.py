@@ -24,33 +24,66 @@ app.config['MONGO_URI'] = 'mongodb://127.0.0.1:27017/ip_data'
 mongo = PyMongo(app)
 
 
-def fetch_one_ip(ipv4):
-    return mongo.db.lookup.find({'ip': ipv4}, {'_id': 0})
+def fetch_one_ip(ip):
+    return mongo.db.dns.find({'a_record': {'$in': [ip]}}, {'_id': 0})
+
+
+def fetch_match_condition(condition, query):
+    if query is not None:
+        if condition == 'registry':
+            return mongo.db.dns.find({'whois': {'$exists': True},
+                                      'whois.asn_registry': query}, {'_id': 0}).limit(30)
+        elif condition == 'port':
+            return mongo.db.dns.find({'ports': {'$exists': True},
+                                      'ports.port': int(query)}, {'_id': 0}).limit(30)
+        elif condition == 'status':
+            return mongo.db.dns.find({'header': {'$exists': True},
+                                      'header.status': query}, {'_id': 0}).limit(30)
+        elif condition == 'country':
+            return mongo.db.dns.find({'whois': {'$exists': True},
+                                      'whois.asn_country_code': query.upper()}, {'_id': 0}).limit(30)
+        elif condition == 'org':
+            return mongo.db.dns.find({'whois': {'$exists': True}, 'whois.asn_description': {
+                                      '$regex': query.lower(), '$options': 'ig'}}, {'_id': 0}).limit(30)
+        elif condition == 'cidr':
+            return mongo.db.dns.find({'whois': {'$exists': True},
+                                      'whois.asn_cidr': {'$in': [query]}}, {'_id': 0}).limit(30)
+        elif condition == 'cname':
+            return mongo.db.dns.find({'cname_record': {'$exists': True},
+                                      'cname_record.target': {'$in': [query.lower()]}}, {'_id': 0}).limit(30)
+        elif condition == 'mx':
+            return mongo.db.dns.find({'mx_record': {'$exists': True},
+                                      'mx_record.exchange': {'$in': [query.lower()]}}, {'_id': 0}).limit(30)
+        elif condition == 'server':
+            return mongo.db.dns.find({'header': {'$exists': True}, 'header.server': {
+                                      '$regex': query.lower(), '$options': 'i'}}, {'_id': 0}).limit(30)
+        elif condition == 'site':
+            return mongo.db.dns.find({'domain': query}, {'_id': 0}).limit(30)
 
 
 def fetch_all_prefix(prefix):
-    return mongo.db.lookup.find({'cidr': {'$in': [prefix]}}, {'_id': 0}).limit(50)
+    return mongo.db.lookup.find({'cidr': {'$in': [prefix]}}, {'_id': 0}).limit(30)
 
 
 def fetch_all_asn(asn):
-    return mongo.db.lookup.find({'asn': int(asn)}, {'_id': 0}).limit(50)
+    return mongo.db.lookup.find({'asn': int(asn)}, {'_id': 0}).limit(30)
 
 
 def fetch_all_dns(domain):
     return mongo.db.dns.find({'$text': {'$search': '\'{}\''.format(domain)}},
                              {'score': {'$meta': "textScore"}, '_id': 0}).sort(
-                             [('score', {'$meta': 'textScore'})]).limit(50)
+                             [('score', {'$meta': 'textScore'})]).limit(30)
 
 
 def fetch_latest_dns():
     return mongo.db.dns.find({'updated': {'$exists': True},
                               'scan_failed': {'$exists': False}},
-                             {'_id': 0}).sort([('updated', -1)]).limit(50)
+                             {'_id': 0}).sort([('updated', -1)]).limit(30)
 
 
 def fetch_latest_asn():
     return mongo.db.lookup.find({'name': {'$exists': True}},
-                                {'_id': 0}).sort([('updated', -1)]).limit(50)
+                                {'_id': 0}).sort([('updated', -1)]).limit(30)
 
 
 def asn_lookup(ipv4):
@@ -100,6 +133,16 @@ def fetch_data_dns(domain):
 @app.route('/subnet/<string:sub>/<string:prefix>', methods=['GET'])
 def fetch_data_prefix(sub, prefix):
     data = list(fetch_all_prefix('{}/{}'.format(sub, prefix)))
+
+    if data:
+        return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
+
+
+@app.route('/match/<string:query>', methods=['GET'])
+def fetch_data_condition(query):
+    data = list(fetch_match_condition(query.split(':')[0], query.split(':')[1]))
 
     if data:
         return jsonify(data)

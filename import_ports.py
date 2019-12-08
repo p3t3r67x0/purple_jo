@@ -24,7 +24,8 @@ def connect():
 def update_data(db, ip, now, ports):
     try:
         res = db.dns.update_one({'a_record': {'$in': [ip]}}, {'$set': {
-                           'updated': now}, '$push': {'ports': ports}}, upsert=False)
+                                 'updated': now}, '$addToSet': {'ports': ports}
+                                 }, upsert=False)
         if res.modified_count > 0:
             print(u'INFO: updated ports for ip {}'.format(ip))
     except DuplicateKeyError:
@@ -42,5 +43,6 @@ if __name__ == '__main__':
     for port in ports:
         for p in port['ports']:
             if p:
-                update_data(db, port['ip'], now, p)
-                print(p)
+                data = {'port': p['port'], 'proto': p['proto'],
+                        'status': p['status'], 'reason': p['reason']}
+                update_data(db, port['ip'], now, data)

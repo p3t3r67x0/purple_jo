@@ -47,7 +47,7 @@ def fetch_match_condition(condition, query):
                                       '$regex': query.lower(), '$options': 'ig'}}, {'_id': 0}).limit(30)
         elif condition == 'cidr':
             return mongo.db.dns.find({'whois': {'$exists': True},
-                                      'whois.asn_cidr': {'$in': [query]}}, {'_id': 0}).limit(30)
+                                      'whois.asn_cidr': query}, {'_id': 0}).limit(30)
         elif condition == 'cname':
             return mongo.db.dns.find({'cname_record': {'$exists': True},
                                       'cname_record.target': {'$in': [query.lower()]}}, {'_id': 0}).limit(30)

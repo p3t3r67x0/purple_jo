@@ -5,6 +5,7 @@
 import re
 import sys
 import requests
+import multiprocessing
 
 from lxml import html
 from urllib.parse import urljoin
@@ -114,23 +115,30 @@ def match_domain(domain):
     return re.match(r'(?P<domain>[\w-]{1,63}\.?[\w\-.]{1,63}\.[\w\-\.]{2,}[\w-]?)', domain)
 
 
-def main():
+def worker(domains):
     client = connect()
     db = client.ip_data
 
-    ua = UserAgent()
-    document = load_domains(sys.argv[1])
-    urls = match_all_domains(document)
-
-    for url in urls:
-        print(u'INFO: the url {} is beeing processed'.format(url))
-        add_domains(db, url)
-        domains = get_domains(db, ua, url)
-
-        if domains is not None:
-            for domain in domains:
-                add_domains(db, domain)
+    for domain in domains:
+        print(u'INFO: the domain {} is beeing processed'.format(domain))
+        add_domains(db, domain)
 
 
 if __name__ == '__main__':
-    main()
+    jobs = []
+    threads = 32
+    document = load_domains(sys.argv[1])
+    domains = match_all_domains(document)
+    amount = round(len(domains) / threads)
+    limit = amount
+    print(limit, amount)
+
+    for f in range(threads):
+        j = multiprocessing.Process(target=worker, args=((domains[limit - amount:limit]),))
+        jobs.append(j)
+        j.start()
+        limit = limit + amount
+
+    for j in jobs:
+        j.join()
+        print('exitcode = {}'.format(j.exitcode))

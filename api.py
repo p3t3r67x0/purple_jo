@@ -103,7 +103,7 @@ def fetch_latest_dns():
 
 
 def fetch_latest_asn():
-    return mongo.db.lookup.find({'name': {'$exists': True}},
+    return mongo.db.lookup.find({'ip': {'$exists': True}},
                                 {'_id': 0}).sort([('updated', -1)]).limit(30)
 
 

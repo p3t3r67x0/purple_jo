@@ -23,7 +23,7 @@ def connect():
 
 def update_data(db, ip, now, ports):
     try:
-        res = db.dns.update_one({'a_record': {'$in': [ip]}}, {'$set': {
+        res = db.dns.update_many({'a_record': {'$in': [ip]}}, {'$set': {
                                  'updated': now}, '$addToSet': {'ports': ports}
                                  }, upsert=False)
         if res.modified_count > 0:

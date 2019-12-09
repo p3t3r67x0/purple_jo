@@ -4,6 +4,7 @@
 
 import re
 import sys
+import time
 import requests
 import multiprocessing
 
@@ -25,6 +26,7 @@ from requests.exceptions import TooManyRedirects
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import AutoReconnect
 
 from idna.core import IDNAError
 from datetime import datetime
@@ -46,6 +48,8 @@ def add_domains(db, domain):
         post_id = db.dns.insert_one(post).inserted_id
 
         print(u'INFO: the domain {} was added with the id {}'.format(domain, post_id))
+    except AutoReconnect:
+        time.sleep(30)
     except DuplicateKeyError:
         return
 
@@ -122,6 +126,7 @@ def worker(domains):
     for domain in domains:
         print(u'INFO: the domain {} is beeing processed'.format(domain))
         add_domains(db, domain)
+        domains.remove(domain)
 
 
 if __name__ == '__main__':

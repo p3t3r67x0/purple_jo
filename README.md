@@ -39,6 +39,9 @@ Example output of latest ASN entries
 ## Build Setup
 
 ```bash
+# install build dependencies
+sudo apt install python3 python3-dev
+
 # create a virtualenv
 virtualenv -p /usr/bin/python3.6 venv
 

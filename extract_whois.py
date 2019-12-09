@@ -7,6 +7,8 @@ from ipwhois.net import Net
 from ipwhois.asn import ASNOrigin, IPASN
 from ipwhois.exceptions import ASNOriginLookupError
 
+from ipaddress import AddressValueError
+
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 from pymongo.errors import DocumentTooLarge
@@ -36,7 +38,7 @@ def update_data_dns(db, ip, domain, post):
                 print(u'INFO: updated dns whois entry for domain {}'.format(domain))
         else:
             print('INFO: IP {} is not in subnet {}'.format(ip, post['whois']['asn_cidr']))
-    except DuplicateKeyError:
+    except (AddressValueError, DuplicateKeyError):
         pass
 
 

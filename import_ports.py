@@ -27,7 +27,9 @@ def update_data(db, ip, now, ports):
                                  'updated': now}, '$addToSet': {'ports': ports}
                                  }, upsert=False)
         if res.modified_count > 0:
-            print(u'INFO: updated ports for ip {}'.format(ip))
+            print('INFO: updated ports for ip {} modified {} documents'.format(ip, res.modified_count))
+        else:
+            print('INFO: nothing to modify for ip {}'.format(ip))
     except DuplicateKeyError:
         pass
 
@@ -41,6 +43,8 @@ if __name__ == '__main__':
     now = datetime.utcnow()
 
     for port in ports:
+        ports.remove(port)
+
         for p in port['ports']:
             if p:
                 data = {'port': p['port'], 'proto': p['proto'],

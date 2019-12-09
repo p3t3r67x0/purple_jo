@@ -127,7 +127,7 @@ def explore_data():
 
 @app.route('/asn/<string:asn>', methods=['GET'])
 def fetch_data_asn(asn):
-    p = re.compile(r'[a-z]', re.IGNORECASE)
+    p = re.compile(r'[a-z:]', re.IGNORECASE)
     data = list(fetch_all_asn(p.sub('', asn.strip())))
 
     if data:

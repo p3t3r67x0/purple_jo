@@ -40,50 +40,62 @@ def fetch_match_condition(condition, query):
     if query is not None:
         if condition == 'registry':
             return mongo.db.dns.find({'whois': {'$exists': True},
-                                      'whois.asn_registry': query}, {'_id': 0}).limit(30)
+                                      'whois.asn_registry': query}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'port':
             return mongo.db.dns.find({'ports': {'$exists': True},
-                                      'ports.port': int(query)}, {'_id': 0}).limit(30)
+                                      'ports.port': int(query)}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'status':
             return mongo.db.dns.find({'header': {'$exists': True},
-                                      'header.status': query}, {'_id': 0}).limit(30)
+                                      'header.status': query}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'ssl':
             return mongo.db.dns.find({'ssl_cert.subject': {'$exists': True},
                                       'ssl_cert.subject.common_name': {
-                                      '$regex': query.lower()}}, {'_id': 0}).limit(30)
+                                      '$regex': query.lower()}}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'app':
             return mongo.db.dns.find({'header': {'$exists': True}, 'header.x-powered-by': {
                                       '$regex': query.lower(), '$options': 'i'}}, {
-                                      '_id': 0}).limit(30)
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'country':
             return mongo.db.dns.find({'whois': {'$exists': True},
                                       'whois.asn_country_code': query.upper()}, {
-                                      '_id': 0}).limit(30)
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+        elif condition == 'banner':
+            return mongo.db.dns.find({'banner': {'$regex': query.lower(), '$options': 'i'}}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+        elif condition == 'asn':
+            return mongo.db.dns.find({'whois': {'$exists': True}, 'whois.asn': query}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'org':
             return mongo.db.dns.find({'whois': {'$exists': True}, 'whois.asn_description': {
-                                      '$regex': query.lower(), '$options': 'ig'}}, {
-                                      '_id': 0}).limit(30)
+                                      '$regex': query.lower(), '$options': 'i'}}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'cidr':
             return mongo.db.dns.find({'whois': {'$exists': True},
-                                      'whois.asn_cidr': query}, {'_id': 0}).limit(30)
+                                      'whois.asn_cidr': query}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'cname':
             return mongo.db.dns.find({'cname_record': {'$exists': True},
                                       'cname_record.target': {'$in': [query.lower()]}}, {
-                                      '_id': 0}).limit(30)
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'mx':
             return mongo.db.dns.find({'mx_record': {'$exists': True},
                                       'mx_record.exchange': {'$in': [query.lower()]}}, {
-                                      '_id': 0}).limit(30)
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'server':
             return mongo.db.dns.find({'header': {'$exists': True}, 'header.server': {
                                       '$regex': query.lower(), '$options': 'i'}}, {
-                                      '_id': 0}).limit(30)
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'site':
-            return mongo.db.dns.find({'domain': query.lower()}, {'_id': 0}).limit(30)
+            return mongo.db.dns.find({'domain': query.lower()}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
 
 
 def fetch_all_prefix(prefix):
-    return mongo.db.lookup.find({'cidr': {'$in': [prefix]}}, {'_id': 0}).limit(30)
+    return mongo.db.lookup.find({'cidr': {'$in': [prefix]}}, {'_id': 0}).sort([('updated', -1)]).limit(30)
 
 
 def fetch_all_asn(asn):

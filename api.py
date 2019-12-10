@@ -99,7 +99,7 @@ def fetch_all_prefix(prefix):
 
 
 def fetch_all_asn(asn):
-    return mongo.db.dns.find({'whois.asn': asn}, {'_id': 0}).limit(30)
+    return mongo.lookup.dns.find({'whois.asn': asn}, {'_id': 0}).limit(5)
 
 
 def fetch_all_dns(domain):

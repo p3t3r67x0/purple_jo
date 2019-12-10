@@ -10,6 +10,7 @@ from ipwhois.exceptions import ASNOriginLookupError
 from ipaddress import AddressValueError
 
 from pymongo import MongoClient
+from pymongo.errors import CursorNotFound
 from pymongo.errors import DuplicateKeyError
 from pymongo.errors import DocumentTooLarge
 
@@ -44,9 +45,9 @@ def update_data_dns(db, ip, domain, post):
 
 def update_data_lookup(db, asn, post):
     try:
-        db.lookup.update_one({'asn': asn}, {'$set': post, '$unset': {
-            'subnet': 0}}, upsert=False)
-        print(u'INFO: updated dns whois and cidr entry for AS{}'.format(asn))
+        res = db.lookup.update_many({'asn': asn}, {'$set': post, '$unset': {
+                               'subnet': 0}}, upsert=False)
+        print(u'INFO: updated dns whois and cidr entry for AS{}, {} document modified'.format(asn, res.modified_count))
     except (DocumentTooLarge, DuplicateKeyError):
         pass
 
@@ -62,18 +63,18 @@ def get_whois(ip):
 
 def get_cidr(ip, asn):
     try:
-        cidr = []
+        x = []
 
         cidr = ASNOrigin(Net(ip)).lookup(
             asn=str(asn), retry_count=10, asn_methods=['whois'])
 
         if cidr and len(cidr['nets']) > 0:
             for c in cidr['nets']:
-                cidr.append(c['cidr'])
+                x.append(c['cidr'])
 
-        print(cidr)
+        return x
     except ASNOriginLookupError:
-        cidr = None
+        return None
 
 
 def argparser():
@@ -92,15 +93,22 @@ if __name__ == '__main__':
     now = datetime.utcnow()
 
     if args.collection == 'lookup':
-        for asn in retrieve_asns(db):
-            whois = get_whois(asn['ip'])
-            cidr = get_cidr(asn['ip'], asn['asn'])
+        try:
+            for asn in retrieve_asns(db):
+                whois = get_whois(asn['ip'])
+                cidr = get_cidr(asn['ip'], asn['asn'])
 
-            if whois and cidr and len(whois) > 0:
-                update_data_lookup(db, asn['asn'], {'updated': now, 'cidr': cidr, 'whois': whois})
+                if whois and cidr and len(whois) > 0:
+                    update_data_lookup(db, asn['asn'], {'updated': now, 'cidr': cidr, 'whois': whois})
+        except CursorNotFound:
+            pass
+
     elif args.collection == 'dns':
-        for dns in retrieve_dns(db):
-            whois = get_whois(dns['a_record'][0])
+        try:
+            for dns in retrieve_dns(db):
+                whois = get_whois(dns['a_record'][0])
 
-            if whois and len(whois) > 0:
-                update_data_dns(db, dns['a_record'][0], dns['domain'], {'updated': now, 'whois': whois})
+                if whois and len(whois) > 0:
+                    update_data_dns(db, dns['a_record'][0], dns['domain'], {'updated': now, 'whois': whois})
+        except CursorNotFound:
+            pass

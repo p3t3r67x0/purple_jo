@@ -40,7 +40,7 @@ Example output of latest ASN entries
 
 ```bash
 # install build dependencies
-sudo apt install python3 python3-dev
+sudo apt install python3 python3-dev gcc
 
 # create a virtualenv
 virtualenv -p /usr/bin/python3.6 venv

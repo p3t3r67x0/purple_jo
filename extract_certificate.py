@@ -8,6 +8,7 @@ import socket
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 from pymongo.errors import ServerSelectionTimeoutError
+from pymongo.errors import NotMasterError
 
 from datetime import datetime
 from ssl import SSLError
@@ -30,7 +31,7 @@ def update_data(db, doc_id, domain, post):
     try:
         db.dns.update_one({'_id': doc_id}, {'$set': post}, upsert=False)
         print(u'INFO: updated domain {} ssl cert'.format(domain))
-    except (ServerSelectionTimeoutError, DuplicateKeyError):
+    except (ServerSelectionTimeoutError, NotMasterError, DuplicateKeyError):
         pass
 
 

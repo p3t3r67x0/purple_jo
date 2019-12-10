@@ -4,9 +4,11 @@ import sys
 import json
 import argparse
 import multiprocessing
+import time
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import AutoReconnect
 
 from datetime import datetime
 
@@ -40,6 +42,8 @@ def update_data(db, col, ip, now, ports):
                 print('INFO: certated document for ip {} with id {}'.format(ip, res.inserted_id))
             else:
                 print('INFO: nothing to modify for ip {}'.format(ip))
+    except AutoReconnect:
+        time.sleep(30)
     except DuplicateKeyError:
         pass
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
+import sys
 import argparse
 import ipaddress
+import multiprocessing
 
 from ipwhois.net import Net
 from ipwhois.asn import ASNOrigin, IPASN
@@ -21,13 +23,13 @@ def connect():
     return MongoClient('mongodb://127.0.0.1:27017')
 
 
-def retrieve_dns(db):
+def retrieve_dns(db, limit, skip):
     return db.dns.find({'whois': {'$exists': False},
-                        'a_record.0': {'$exists': True}})
+                        'a_record.0': {'$exists': True}})[limit - skip:limit]
 
 
-def retrieve_asns(db):
-    return db.lookup.find({'whois': {'$exists': False}})
+def retrieve_asns(db, limit, skip):
+    return db.lookup.find({'whois': {'$exists': False}})[limit - skip:limit]
 
 
 def update_data_dns(db, ip, domain, post):
@@ -85,16 +87,14 @@ def argparser():
     return args
 
 
-if __name__ == '__main__':
-    args = argparser()
-
+def worker(limit, skip, col):
     client = connect()
     db = client.ip_data
     now = datetime.utcnow()
 
-    if args.collection == 'lookup':
+    if col == 'lookup':
         try:
-            for asn in retrieve_asns(db):
+            for asn in retrieve_asns(db, limit, skip):
                 whois = get_whois(asn['ip'])
                 cidr = get_cidr(asn['ip'], asn['asn'])
 
@@ -103,12 +103,36 @@ if __name__ == '__main__':
         except CursorNotFound:
             pass
 
-    elif args.collection == 'dns':
+    elif col == 'dns':
         try:
-            for dns in retrieve_dns(db):
+            for dns in retrieve_dns(db, limit, skip):
                 whois = get_whois(dns['a_record'][0])
 
                 if whois and len(whois) > 0:
                     update_data_dns(db, dns['a_record'][0], dns['domain'], {'updated': now, 'whois': whois})
         except CursorNotFound:
             pass
+
+
+if __name__ == '__main__':
+    args = argparser()
+    client = connect()
+    db = client.ip_data
+
+    jobs = []
+    threads = 32
+    amount = round(db[args.collection].estimated_document_count() / threads)
+    limit = amount
+
+    print(limit, amount)
+
+
+    for f in range(threads):
+        j = multiprocessing.Process(target=worker, args=(limit, amount, args.collection))
+        jobs.append(j)
+        j.start()
+        limit = limit + amount
+
+    for j in jobs:
+        j.join()
+        print('exitcode = {}'.format(j.exitcode))

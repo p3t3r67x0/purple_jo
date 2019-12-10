@@ -3,6 +3,7 @@
 import sys
 import json
 import argparse
+import multiprocessing
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -52,19 +53,9 @@ def argparser():
     return args
 
 
-if __name__ == '__main__':
+def worker(col, ports):
     client = connect()
     db = client.ip_data
-    args = argparser()
-
-    if args.collection == 'lookup':
-        col = 'lookup'
-    elif args.collection == 'dns':
-        col = 'dns'
-
-    document = load_document(args.input)
-    ports = json.loads(document.strip())
-    now = datetime.utcnow()
 
     for port in ports:
         ports.remove(port)
@@ -73,4 +64,27 @@ if __name__ == '__main__':
             if p:
                 data = {'port': p['port'], 'proto': p['proto'],
                         'status': p['status'], 'reason': p['reason']}
-                update_data(db, col, port['ip'], now, data)
+                update_data(db, col, port['ip'], datetime.utcnow(), data)
+
+    return
+
+
+if __name__ == '__main__':
+    jobs = []
+    threads = 64
+    args = argparser()
+    document = load_document(args.input)
+    ports = json.loads(document.strip())
+    amount = round(len(ports) / threads)
+    limit = amount
+    print(limit, amount)
+
+    for f in range(threads):
+        j = multiprocessing.Process(target=worker, args=(args.collection, (ports[limit - amount:limit]),))
+        jobs.append(j)
+        j.start()
+        limit = limit + amount
+
+    for j in jobs:
+        j.join()
+        print('exitcode = {}'.format(j.exitcode))

@@ -33,8 +33,9 @@ def update_data(db, doc_id, domain, post):
 
 def retrieve_domains(db, skip, limit):
     return db.dns.find({'header': {'$exists': False},
-                        'header_scan_failed': {'$exists': False}
-                        }).sort([('$natural', -1)])[limit - skip:limit]
+                        'header_scan_failed': {'$exists': False},
+                        'ports.port': {'$in': [80, 443]}}).sort(
+                        [('$natural', -1)])[limit - skip:limit]
 
 
 def grab_http_header(domain):

@@ -29,9 +29,10 @@ def connect():
 def update_data(db, domain, record_type, now, record):
     try:
         # print({'domain': domain}, {'$set': {'updated': now}, '$addToSet': {record_type: record}})
-        res = db.dns.update_one({'domain': domain}, {'$set': {
-                                 'updated': now}, '$addToSet': {
-                                 record_type: record}}, upsert=False)
+        res = db.dns.update_one({'domain': domain, record_type:
+                                 {'$not': {'$in': [record]}}},
+                                 {'$set': {'updated': now}, '$addToSet':
+                                 {record_type: record}}, upsert=False)
         if res.modified_count > 0:
             print('INFO: updated {} document type {} for domain {}'.format(res.modified_count, record_type, domain))
     except AutoReconnect:

@@ -35,6 +35,8 @@ def update_data(db, domain, record_type, now, record):
                                  {record_type: record}}, upsert=False)
         if res.modified_count > 0:
             print('INFO: updated {} document type {} for domain {}'.format(res.modified_count, record_type, domain))
+        else:
+            print('INFO: nothing to do for type {} of record {}'.format(record_type, record))
     except AutoReconnect:
         time.sleep(30)
     except DuplicateKeyError:

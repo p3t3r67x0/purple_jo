@@ -10,13 +10,14 @@ from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 from pymongo.errors import AutoReconnect
 
+from json.decoder import JSONDecodeError
 from datetime import datetime
 
 
 def load_document(filename):
     try:
         with open(filename, 'r') as f:
-            return f.read()
+            return f.readlines()
     except IOError:
         sys.exit(1)
 
@@ -64,11 +65,19 @@ def worker(col, ports):
     for port in ports:
         ports.remove(port)
 
-        for p in port['ports']:
-            if p:
-                data = {'port': p['port'], 'proto': p['proto'],
-                        'status': p['status'], 'reason': p['reason']}
-                update_data(db, col, port['ip'], datetime.utcnow(), data)
+        try:
+            p = json.loads(port.strip().strip(',').encode("utf-8"))
+        except JSONDecodeError:
+            return
+
+        r = p['ports'][0]
+
+        if r:
+            data = {'port': r['port'], 'proto': r['proto'],
+                    'status': r['status'], 'reason': r['reason']}
+
+            print(data)
+            update_data(db, col, p['ip'], datetime.utcnow(), data)
 
     return
 
@@ -77,14 +86,17 @@ if __name__ == '__main__':
     jobs = []
     threads = 64
     args = argparser()
-    document = load_document(args.input)
-    ports = json.loads(document.strip())
-    amount = round(len(ports) / threads)
+    records = load_document(args.input)
+    amount = len(records) / threads
+
+    if amount < 1:
+        amount = 1
+
     limit = amount
     print(limit, amount)
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(args.collection, (ports[limit - amount:limit]),))
+        j = multiprocessing.Process(target=worker, args=(args.collection, (records[limit - amount:limit]),))
         jobs.append(j)
         j.start()
         limit = limit + amount

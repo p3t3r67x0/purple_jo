@@ -77,7 +77,7 @@ def worker(col, ports):
                     'status': r['status'], 'reason': r['reason']}
 
             print(data)
-                update_data(db, col, p['ip'], datetime.utcnow(), data)
+            update_data(db, col, p['ip'], datetime.utcnow(), data)
 
     return
 

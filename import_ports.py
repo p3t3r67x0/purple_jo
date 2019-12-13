@@ -77,7 +77,7 @@ def worker(col, ports):
                     'status': r['status'], 'reason': r['reason']}
 
             print(data)
-            update_data(db, col, p['ip'], datetime.utcnow(), data)
+                update_data(db, col, p['ip'], datetime.utcnow(), data)
 
     return
 
@@ -87,7 +87,7 @@ if __name__ == '__main__':
     threads = 64
     args = argparser()
     records = load_document(args.input)
-    amount = len(records) / threads
+    amount = round(len(records) / threads)
 
     if amount < 1:
         amount = 1

@@ -35,10 +35,14 @@ def retrieve_asns(db, limit, skip):
 def update_data_dns(db, ip, domain, post):
     try:
         if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(post['whois']['asn_cidr']):
-            res = db.dns.update_many({'a_record': {'$in': [ip]}}, {'$set': post}, upsert=False)
+            res = db.dns.update_many({'a_record': {'$in': [ip]},
+                                      'whois': {'$exists': False}}, {
+                                      '$set': post}, upsert=False)
 
             if res.modified_count > 0:
                 print(u'INFO: updated {} whois entries for domain {}'.format(res.modified_count, domain))
+            else:
+                print(u'INFO: nothing to update for domain {}'.format(domain))
         else:
             print('INFO: IP {} is not in subnet {}'.format(ip, post['whois']['asn_cidr']))
     except (AddressValueError, DuplicateKeyError):

@@ -4,6 +4,7 @@ import pyqrcode
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import CursorNotFound
 
 from datetime import datetime
 
@@ -36,7 +37,12 @@ def main():
     db = client.ip_data
     now = datetime.utcnow()
 
-    for domain in retrieve_domains(db):
+    try:
+        domains = retrieve_domains(db)
+    except CursorNotFound:
+        return
+
+    for domain in domains:
         qrcode = generate_qrcode(domain['_id'], domain['domain'])
         update_data(db, domain['domain'], {'updated': now, 'qrcode': qrcode})
 

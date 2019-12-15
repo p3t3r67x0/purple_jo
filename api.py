@@ -148,8 +148,8 @@ def fetch_data_asn(asn):
         return [{}], status.HTTP_404_NOT_FOUND
 
 
-@app.route('/dns', methods=['GET'])
 @app.route('/dns/', methods=['GET'])
+@app.route('/dns', methods=['GET'])
 def explore_dns():
     return jsonify(list(fetch_latest_dns()))
 

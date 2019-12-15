@@ -5,6 +5,7 @@ import multiprocessing
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import CursorNotFound
 from pymongo.errors import WriteError
 
 from requests.exceptions import InvalidURL
@@ -63,7 +64,12 @@ def worker(skip, limit):
     client = connect()
     db = client.ip_data
 
-    for domain in retrieve_domains(db, limit, skip):
+    try:
+        domains = retrieve_domains(db, limit, skip)
+    except CursorNotFound:
+        return
+
+    for domain in domains:
         print(u'INFO: scanning {} header'.format(domain['domain']))
 
         header = grab_http_header(domain['domain'])
@@ -76,14 +82,16 @@ def worker(skip, limit):
             update_data(db, domain['_id'], domain['domain'],
                         {'header_scan_failed': datetime.utcnow()})
 
+    return
+
 
 if __name__ == '__main__':
     client = connect()
     db = client.ip_data
 
     jobs = []
-    threads = 16
-    amount = db.dns.estimated_document_count() / threads
+    threads = 96
+    amount = round(db.dns.estimated_document_count() / (threads + 50000))
     limit = amount
 
     for f in range(threads):

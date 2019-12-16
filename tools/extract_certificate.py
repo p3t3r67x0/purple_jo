@@ -4,6 +4,7 @@
 import re
 import ssl
 import socket
+import argparse
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -17,8 +18,8 @@ from ssl import SSLError
 socket.setdefaulttimeout(1)
 
 
-def connect():
-    return MongoClient('mongodb://127.0.0.1:27017')
+def connect(host):
+    return MongoClient('mongodb://{}:27017'.format(host))
 
 
 def retrieve_domains(db):
@@ -92,8 +93,17 @@ def extract_certificate(domain):
     return post
 
 
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--host', help='set the host', type=str, required=True)
+    args = parser.parse_args()
+
+    return args
+
+
 def main():
-    client = connect()
+    args = argparser()
+    client = connect(args.host)
     db = client.ip_data
 
     for domain in retrieve_domains(db):

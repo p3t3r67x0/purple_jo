@@ -5,6 +5,7 @@ import json
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import JavascriptException
 # from selenium.common.exceptions import InvalidArgumentException
 from selenium.common.exceptions import StaleElementReferenceException
@@ -28,8 +29,12 @@ def retrieve_domains(db):
 
 def update_data(db, domain, post):
     try:
-        db.dns.update_one({'domain': domain}, {'$set': post}, upsert=False)
-        print(u'INFO: updated domain {} image path'.format(domain))
+        res = db.dns.update_one({'domain': domain}, {'$set': post}, upsert=False)
+
+        if res.modified_count > 0:
+            print(u'INFO: updated domain {} image path'.format(domain))
+        else:
+            update_data_error(db, domain)
     except DuplicateKeyError:
         return
 
@@ -59,7 +64,7 @@ def main():
 
     for domain in domains:
         url = 'https://{}'.format(domain['domain'])
-        print(u'INFO: taking screenshot from domain {}'.format(domain['domain']))
+        print(u'INFO: proceed with domain {}'.format(domain['domain']))
 
         options = webdriver.ChromeOptions()
         options.binary_location = '/usr/bin/chromium-browser'
@@ -69,7 +74,12 @@ def main():
         options.add_argument('start-maximized')
 
         driver = webdriver.Chrome(options=options)
-        driver.get(url)
+        driver.set_page_load_timeout(1)
+
+        try:
+            driver.get(url)
+        except TimeoutException:
+            continue
 
         for item in driver.find_elements(By.XPATH, '//script'):
             try:

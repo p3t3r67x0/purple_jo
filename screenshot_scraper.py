@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 import requests
-import json
+
+from requests.exceptions import SSLError
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -45,7 +46,10 @@ def update_data_error(db, domain):
 
 
 def request_javasript(url):
-    r = requests.get(url)
+    try:
+        r = requests.get(url)
+    except SSLError:
+        return ''
 
     if r.status_code == 200:
         return r.text.strip('\n')

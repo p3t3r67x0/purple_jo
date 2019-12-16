@@ -2,8 +2,8 @@
 
 import sys
 import json
-import argparse
 import multiprocessing
+import argparse
 import time
 
 from pymongo import MongoClient
@@ -43,16 +43,6 @@ def update_data(db, domain, record_type, now, record):
         pass
 
 
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input', help='set input file name', type=str, required=True)
-    parser.add_argument('--worker', help='set worker count', type=int, required=True)
-    parser.add_argument('--host', help='set the host', type=str, required=True)
-    args = parser.parse_args()
-
-    return args
-
-
 def worker(host, records):
     client = connect(host)
     db = client.ip_data
@@ -88,6 +78,16 @@ def worker(host, records):
             update_data(db, domain, 'soa_record', datetime.utcnow(), r['data'].lower().strip('.'))
 
     return
+
+
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', help='set input file name', type=str, required=True)
+    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--host', help='set the host', type=str, required=True)
+    args = parser.parse_args()
+
+    return args
 
 
 if __name__ == '__main__':

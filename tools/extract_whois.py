@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-import sys
 import argparse
 import ipaddress
 import multiprocessing
+import argparse
 
 from ipwhois.net import Net
 from ipwhois.asn import ASNOrigin, IPASN
@@ -19,8 +19,8 @@ from pymongo.errors import DocumentTooLarge
 from datetime import datetime
 
 
-def connect():
-    return MongoClient('mongodb://127.0.0.1:27017')
+def connect(host):
+    return MongoClient('mongodb://{}:27017'.format(host))
 
 
 def retrieve_dns(db, limit, skip):
@@ -83,16 +83,8 @@ def get_cidr(ip, asn):
         return None
 
 
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--collection', '-c', help='set collection to update')
-    args = parser.parse_args()
-
-    return args
-
-
-def worker(limit, skip, col):
-    client = connect()
+def worker(host, limit, skip, col):
+    client = connect(host)
     db = client.ip_data
     now = datetime.utcnow()
 
@@ -117,22 +109,32 @@ def worker(limit, skip, col):
         except CursorNotFound:
             pass
 
+    return
+
+
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--collection', help='set collection to update', type=str, required=True)
+    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--host', help='set the host', type=str, required=True)
+    args = parser.parse_args()
+
+    return args
+
 
 if __name__ == '__main__':
     args = argparser()
-    client = connect()
+    client = connect(args.host)
     db = client.ip_data
 
     jobs = []
-    threads = 32
-    amount = round(db[args.collection].estimated_document_count() / threads)
+    threads = args.worker
+    amount = round(db[args.collection].estimated_document_count() / (threads + 50000))
     limit = amount
-
     print(limit, amount)
 
-
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(limit, amount, args.collection))
+        j = multiprocessing.Process(target=worker, args=(args.host, limit, amount, args.collection))
         jobs.append(j)
         j.start()
         limit = limit + amount

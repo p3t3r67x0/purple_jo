@@ -2,8 +2,8 @@
 
 import sys
 import json
-import argparse
 import multiprocessing
+import argparse
 import time
 
 from pymongo import MongoClient
@@ -22,8 +22,8 @@ def load_document(filename):
         sys.exit(1)
 
 
-def connect():
-    return MongoClient('mongodb://127.0.0.1:27017')
+def connect(host):
+    return MongoClient('mongodb://{}:27017'.format(host))
 
 
 def update_data(db, col, ip, now, ports):
@@ -49,17 +49,8 @@ def update_data(db, col, ip, now, ports):
         pass
 
 
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--collection', '-c', help='set collection to update')
-    parser.add_argument('--input', '-i', help='set input file name')
-    args = parser.parse_args()
-
-    return args
-
-
-def worker(col, ports):
-    client = connect()
+def worker(host, col, ports):
+    client = connect(host)
     db = client.ip_data
 
     for port in ports:
@@ -82,10 +73,21 @@ def worker(col, ports):
     return
 
 
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--collection', help='set collection to update', type=str, required=True)
+    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--input', help='set input file name', type=str, required=True)
+    parser.add_argument('--host', help='set the host', type=str, required=True)
+    args = parser.parse_args()
+
+    return args
+
+
 if __name__ == '__main__':
     jobs = []
-    threads = 64
     args = argparser()
+    threads = args.worker
     records = load_document(args.input)
     amount = round(len(records) / threads)
 
@@ -96,7 +98,7 @@ if __name__ == '__main__':
     print(limit, amount)
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(args.collection, (records[limit - amount:limit]),))
+        j = multiprocessing.Process(target=worker, args=(args.host, args.collection, (records[limit - amount:limit]),))
         jobs.append(j)
         j.start()
         limit = limit + amount

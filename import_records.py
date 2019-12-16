@@ -22,8 +22,8 @@ def load_document(filename):
         sys.exit(1)
 
 
-def connect():
-    return MongoClient('mongodb://127.0.0.1:27017')
+def connect(host):
+    return MongoClient('mongodb://{}:27017'.format(host))
 
 
 def update_data(db, domain, record_type, now, record):
@@ -45,14 +45,16 @@ def update_data(db, domain, record_type, now, record):
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input', '-i', help='set input file name')
+    parser.add_argument('--input', help='set input file name', type=str, required=True)
+    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--host', help='set the host', type=str, required=True)
     args = parser.parse_args()
 
     return args
 
 
-def worker(records):
-    client = connect()
+def worker(host, records):
+    client = connect(host)
     db = client.ip_data
 
     for record in records:
@@ -90,15 +92,15 @@ def worker(records):
 
 if __name__ == '__main__':
     jobs = []
-    threads = 64
     args = argparser()
+    threads = args.worker
     records = load_document(args.input)
-    amount = round(len(records) / threads)
+    amount = round(len(records) / (threads + 5000))
     limit = amount
     print(limit, amount)
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=((records[limit - amount:limit]),))
+        j = multiprocessing.Process(target=worker, args=(args.host, (records[limit - amount:limit]),))
         jobs.append(j)
         j.start()
         limit = limit + amount

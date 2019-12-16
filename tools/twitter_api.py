@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import twitter
+import argparse
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -11,9 +12,9 @@ from pymongo.errors import DuplicateKeyError
 from datetime import datetime
 
 
-def get_config():
+def get_config(config):
     path = os.path.abspath(os.path.join(
-        os.path.dirname(__file__), 'config.json'))
+        os.path.dirname(__file__), config))
     return ''.join(load_document(path))
 
 
@@ -25,8 +26,8 @@ def load_document(filename):
         sys.exit(1)
 
 
-def connect():
-    return MongoClient('mongodb://127.0.0.1:27017')
+def connect(host):
+    return MongoClient('mongodb://{}:27017'.format(host))
 
 
 def connect_twitter(config):
@@ -55,12 +56,22 @@ def add_url(db, url):
         return
 
 
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', help='set the host', type=str, required=True)
+    parser.add_argument('--host', help='set the host', type=str, required=True)
+    args = parser.parse_args()
+
+    return args
+
+
 def main():
-    client = connect()
+    args = argparser()
+    client = connect(args.host)
     db = client.url_data
     db.url.create_index('url', unique=True)
 
-    config = json.loads(get_config())
+    config = json.loads(get_config(args.config))
     api = connect_twitter(config)
     trends = get_trends(api)
 

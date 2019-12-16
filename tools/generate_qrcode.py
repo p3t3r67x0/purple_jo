@@ -2,6 +2,7 @@
 
 import pyqrcode
 import multiprocessing
+import argparse
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -10,8 +11,8 @@ from pymongo.errors import CursorNotFound
 from datetime import datetime
 
 
-def connect():
-    return MongoClient('mongodb://127.0.0.1:27017')
+def connect(host):
+    return MongoClient('mongodb://{}:27017'.format(host))
 
 
 def retrieve_domains(db, skip, limit):
@@ -33,8 +34,8 @@ def generate_qrcode(id, domain):
     return url.png_as_base64_str(scale=5, quiet_zone=0)
 
 
-def worker(skip, limit):
-    client = connect()
+def worker(host, skip, limit):
+    client = connect(host)
     db = client.ip_data
     now = datetime.utcnow()
 
@@ -50,17 +51,27 @@ def worker(skip, limit):
     return
 
 
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--host', help='set the host', type=str, required=True)
+    args = parser.parse_args()
+
+    return args
+
+
 if __name__ == '__main__':
-    client = connect()
+    args = argparser()
+    client = connect(args.host)
     db = client.ip_data
 
     jobs = []
-    threads = 96
-    amount = round(db.dns.estimated_document_count() / (threads + 500000))
+    threads = args.worker
+    amount = round(db.dns.estimated_document_count() / (threads + 50000))
     limit = amount
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(limit, amount))
+        j = multiprocessing.Process(target=worker, args=(args.host, limit, amount))
         jobs.append(j)
         j.start()
         limit = limit + amount

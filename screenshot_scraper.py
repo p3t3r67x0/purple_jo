@@ -10,6 +10,7 @@ from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import JavascriptException
 # from selenium.common.exceptions import InvalidArgumentException
 from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import UnexpectedAlertPresentException
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -88,7 +89,10 @@ def main():
         for item in driver.find_elements(By.XPATH, '//script'):
             try:
                 if item.get_attribute('src'):
-                    driver.execute_script(request_javasript(item.get_attribute('src')))
+                    try:
+                        driver.execute_script(request_javasript(item.get_attribute('src')))
+                    except UnexpectedAlertPresentException:
+                        continue
                 else:
                     driver.execute_script(item.text)
             except (JavascriptException, StaleElementReferenceException):

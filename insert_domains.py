@@ -7,6 +7,7 @@ import sys
 import time
 import requests
 import multiprocessing
+import argparse
 
 from lxml import html
 from urllib.parse import urljoin
@@ -32,8 +33,8 @@ from idna.core import IDNAError
 from datetime import datetime
 
 
-def connect():
-    return MongoClient('mongodb://127.0.0.1:27017')
+def connect(host):
+    return MongoClient('mongodb://{}:27017'.format(host))
 
 
 def load_domains(filename):
@@ -119,8 +120,8 @@ def match_domain(domain):
     return re.match(r'(?P<domain>[\w-]{1,63}\.?[\w\-.]{1,63}\.[\w\-\.]{2,}[\w-]?)', domain)
 
 
-def worker(domains):
-    client = connect()
+def worker(host, domains):
+    client = connect(host)
     db = client.ip_data
 
     for domain in domains:
@@ -129,17 +130,28 @@ def worker(domains):
         domains.remove(domain)
 
 
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', help='set input file name', type=str, required=True)
+    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--host', help='set the host', type=str, required=True)
+    args = parser.parse_args()
+
+    return args
+
+
 if __name__ == '__main__':
     jobs = []
-    threads = 32
-    document = load_domains(sys.argv[1])
+    args = argparser()
+    threads = args.worker
+    document = load_domains(args.input)
     domains = match_all_domains(document)
     amount = round(len(domains) / threads)
     limit = amount
     print(limit, amount)
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=((domains[limit - amount:limit]),))
+        j = multiprocessing.Process(target=worker, args=(args.host, (domains[limit - amount:limit]),))
         jobs.append(j)
         j.start()
         limit = limit + amount

@@ -3,6 +3,7 @@
 import os
 import pyasn
 import multiprocessing
+import argparse
 
 from datetime import datetime
 from pymongo import MongoClient
@@ -11,8 +12,8 @@ from pymongo import MongoClient
 AS_NAMES_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asn_names.json')
 
 
-def connect():
-    return MongoClient('mongodb://127.0.0.1:27017')
+def connect(host):
+    return MongoClient('mongodb://{}:27017'.format(host))
 
 
 def retrieve_ips(db, limit, skip):
@@ -27,8 +28,8 @@ def asn_lookup(ipv4):
     return {'name': name}
 
 
-def worker(skip, limit):
-    client = connect()
+def worker(host, skip, limit):
+    client = connect(host)
     db = client.ip_data
 
     for i in retrieve_ips(db, skip, limit):
@@ -41,17 +42,27 @@ def worker(skip, limit):
         print('INFO: updated document with ip {} and added asn name {}'.format(i['ip'], res['name']))
 
 
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--host', help='set the host', type=str, required=True)
+    args = parser.parse_args()
+
+    return args
+
+
 if __name__ == '__main__':
-    client = connect()
+    args = argparser()
+    client = connect(args.host)
     db = client.ip_data
 
     jobs = []
-    threads = 32
-    amount = db.lookup.estimated_document_count() / threads
+    threads = args.worker
+    amount = round(db.lookup.estimated_document_count() / (threads + 50000))
     limit = amount
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(limit, amount))
+        j = multiprocessing.Process(target=worker, args=(args.host, limit, amount))
         jobs.append(j)
         j.start()
         limit = limit + amount

@@ -16,7 +16,9 @@ def connect(host):
 
 
 def retrieve_domains(db, skip, limit):
-    return db.dns.find({'qrcode': {'$exists': False}}).sort([('updated', -1)])[limit - skip:limit]
+    return db.dns.find({'qrcode': {'$exists': False}, 'domain': {
+                        '$not': {'$regex': '.*(xn--).*'}}}).sort(
+                       [('updated', -1)])[limit - skip:limit]
 
 
 def update_data(db, domain, post):

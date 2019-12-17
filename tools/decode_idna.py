@@ -5,6 +5,7 @@ import argparse
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import CursorNotFound
 
 from idna.core import IDNAError
 from datetime import datetime
@@ -34,12 +35,15 @@ def argparser():
     return args
 
 
-if __name__ == '__main__':
+def main():
     args = argparser()
     client = connect(args.host)
     db = client.ip_data
 
-    domains = retrieve_domains(db)
+    try:
+        domains = retrieve_domains(db)
+    except CursorNotFound:
+        return
 
     for domain in domains:
         now = datetime.utcnow()
@@ -52,3 +56,7 @@ if __name__ == '__main__':
 
         if decoded_domain and idna_domain != decoded_domain:
             update_data(db, domain['_id'], decoded_domain, {'updated': now, 'domain': decoded_domain})
+
+
+if __name__ == '__main__':
+    main()

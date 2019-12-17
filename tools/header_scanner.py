@@ -15,6 +15,7 @@ from requests.exceptions import ChunkedEncodingError
 from requests.exceptions import ConnectionError
 
 from urllib3.exceptions import InvalidHeader
+from fake_useragent import UserAgent
 from datetime import datetime
 
 
@@ -40,11 +41,13 @@ def retrieve_domains(db, skip, limit):
 
 
 def grab_http_header(domain):
+    ua = UserAgent()
     headers = []
 
     try:
+        h = {'User-Agent': ua.random}
         r = requests.head(u'https://{}'.format(domain),
-                          timeout=1, allow_redirects=False)
+                          timeout=1, allow_redirects=False, headers=h)
     except (InvalidHeader, InvalidURL, ReadTimeout, ConnectionError, ChunkedEncodingError):
         return
 

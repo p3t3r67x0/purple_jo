@@ -88,7 +88,6 @@ def worker(host, skip, limit):
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--collection', help='set collection to update', type=str, required=True)
     parser.add_argument('--worker', help='set worker count', type=int, required=True)
     parser.add_argument('--host', help='set the host', type=str, required=True)
     args = parser.parse_args()

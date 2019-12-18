@@ -49,7 +49,7 @@ virtualenv -p /usr/bin/python3.6 venv
 . venv/bin/activate
 
 # install dependencies
-$ pip3 install -r requirements
+$ pip3 install -r requirements.txt
 
 # serve at 127.0.0.1:5000
 $ gunicorn --bind 127.0.0.1:5000 wsgi:app --access-logfile - --error-logfile - --log-level info

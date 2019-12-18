@@ -16,7 +16,7 @@ def connect(host):
 
 
 def retrieve_domains(db):
-    return db.dns.find({'domain': {'$regex': '.*(xn--).*'}})
+    return db.dns.find({'domain': {'$regex': '([\w\-]*\.)?(xn--)+[\w]*'}})
 
 
 def update_data(db, id, domain, post):

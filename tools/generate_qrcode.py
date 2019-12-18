@@ -16,8 +16,8 @@ def connect(host):
 
 
 def retrieve_domains(db, skip, limit):
-    return db.dns.find({'qrcode': {'$exists': False},
-                        'domain': {'$regex': '(?!(.*(xn--).*))'}}).sort(
+    return db.dns.find({'qrcode': {'$exists': False}, 'domain': {
+                        '$regex': '^(([\w]*\.)?(?!(xn--)+)[\w]*\.[\w]+)$'}}).sort(
                        [('updated', -1)])[limit - skip:limit]
 
 
@@ -69,7 +69,7 @@ if __name__ == '__main__':
 
     jobs = []
     threads = args.worker
-    amount = round(db.dns.estimated_document_count() / (threads + 50000))
+    amount = round(db.dns.estimated_document_count() / threads)
     limit = amount
 
     for f in range(threads):

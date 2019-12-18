@@ -43,12 +43,12 @@ def worker(host, skip, limit):
 
     try:
         domains = retrieve_domains(db, limit, skip)
+
+        for domain in domains:
+            qrcode = generate_qrcode(domain['_id'], domain['domain'])
+            update_data(db, domain['domain'], {'updated': now, 'qrcode': qrcode})
     except CursorNotFound:
         return
-
-    for domain in domains:
-        qrcode = generate_qrcode(domain['_id'], domain['domain'])
-        update_data(db, domain['domain'], {'updated': now, 'qrcode': qrcode})
 
     return
 

@@ -24,6 +24,7 @@ def connect(host):
 
 def retrieve_domains(db):
     return db.dns.find({'ssl_cert': {'$exists': False},
+                        'domain': {'$regex': '(?!(.*(xn--).*))'},
                         'cert_scan_failed': {'$exists': False}
                         }).sort([('$natural', -1)])
 

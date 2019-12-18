@@ -47,7 +47,7 @@ sudo apt install mongodb
 
 ```bash
 # install build dependencies
-sudo apt install virtualenv python3 python3-dev gcc
+sudo apt install chromium-chromedriver virtualenv python3 python3-dev gcc
 
 # create a virtualenv
 virtualenv -p /usr/bin/python3.6 venv

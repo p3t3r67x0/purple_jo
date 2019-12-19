@@ -111,7 +111,13 @@ def fetch_all_dns(domain):
 def fetch_latest_dns():
     return mongo.db.dns.find({'updated': {'$exists': True},
                               'scan_failed': {'$exists': False}},
-                             {'_id': 0}).sort([('updated', -1)]).limit(30)
+                              {'_id': 0}).sort([('updated', -1)]).limit(30)
+
+
+def fetch_latest_cidr():
+    return mongo.db.dns.find({'whois.asn_cidr': {'$exists': True}},
+                             {'_id': 0, 'whois.asn': 1, 'whois.asn_cidr': 1}).sort(
+                             [('updated', -1)]).limit(200)
 
 
 def fetch_latest_asn():
@@ -174,10 +180,20 @@ def fetch_data_prefix(sub, prefix):
         return [{}], status.HTTP_404_NOT_FOUND
 
 
-@app.route('/match/<string:query>', methods=['GET'])
+@app.route('/match/<path:query>', methods=['GET'])
 def fetch_data_condition(query):
     q = re.sub(r'[\'"(){}]', '', query).split(':')
     data = list(fetch_match_condition(q[0], q[1]))
+
+    if data:
+        return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
+
+
+@app.route('/cidr', methods=['GET'])
+def fetch_data_cidr():
+    data = list(fetch_latest_cidr())
 
     if data:
         return jsonify(data)

@@ -32,7 +32,7 @@ def update_data(db, domain, post):
 
 
 def generate_qrcode(id, domain):
-    url = pyqrcode.create('https://{}'.format(domain.encode('utf-8')))
+    url = pyqrcode.create('https://{}'.format(domain))
     return url.png_as_base64_str(scale=5, quiet_zone=0)
 
 

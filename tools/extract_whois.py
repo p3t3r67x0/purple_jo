@@ -129,7 +129,7 @@ if __name__ == '__main__':
 
     jobs = []
     threads = args.worker
-    amount = round(db[args.collection].estimated_document_count() / (threads + 50000))
+    amount = round(db[args.collection].estimated_document_count() / threads)
     limit = amount
     print(limit, amount)
 

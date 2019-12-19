@@ -6,6 +6,7 @@ from geoip2 import database
 
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import CursorNotFound
 
 from geoip2.errors import AddressNotFoundError
 
@@ -56,9 +57,14 @@ def main():
     client = connect(args.host)
     db = client.ip_data
 
-    for domain in retrieve_domains(db):
-        for ip in domain['a_record']:
-            extract_geodata(db, ip, args.input)
+    try:
+        domains = retrieve_domains(db)
+
+        for domain in domains:
+            for ip in domain['a_record']:
+                extract_geodata(db, ip, args.input)
+    except CursorNotFound:
+        return
 
 
 if __name__ == '__main__':

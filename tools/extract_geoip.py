@@ -28,8 +28,8 @@ def update_data(db, ip, post):
         pass
 
 
-def extract_geodata(db, ip):
-    reader = database.Reader('GeoLite2-Country.mmdb')
+def extract_geodata(db, ip, input):
+    reader = database.Reader(input)
 
     try:
         data = reader.country(ip)
@@ -44,6 +44,7 @@ def extract_geodata(db, ip):
 
 def argparser():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--input', help='set the input file', type=str, required=True)
     parser.add_argument('--host', help='set the host', type=str, required=True)
     args = parser.parse_args()
 
@@ -57,7 +58,7 @@ def main():
 
     for domain in retrieve_domains(db):
         for ip in domain['a_record']:
-            extract_geodata(db, ip)
+            extract_geodata(db, ip, args.input)
 
 
 if __name__ == '__main__':

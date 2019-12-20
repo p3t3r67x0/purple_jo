@@ -93,6 +93,10 @@ def fetch_match_condition(condition, query):
             return mongo.db.dns.find({'domain': query.lower()}, {
                                       '_id': 0}).sort([('updated', -1)]).limit(30)
 
+        elif condition == 'ipv4':
+            return mongo.db.dns.find({'a_record': query.lower()}, {
+                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+
 
 def fetch_all_prefix(prefix):
     return mongo.db.lookup.find({'cidr': {'$in': [prefix]}}, {'_id': 0}).sort([('updated', -1)]).limit(30)
@@ -115,9 +119,14 @@ def fetch_latest_dns():
 
 
 def fetch_latest_cidr():
-    return mongo.db.dns.find({'whois.asn_cidr': {'$exists': True}},
-                             {'_id': 0, 'whois.asn': 1, 'whois.asn_cidr': 1}).sort(
-                             [('updated', -1)])
+    return mongo.db.dns.find({'whois.asn_cidr': {'$exists': True}}, {'_id': 0,
+                              'whois.asn': 1, 'whois.asn_cidr': 1}).limit(200)
+
+
+def fetch_latest_ipv4():
+    return mongo.db.dns.find({'a_record': {'$exists': True}}, {'_id': 0,
+                              'a_record': 1, 'country_code': 1}).sort(
+                              [('updated', -1)]).limit(200)
 
 
 def fetch_latest_asn():
@@ -197,6 +206,26 @@ def fetch_data_cidr():
 
     if data:
         return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
+
+
+@app.route('/ipv4', methods=['GET'])
+def fetch_data_ipv4():
+    data = list(fetch_latest_ipv4())
+    v = []
+
+    for d in data:
+        if 'country_code' in d:
+            c = d['country_code']
+        else:
+            c = None
+
+        for r in d['a_record']:
+            v.append({'a_record': r, 'country_code': c})
+
+    if v:
+        return jsonify(v)
     else:
         return [{}], status.HTTP_404_NOT_FOUND
 

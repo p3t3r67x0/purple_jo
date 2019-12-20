@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import multiprocessing
 
 from geoip2 import database
 
@@ -15,13 +16,14 @@ def connect(host):
     return MongoClient('mongodb://{}:27017'.format(host))
 
 
-def retrieve_domains(db):
-    return db.dns.find({'a_record.0': {'$exists': True}, 'country_code': {'$exists': False}})
+def retrieve_domains(db, skip, limit):
+    return db.dns.find({'a_record.0': {'$exists': True},
+                        'country_code': {'$exists': False}})[limit - skip:limit]
 
 
 def update_data(db, ip, post):
     try:
-        res = db.dns.update_many({'a_record': {'$in': [ip]}}, {'$set': post}, upsert=False)
+        res = db.dns.update_one({'a_record': {'$in': [ip]}}, {'$set': post}, upsert=False)
 
         if res.modified_count > 0:
             print('INFO: updated ip {} country code {} with {} documents'.format(ip, post['country_code'], res.modified_count))
@@ -43,22 +45,13 @@ def extract_geodata(db, ip, input):
         update_data(db, ip, {'country_code': country_code})
 
 
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input', help='set the input file', type=str, required=True)
-    parser.add_argument('--host', help='set the host', type=str, required=True)
-    args = parser.parse_args()
-
-    return args
-
-
-def main():
+def worker(host, skip, limit):
     args = argparser()
     client = connect(args.host)
     db = client.ip_data
 
     try:
-        domains = retrieve_domains(db)
+        domains = retrieve_domains(db, limit, skip)
 
         for domain in domains:
             for ip in domain['a_record']:
@@ -67,5 +60,32 @@ def main():
         return
 
 
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--input', help='set the input file', type=str, required=True)
+    parser.add_argument('--host', help='set the host', type=str, required=True)
+    args = parser.parse_args()
+
+    return args
+
+
 if __name__ == '__main__':
-    main()
+    args = argparser()
+    client = connect(args.host)
+    db = client.ip_data
+
+    jobs = []
+    threads = args.worker
+    amount = round(db.dns.estimated_document_count() / threads)
+    limit = amount
+
+    for f in range(threads):
+        j = multiprocessing.Process(target=worker, args=(args.host, limit, amount))
+        jobs.append(j)
+        j.start()
+        limit = limit + amount
+
+    for j in jobs:
+        j.join()
+        print('exitcode = {}'.format(j.exitcode))

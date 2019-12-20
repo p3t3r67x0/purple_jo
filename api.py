@@ -132,7 +132,8 @@ def fetch_latest_ipv4():
 
 def fetch_latest_asn():
     return mongo.db.dns.find({'whois.asn': {'$exists': True}}, {'_id': 0,
-                              'whois.asn': 1, 'whois.asn_country_code': 1}).limit(200)
+                              'whois.asn': 1, 'whois.asn_country_code': 1}).sort(
+                              [('updated', -1)]).limit(200)
 
 
 def asn_lookup(ipv4):

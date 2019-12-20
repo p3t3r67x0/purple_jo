@@ -117,7 +117,7 @@ def fetch_latest_dns():
 def fetch_latest_cidr():
     return mongo.db.dns.find({'whois.asn_cidr': {'$exists': True}},
                              {'_id': 0, 'whois.asn': 1, 'whois.asn_cidr': 1}).sort(
-                             [('updated', -1)]).limit(200)
+                             [('updated', -1)])
 
 
 def fetch_latest_asn():

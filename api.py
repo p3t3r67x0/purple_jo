@@ -67,7 +67,8 @@ def fetch_match_condition(condition, query):
             return mongo.db.dns.find({'banner': {'$regex': query.lower(), '$options': 'i'}}, {
                                       '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'asn':
-            return mongo.db.dns.find({'whois': {'$exists': True}, 'whois.asn': query}, {
+            p = re.compile(r'[a-z:]', re.IGNORECASE)
+            return mongo.db.dns.find({'whois': {'$exists': True}, 'whois.asn': p.sub('', query.lower())}, {
                                       '_id': 0}).sort([('updated', -1)]).limit(30)
         elif condition == 'org':
             return mongo.db.dns.find({'whois': {'$exists': True}, 'whois.asn_description': {
@@ -130,8 +131,8 @@ def fetch_latest_ipv4():
 
 
 def fetch_latest_asn():
-    return mongo.db.lookup.find({'ip': {'$exists': True}},
-                                {'_id': 0}).sort([('updated', -1)]).limit(30)
+    return mongo.db.dns.find({'whois.asn': {'$exists': True}}, {'_id': 0,
+                              'whois.asn': 1, 'whois.asn_country_code': 1}).limit(200)
 
 
 def asn_lookup(ipv4):
@@ -140,27 +141,6 @@ def asn_lookup(ipv4):
     name = asndb.get_as_name(asn)
 
     return {'prefix': prefix, 'name': name, 'asn': asn}
-
-
-@app.route('/asn', methods=['GET'])
-def explore_data():
-    data = list(fetch_latest_asn())
-
-    if data:
-        return jsonify(data)
-    else:
-        return [{}], status.HTTP_404_NOT_FOUND
-
-
-@app.route('/asn/<string:asn>', methods=['GET'])
-def fetch_data_asn(asn):
-    p = re.compile(r'[a-z:]', re.IGNORECASE)
-    data = list(fetch_all_asn(p.sub('', asn.strip())))
-
-    if data:
-        return jsonify(data)
-    else:
-        return [{}], status.HTTP_404_NOT_FOUND
 
 
 @app.route('/dns/', methods=['GET'])
@@ -193,6 +173,16 @@ def fetch_data_prefix(sub, prefix):
 def fetch_data_condition(query):
     q = re.sub(r'[\'"(){}]', '', query).split(':')
     data = list(fetch_match_condition(q[0], q[1]))
+
+    if data:
+        return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
+
+
+@app.route('/asn', methods=['GET'])
+def fetch_data_asn():
+    data = list(fetch_latest_asn())
 
     if data:
         return jsonify(data)

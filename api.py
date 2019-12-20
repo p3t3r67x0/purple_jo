@@ -3,6 +3,7 @@
 import re
 import pyasn
 import socket
+import argparse
 import sys
 import os
 
@@ -19,8 +20,7 @@ AS_NAMES_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asn_names.json')
 
 app = FlaskAPI(__name__, static_folder=None)
 
-app.config['DEFAULT_RENDERERS'] = ['flask_api.renderers.JSONRenderer']
-app.config['MONGO_URI'] = 'mongodb://127.0.0.1:27017/ip_data'
+app.config.from_pyfile('config.cfg')
 
 mongo = PyMongo(app)
 
@@ -266,6 +266,15 @@ def fetch_data_ip(ipv4):
         return [{}], status.HTTP_404_NOT_FOUND
 
 
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--debug', help='set the boolean for debug', type=bool, default=False)
+    parser.add_argument('--port', help='set the port', type=int, required=True)
+    args = parser.parse_args()
+
+    return args
+
+
 if __name__ == '__main__':
-    # print(app.url_map)
-    app.run(port=sys.argv[1], debug=False)
+    args = argparser()
+    app.run(port=args.port, debug=args.debug)

@@ -94,7 +94,7 @@ def fetch_match_condition(condition, query):
                                       '_id': 0}).sort([('updated', -1)]).limit(30)
 
         elif condition == 'ipv4':
-            return mongo.db.dns.find({'a_record': query.lower()}, {
+            return mongo.db.dns.find({'a_record': {'$in': [query.lower()]}}, {
                                       '_id': 0}).sort([('updated', -1)]).limit(30)
 
 

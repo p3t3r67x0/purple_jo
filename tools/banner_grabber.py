@@ -86,6 +86,7 @@ def main():
 
     for j in jobs:
         j.join()
+        client.close()
         print('exitcode = {}'.format(j.exitcode))
 
 

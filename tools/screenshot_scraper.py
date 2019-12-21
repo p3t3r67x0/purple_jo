@@ -115,6 +115,7 @@ def main():
         data = {'updated': datetime.utcnow(), 'image': image_name}
 
         update_data(db, domain['domain'], data)
+        client.close()
 
 
 if __name__ == '__main__':

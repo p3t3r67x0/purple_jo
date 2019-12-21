@@ -112,7 +112,7 @@ if __name__ == '__main__':
 
     jobs = []
     threads = args.worker
-    amount = round(db.dns.estimated_document_count() / (threads + 50000))
+    amount = round(db.dns.estimated_document_count() / threads)
     limit = amount
 
     for f in range(threads):
@@ -123,4 +123,5 @@ if __name__ == '__main__':
 
     for j in jobs:
         j.join()
+        client.close()
         print('exitcode = {}'.format(j.exitcode))

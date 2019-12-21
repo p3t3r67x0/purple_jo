@@ -118,6 +118,8 @@ def main():
         else:
             update_data(db, domain['_id'], domain['domain'], {'cert_scan_failed': datetime.utcnow()})
 
+    client.close()
+
 
 if __name__ == '__main__':
     main()

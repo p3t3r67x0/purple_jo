@@ -127,6 +127,9 @@ def worker(host, domains):
         add_domains(db, domain)
         domains.remove(domain)
 
+    client.close()
+    return
+
 
 def argparser():
     parser = argparse.ArgumentParser()

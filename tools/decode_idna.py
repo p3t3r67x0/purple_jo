@@ -58,5 +58,8 @@ def main():
             update_data(db, domain['_id'], decoded_domain, {'updated': now, 'domain': decoded_domain})
 
 
+    client.close()
+
+
 if __name__ == '__main__':
     main()

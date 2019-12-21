@@ -80,4 +80,5 @@ if __name__ == '__main__':
 
     for j in jobs:
         j.join()
+        client.close()
         print('exitcode = {}'.format(j.exitcode))

@@ -85,6 +85,8 @@ def main():
                     for url in tweet['entities']['urls']:
                         add_url(db, url['expanded_url'])
 
+    client.close()
+
 
 if __name__ == '__main__':
     main()

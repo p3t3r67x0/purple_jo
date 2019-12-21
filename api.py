@@ -121,7 +121,7 @@ def fetch_latest_dns():
 
 def fetch_latest_cidr():
     return mongo.db.dns.find({'whois.asn_cidr': {'$exists': True}}, {'_id': 0,
-                              'whois.asn': 1, 'whois.asn_cidr': 1}).limit(200)
+                              'whois.asn_country_code': 1, 'whois.asn_cidr': 1}).limit(200)
 
 
 def fetch_latest_ipv4():

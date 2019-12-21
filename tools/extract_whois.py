@@ -109,6 +109,7 @@ def worker(host, limit, skip, col):
         except CursorNotFound:
             pass
 
+    client.close()
     return
 
 

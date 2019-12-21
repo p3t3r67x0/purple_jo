@@ -77,6 +77,7 @@ def worker(host, records):
         if r['resp_type'] == 'SOA':
             update_data(db, domain, 'soa_record', datetime.utcnow(), r['data'].lower().strip('.'))
 
+    client.close()
     return
 
 

@@ -56,6 +56,7 @@ def worker(host, skip, limit):
             update_data(db, document['_id'], document['domain'], document['a_record'][0],
                         {'banner_scan_failed': datetime.utcnow()})
 
+    client.close()
     return
 
 

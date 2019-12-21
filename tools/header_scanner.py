@@ -86,6 +86,7 @@ def worker(host, skip, limit):
             update_data(db, domain['_id'], domain['domain'],
                         {'header_scan_failed': datetime.utcnow()})
 
+    client.close()
     return
 
 

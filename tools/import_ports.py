@@ -70,6 +70,7 @@ def worker(host, col, ports):
             print(data)
             update_data(db, col, p['ip'], datetime.utcnow(), data)
 
+    client.close()
     return
 
 

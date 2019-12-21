@@ -50,6 +50,7 @@ def worker(host, skip, limit):
     except CursorNotFound:
         return
 
+    client.close()
     return
 
 

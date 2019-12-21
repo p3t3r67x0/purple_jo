@@ -93,6 +93,7 @@ def worker(host, skip, limit):
             update_data(db, domain, {'scan_failed': now})
             print(u'INFO: updated {}, scan failed'.format(dns))
 
+    client.close()
     return
 
 

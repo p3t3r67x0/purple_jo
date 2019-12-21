@@ -41,6 +41,9 @@ def worker(host, skip, limit):
 
         print('INFO: updated document with ip {} and added asn name {}'.format(i['ip'], res['name']))
 
+    client.close()
+    return
+
 
 def argparser():
     parser = argparse.ArgumentParser()

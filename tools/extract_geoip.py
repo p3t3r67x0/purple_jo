@@ -56,6 +56,8 @@ def worker(host, skip, limit):
         for domain in domains:
             for ip in domain['a_record']:
                 extract_geodata(db, ip, args.input)
+
+        client.close()
     except CursorNotFound:
         return
 

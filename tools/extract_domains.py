@@ -53,7 +53,11 @@ def worker(host, skip, limit):
         return
 
     for url in urls:
-        domain = urlparse(url['url']).netloc
+        try:
+            domain = urlparse(url['url']).netloc
+        except ValueError:
+            continue
+
         print(u'INFO: the url {} is beeing processed'.format(url['url']))
         print(domain)
         add_domains(db_url_data, db_ip_data, url['_id'], domain)

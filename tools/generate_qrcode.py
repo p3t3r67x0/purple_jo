@@ -15,20 +15,26 @@ def connect(host):
     return MongoClient('mongodb://{}:27017'.format(host))
 
 
-def retrieve_domains(db, skip, limit):
-    return db.dns.find({'qrcode': {'$exists': False}, 'domain': {
-                        '$regex': '^(([\w]*\.)?(?!(xn--)+)[\w]*\.[\w]+)$'}}).sort(
-                       [('updated', -1)])[limit - skip:limit]
+def retrieve_domains(db, client, skip, limit):
+    try:
+        return db.dns.find({'qrcode': {'$exists': False}, 'domain': {
+                            '$regex': '^(([\w]*\.)?(?!(xn--)+)[\w]*\.[\w]+)$'}}).sort(
+                           [('updated', -1)])[limit - skip:limit]
+    except KeyboardInterrupt:
+        client.close()
 
 
-def update_data(db, domain, post):
+def update_data(db, client, domain, post):
     try:
         res = db.dns.update_one({'domain': domain}, {'$set': post}, upsert=False)
 
         if res.modified_count > 0:
             print('INFO: added qrcode for domain {}'.format(domain))
+    except KeyboardInterrupt:
+        client.close()
+        return
     except DuplicateKeyError:
-        pass
+        return
 
 
 def generate_qrcode(id, domain):
@@ -42,11 +48,14 @@ def worker(host, skip, limit):
     now = datetime.utcnow()
 
     try:
-        domains = retrieve_domains(db, limit, skip)
+        domains = retrieve_domains(db, client, limit, skip)
 
         for domain in domains:
             qrcode = generate_qrcode(domain['_id'], domain['domain'])
-            update_data(db, domain['domain'], {'updated': now, 'qrcode': qrcode})
+            update_data(db, client, domain['domain'], {'updated': now, 'qrcode': qrcode})
+    except KeyboardInterrupt:
+        client.close()
+        return
     except CursorNotFound:
         return
 
@@ -72,6 +81,7 @@ if __name__ == '__main__':
     threads = args.worker
     amount = round(db.dns.estimated_document_count() / threads)
     limit = amount
+    client.close()
 
     for f in range(threads):
         j = multiprocessing.Process(target=worker, args=(args.host, limit, amount))
@@ -81,5 +91,4 @@ if __name__ == '__main__':
 
     for j in jobs:
         j.join()
-        client.close()
         print('exitcode = {}'.format(j.exitcode))

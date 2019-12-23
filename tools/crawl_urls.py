@@ -26,6 +26,7 @@ from requests.exceptions import TooManyRedirects
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 from pymongo.errors import AutoReconnect
+from pymongo.errors import WriteError
 
 from idna.core import IDNAError
 from datetime import datetime
@@ -62,7 +63,7 @@ def add_urls(db_url_data, db_ip_data, url, domain):
         update_data(db_ip_data, domain)
     except AutoReconnect:
         time.sleep(30)
-    except DuplicateKeyError as e:
+    except (DuplicateKeyError, WriteError) as e:
         print(e)
 
 

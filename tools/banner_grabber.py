@@ -25,6 +25,7 @@ def update_data(db, doc_id, domain, ip, post):
 def retrieve_documents(db, skip, limit):
     return db.dns.find({'a_record': {'$exists': True},
                         'banner': {'$exists': False},
+                        'ports.port': {'$in': [22]},
                         'banner_scan_failed': {'$exists': False}}).sort(
                         [('updated', -1)])[limit - skip:limit]
 

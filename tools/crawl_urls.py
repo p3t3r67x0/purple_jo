@@ -94,6 +94,9 @@ def get_urls(db, ua, url):
         elif link.startswith('/'):
             link = urljoin(base_url, link)
 
+        elif link.startswith('?'):
+            link = urljoin(base_url, link)
+
         elif link.startswith('..'):
             link = urljoin(base_url, link.replace('..', ''))
 

@@ -4,6 +4,8 @@ import re
 import pyasn
 import socket
 import argparse
+import json
+import uuid
 import sys
 import os
 
@@ -14,6 +16,9 @@ from flask_api import FlaskAPI, status
 from pymongo.errors import DuplicateKeyError
 from werkzeug.routing import PathConverter
 from flask_pymongo import PyMongo
+from rejson import Client, Path
+from bson import json_util
+
 
 AS_NAMES_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asn_names.json')
 
@@ -32,8 +37,37 @@ class EverythingConverter(PathConverter):
 app.url_map.converters['match'] = EverythingConverter
 
 
+def connect_cache():
+    return Client(host='127.0.0.1', port=6379, decode_responses=True)
+
+
 def fetch_one_ip(ip):
     return mongo.db.dns.find({'a_record': {'$in': [ip]}}, {'_id': 0})
+
+
+def fetch_from_cache(query, context, cache_key):
+    stored = cache.smembers(cache_key)
+    cache_list = []
+
+    if len(stored) == 0:
+        store_cache(query, context, cache_key)
+
+    for store in stored:
+        cache_list.append(cache.jsonget(store, Path.rootPath()))
+
+    return cache_list
+
+
+def store_cache(query, context, cache_key, reset=True, limit=200):
+    if reset:
+        cache.delete(cache_key)
+
+    docs = mongo.db.dns.find(query, context).sort([('updated', -1)]).limit(limit)
+
+    for doc in docs:
+        uid = hash(uuid.uuid4())
+        cache.jsonset(uid, Path.rootPath(), json.loads(json.dumps(doc, default=json_util.default)))
+        cache.sadd(cache_key, uid)
 
 
 def fetch_match_condition(condition, query):
@@ -114,26 +148,31 @@ def fetch_all_dns(domain):
 
 
 def fetch_latest_dns():
-    return mongo.db.dns.find({'updated': {'$exists': True},
-                              'scan_failed': {'$exists': False}},
-                              {'_id': 0}).sort([('updated', -1)]).limit(30)
+    query = {'updated': {'$exists': True}, 'scan_failed': {'$exists': False}}
+    context = {'_id': 0}
+
+    return fetch_from_cache(query, context, 'latest_dns')
 
 
 def fetch_latest_cidr():
-    return mongo.db.dns.find({'whois.asn_cidr': {'$exists': True}}, {'_id': 0,
-                              'whois.asn_country_code': 1, 'whois.asn_cidr': 1}).limit(200)
+    query = {'whois.asn_cidr': {'$exists': True}}
+    context = {'_id': 0, 'whois.asn_country_code': 1, 'whois.asn_cidr': 1}
+
+    return fetch_from_cache(query, context, 'latest_cidr')
 
 
 def fetch_latest_ipv4():
-    return mongo.db.dns.find({'a_record': {'$exists': True}}, {'_id': 0,
-                              'a_record': 1, 'country_code': 1}).sort(
-                              [('updated', -1)]).limit(200)
+    query = {'a_record': {'$exists': True}}
+    context = {'_id': 0, 'a_record': 1, 'country_code': 1}
+
+    return fetch_from_cache(query, context, 'ilatest_pv4')
 
 
 def fetch_latest_asn():
-    return mongo.db.dns.find({'whois.asn': {'$exists': True}}, {'_id': 0,
-                              'whois.asn': 1, 'whois.asn_country_code': 1}).sort(
-                              [('updated', -1)]).limit(200)
+    query = {'whois.asn': {'$exists': True}}
+    context = {'_id': 0, 'whois.asn': 1, 'whois.asn_country_code': 1}
+
+    return fetch_from_cache(query, context, 'latest_asn')
 
 
 def asn_lookup(ipv4):
@@ -142,12 +181,6 @@ def asn_lookup(ipv4):
     name = asndb.get_as_name(asn)
 
     return {'prefix': prefix, 'name': name, 'asn': asn}
-
-
-@app.route('/dns/', methods=['GET'])
-@app.route('/dns', methods=['GET'])
-def explore_dns():
-    return jsonify(list(fetch_latest_dns()))
 
 
 @app.route('/dns/<string:domain>', methods=['GET'])
@@ -181,9 +214,20 @@ def fetch_data_condition(query):
         return [{}], status.HTTP_404_NOT_FOUND
 
 
+@app.route('/dns/', methods=['GET'])
+@app.route('/dns', methods=['GET'])
+def fetch_latest_dns_data():
+    data = fetch_latest_dns()
+
+    if data:
+        return jsonify(data)
+    else:
+        return [{}], status.HTTP_404_NOT_FOUND
+
+
 @app.route('/asn', methods=['GET'])
-def fetch_data_asn():
-    data = list(fetch_latest_asn())
+def fetch_latest_asn_data():
+    data = fetch_latest_asn()
 
     if data:
         return jsonify(data)
@@ -192,8 +236,8 @@ def fetch_data_asn():
 
 
 @app.route('/cidr', methods=['GET'])
-def fetch_data_cidr():
-    data = list(fetch_latest_cidr())
+def fetch_latest_cidr_data():
+    data = fetch_latest_cidr()
 
     if data:
         return jsonify(data)
@@ -202,8 +246,8 @@ def fetch_data_cidr():
 
 
 @app.route('/ipv4', methods=['GET'])
-def fetch_data_ipv4():
-    data = list(fetch_latest_ipv4())
+def fetch_latest_ipv4_data():
+    data = fetch_latest_ipv4()
     v = []
 
     for d in data:
@@ -268,4 +312,5 @@ def argparser():
 
 if __name__ == '__main__':
     args = argparser()
+    cache = connect_cache()
     app.run(port=args.port, debug=args.debug)

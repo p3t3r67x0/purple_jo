@@ -42,15 +42,17 @@ def connect_cache():
 
 
 def fetch_one_ip(ip):
-    return mongo.db.dns.find({'a_record': {'$in': [ip]}}, {'_id': 0})
+    query = {'a_record': {'$in': [ip]}}
+    context = {'_id': 0}
 
 
-def fetch_from_cache(query, context, cache_key):
+def fetch_from_cache(query, context, sort, limit, cache_key):
     stored = cache.smembers(cache_key)
     cache_list = []
 
     if len(stored) == 0:
-        store_cache(query, context, cache_key)
+        store_cache(query, context, sort, cache_key, limit)
+        return list(mongo.db.dns.find(query, context).sort([sort]).limit(limit))
 
     for store in stored:
         cache_list.append(cache.jsonget(store, Path.rootPath()))
@@ -58,11 +60,11 @@ def fetch_from_cache(query, context, cache_key):
     return cache_list
 
 
-def store_cache(query, context, cache_key, reset=True, limit=200):
+def store_cache(query, context, sort, cache_key, reset=True, limit=200):
     if reset:
         cache.delete(cache_key)
 
-    docs = mongo.db.dns.find(query, context).sort([('updated', -1)]).limit(limit)
+    docs = mongo.db.dns.find(query, context).sort([sort]).limit(limit)
 
     for doc in docs:
         uid = hash(uuid.uuid4())
@@ -73,106 +75,198 @@ def store_cache(query, context, cache_key, reset=True, limit=200):
 def fetch_match_condition(condition, query):
     if query is not None:
         if condition == 'registry':
-            return mongo.db.dns.find({'whois': {'$exists': True},
-                                      'whois.asn_registry': query}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'whois': {'$exists': True}, 'whois.asn_registry': sub_query}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'registry-{}'.format(sub_query))
         elif condition == 'port':
-            return mongo.db.dns.find({'ports': {'$exists': True},
-                                      'ports.port': int(query)}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = int(query)
+
+            query = {'ports': {'$exists': True}, 'ports.port': sub_query}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'port-{}'.format(sub_query))
         elif condition == 'status':
-            return mongo.db.dns.find({'header': {'$exists': True},
-                                      'header.status': query}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            query = {'header': {'$exists': True}, 'header.status': query}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'status-{}'.format(query))
         elif condition == 'ssl':
-            return mongo.db.dns.find({'ssl_cert.subject': {'$exists': True},
-                                      'ssl_cert.subject.common_name': {
-                                      '$regex': query.lower()}}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'ssl_cert.subject': {'$exists': True},
+                     'ssl_cert.subject.common_name': {'$regex': sub_query}}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'ssl-{}'.format(sub_query))
         elif condition == 'app':
-            return mongo.db.dns.find({'header': {'$exists': True}, 'header.x-powered-by': {
-                                      '$regex': query.lower(), '$options': 'i'}}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'header': {'$exists': True}, 'header.x-powered-by': {
+                     '$regex': sub_query, '$options': 'i'}}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'app-{}'.format(sub_query))
         elif condition == 'country':
-            return mongo.db.dns.find({'whois': {'$exists': True},
-                                      'whois.asn_country_code': query.upper()}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.upper()
+
+            query = {'whois': {'$exists': True}, 'whois.asn_country_code': sub_query}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'country-{}'.format(sub_query))
         elif condition == 'banner':
-            return mongo.db.dns.find({'banner': {'$regex': query.lower(), '$options': 'i'}}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'banner': {'$regex': sub_query, '$options': 'i'}}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'banner-{}'.format(sub_query))
         elif condition == 'asn':
-            p = re.compile(r'[a-z:]', re.IGNORECASE)
-            return mongo.db.dns.find({'whois': {'$exists': True}, 'whois.asn': p.sub('', query.lower())}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = re.sub(r'[a-zA-Z:]', '', query.lower())
+
+            query = {'whois': {'$exists': True}, 'whois.asn': sub_query}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'asn-{}'.format(sub_query))
         elif condition == 'org':
-            return mongo.db.dns.find({'whois': {'$exists': True}, 'whois.asn_description': {
-                                      '$regex': query.lower(), '$options': 'i'}}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'whois': {'$exists': True}, 'whois.asn_description': {
+                     '$regex': sub_query, '$options': 'i'}},
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'org-{}'.format(sub_query))
         elif condition == 'cidr':
-            return mongo.db.dns.find({'whois': {'$exists': True},
-                                      'whois.asn_cidr': query}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'whois': {'$exists': True}, 'whois.asn_cidr': query}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'cidr-{}'.format(sub_query))
         elif condition == 'cname':
-            return mongo.db.dns.find({'cname_record': {'$exists': True},
-                                      'cname_record.target': {'$in': [query.lower()]}}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'cname_record': {'$exists': True}, 'cname_record.target': {
+                     '$in': [query.lower()]}}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'cname-{}'.format(sub_query))
         elif condition == 'mx':
-            return mongo.db.dns.find({'mx_record': {'$exists': True},
-                                      'mx_record.exchange': {'$in': [query.lower()]}}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'mx_record': {'$exists': True}, 'mx_record.exchange': {
+                     '$in': [query.lower()]}}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'mx-{}'.format(sub_query))
         elif condition == 'server':
-            return mongo.db.dns.find({'header': {'$exists': True}, 'header.server': {
-                                      '$regex': query.lower(), '$options': 'i'}}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'header': {'$exists': True}, 'header.server': {
+                     '$regex': sub_query, '$options': 'i'}}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'server-{}'.format(sub_query))
         elif condition == 'site':
-            return mongo.db.dns.find({'domain': query.lower()}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'domain': sub_query}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'site-{}'.format(sub_query))
 
         elif condition == 'ipv4':
-            return mongo.db.dns.find({'a_record': {'$in': [query.lower()]}}, {
-                                      '_id': 0}).sort([('updated', -1)]).limit(30)
+            sub_query = query.lower()
+
+            query = {'a_record': {'$in': [sub_query]}}
+            context = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, context, sort, limit, 'ipv4-{}'.format(sub_query))
 
 
 def fetch_all_prefix(prefix):
-    return mongo.db.lookup.find({'cidr': {'$in': [prefix]}}, {'_id': 0}).sort([('updated', -1)]).limit(30)
+    return mongo.db.lookup.find({'cidr': {'$in': [prefix]}}, {'_id': 0})
 
 
 def fetch_all_asn(asn):
     return mongo.db.lookup.find({'whois.asn': asn}, {'_id': 0}).limit(5)
 
 
-def fetch_all_dns(domain):
-    return mongo.db.dns.find({'$text': {'$search': '\'{}\''.format(domain)}},
-                             {'score': {'$meta': "textScore"}, '_id': 0}).sort(
-                             [('score', {'$meta': 'textScore'})]).limit(30)
+def fetch_query_dns(domain):
+    query = {'$text': {'$search': '"{}"'.format(domain)}}
+    context = {'score': {'$meta': "textScore"}, '_id': 0}
+    sort = ('score', {'$meta': 'textScore'})
+    limit = 200
+
+    return fetch_from_cache(query, context, sort, limit, domain)
 
 
 def fetch_latest_dns():
     query = {'updated': {'$exists': True}, 'scan_failed': {'$exists': False}}
     context = {'_id': 0}
+    sort = ('updated', -1)
+    limit = 200
 
-    return fetch_from_cache(query, context, 'latest_dns')
+    return fetch_from_cache(query, context, sort, limit, 'latest_dns')
 
 
 def fetch_latest_cidr():
     query = {'whois.asn_cidr': {'$exists': True}}
     context = {'_id': 0, 'whois.asn_country_code': 1, 'whois.asn_cidr': 1}
+    sort = ('updated', -1)
+    limit = 200
 
-    return fetch_from_cache(query, context, 'latest_cidr')
+    return fetch_from_cache(query, context, sort, limit, 'latest_cidr')
 
 
 def fetch_latest_ipv4():
     query = {'a_record': {'$exists': True}}
     context = {'_id': 0, 'a_record': 1, 'country_code': 1}
+    sort = ('updated', -1)
+    limit = 200
 
-    return fetch_from_cache(query, context, 'ilatest_pv4')
+    return fetch_from_cache(query, context, sort, limit, 'ilatest_pv4')
 
 
 def fetch_latest_asn():
     query = {'whois.asn': {'$exists': True}}
     context = {'_id': 0, 'whois.asn': 1, 'whois.asn_country_code': 1}
+    sort = ('updated', -1)
+    limit = 200
 
-    return fetch_from_cache(query, context, 'latest_asn')
+    return fetch_from_cache(query, context, sort, limit, 'latest_asn')
 
 
 def asn_lookup(ipv4):
@@ -185,7 +279,7 @@ def asn_lookup(ipv4):
 
 @app.route('/dns/<string:domain>', methods=['GET'])
 def fetch_data_dns(domain):
-    data = list(fetch_all_dns(domain))
+    data = list(fetch_query_dns(domain))
 
     if data:
         return jsonify(data)
@@ -310,7 +404,9 @@ def argparser():
     return args
 
 
+cache = connect_cache()
+
+
 if __name__ == '__main__':
     args = argparser()
-    cache = connect_cache()
     app.run(port=args.port, debug=args.debug)

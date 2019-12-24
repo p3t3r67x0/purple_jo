@@ -89,7 +89,7 @@ def get_urls(db, ua, url):
     for link in links:
         link = link.lower().strip()
 
-        if link.startswith('#') or link.startswith('+') or link.startswith('javascript:') or link.startswith('mailto:'):
+        if link.startswith('#') or link.startswith('+') or link.startswith('tel:') or link.startswith('javascript:') or link.startswith('mailto:'):
             continue
 
         elif link.startswith('/'):
@@ -101,7 +101,7 @@ def get_urls(db, ua, url):
         elif link.startswith('..'):
             link = urljoin(base_url, link.replace('..', ''))
 
-        if len(link) > 0:
+        if urlparse(link).netloc:
             url_set.add(link)
 
     print(url_set)

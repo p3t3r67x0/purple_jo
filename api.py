@@ -150,7 +150,7 @@ def fetch_match_condition(condition, query):
             sub_query = query.lower()
 
             query = {'whois': {'$exists': True}, 'whois.asn_description': {
-                     '$regex': sub_query, '$options': 'i'}},
+                     '$regex': sub_query, '$options': 'i'}}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30

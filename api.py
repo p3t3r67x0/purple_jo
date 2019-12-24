@@ -13,6 +13,7 @@ from datetime import datetime
 
 from flask import jsonify
 from flask_api import FlaskAPI, status
+from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError
 from werkzeug.routing import PathConverter
 from flask_pymongo import PyMongo
@@ -72,12 +73,16 @@ def store_cache(query, context, sort, cache_key, reset=True, limit=200):
         cache.sadd(cache_key, uid)
 
 
+def create_index(field_name_1, field_name_2):
+    mongo.db.dns.create_index([(field_name_1, DESCENDING), (field_name_2, DESCENDING)], background=True)
+
+
 def fetch_match_condition(condition, query):
     if query is not None:
         if condition == 'registry':
             sub_query = query.lower()
 
-            query = {'whois': {'$exists': True}, 'whois.asn_registry': sub_query}
+            query = {'whois.asn_registry': sub_query}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -86,14 +91,14 @@ def fetch_match_condition(condition, query):
         elif condition == 'port':
             sub_query = int(query)
 
-            query = {'ports': {'$exists': True}, 'ports.port': sub_query}
+            query = {'ports.port': sub_query}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
             return fetch_from_cache(query, context, sort, limit, 'port-{}'.format(sub_query))
         elif condition == 'status':
-            query = {'header': {'$exists': True}, 'header.status': query}
+            query = {'header.status': query}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -102,8 +107,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'ssl':
             sub_query = query.lower()
 
-            query = {'ssl_cert.subject': {'$exists': True},
-                     'ssl_cert.subject.common_name': {'$regex': sub_query}}
+            query = {'ssl_cert.subject.common_name': {'$regex': sub_query}}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -112,8 +116,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'app':
             sub_query = query.lower()
 
-            query = {'header': {'$exists': True}, 'header.x-powered-by': {
-                     '$regex': sub_query, '$options': 'i'}}
+            query = {'header.x-powered-by': {'$regex': sub_query, '$options': 'i'}}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -122,7 +125,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'country':
             sub_query = query.upper()
 
-            query = {'whois': {'$exists': True}, 'whois.asn_country_code': sub_query}
+            query = {'whois.asn_country_code': sub_query}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -140,7 +143,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'asn':
             sub_query = re.sub(r'[a-zA-Z:]', '', query.lower())
 
-            query = {'whois': {'$exists': True}, 'whois.asn': sub_query}
+            query = {'whois.asn': sub_query}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -149,8 +152,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'org':
             sub_query = query.lower()
 
-            query = {'whois': {'$exists': True}, 'whois.asn_description': {
-                     '$regex': sub_query, '$options': 'i'}}
+            query = {'whois.asn_description': {'$regex': sub_query, '$options': 'i'}}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -159,7 +161,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'cidr':
             sub_query = query.lower()
 
-            query = {'whois': {'$exists': True}, 'whois.asn_cidr': query}
+            query = {'whois.asn_cidr': query}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -168,8 +170,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'cname':
             sub_query = query.lower()
 
-            query = {'cname_record': {'$exists': True}, 'cname_record.target': {
-                     '$in': [query.lower()]}}
+            query = {'cname_record.target': {'$in': [query.lower()]}}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -178,8 +179,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'mx':
             sub_query = query.lower()
 
-            query = {'mx_record': {'$exists': True}, 'mx_record.exchange': {
-                     '$in': [query.lower()]}}
+            query = {'mx_record.exchange': {'$in': [query.lower()]}}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -188,8 +188,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'server':
             sub_query = query.lower()
 
-            query = {'header': {'$exists': True}, 'header.server': {
-                     '$regex': sub_query, '$options': 'i'}}
+            query = {'header.server': {'$regex': sub_query, '$options': 'i'}}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -204,7 +203,6 @@ def fetch_match_condition(condition, query):
             limit = 30
 
             return fetch_from_cache(query, context, sort, limit, 'site-{}'.format(sub_query))
-
         elif condition == 'ipv4':
             sub_query = query.lower()
 
@@ -405,6 +403,23 @@ def argparser():
 
 
 cache = connect_cache()
+
+# create index for all match methods
+create_index('ports.port', 'updated')
+create_index('ssl_cert.subject.common_name', 'updated')
+create_index('header.x-powered-by', 'updated')
+create_index('banner', 'updated')
+create_index('whois.asn', 'updated')
+create_index('whois.asn_description', 'updated')
+create_index('whois.asn_country_code', 'updated')
+create_index('whois.asn_registry', 'updated')
+create_index('whois.asn_cidr', 'updated')
+create_index('cname_record.target', 'updated')
+create_index('mx_record.exchange', 'updated')
+create_index('header.server', 'updated')
+create_index('header.status', 'updated')
+create_index('a_record', 'updated')
+create_index('domain', 'updated')
 
 
 if __name__ == '__main__':

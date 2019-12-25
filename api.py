@@ -14,14 +14,30 @@ from datetime import datetime
 from flask import jsonify
 from flask_api import FlaskAPI, status
 from pymongo import ASCENDING, DESCENDING
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, ServerSelectionTimeoutError
+from werkzeug.exceptions import NotFound, BadRequest, MethodNotAllowed, RequestEntityTooLarge, InternalServerError
 from werkzeug.routing import PathConverter
+from logging.config import dictConfig
 from flask_pymongo import PyMongo
 from rejson import Client, Path
 from bson import json_util
 
 
-AS_NAMES_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asn_names.json')
+dictConfig({
+    'version': 1,
+    'formatters': {'default': {
+        'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
+    }},
+    'handlers': {'wsgi': {
+        'class': 'logging.StreamHandler',
+        'stream': 'ext://flask.logging.wsgi_errors_stream',
+        'formatter': 'default'
+    }},
+    'root': {
+        'level': 'INFO',
+        'handlers': ['wsgi']
+    }
+})
 
 
 app = FlaskAPI(__name__, static_folder=None)
@@ -36,6 +52,48 @@ class EverythingConverter(PathConverter):
 
 
 app.url_map.converters['match'] = EverythingConverter
+
+
+@app.errorhandler(TypeError)
+def handle_not_found(e):
+    app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
+    return jsonify(message='Something went wrong application error'), 500
+
+
+@app.errorhandler(NotFound)
+def handle_not_found(e):
+    app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
+    return jsonify(message='Requested resource was not found on server'), 404
+
+
+@app.errorhandler(BadRequest)
+def handle_bad_request(e):
+    app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
+    return jsonify(message='Bad request, the error has been reported'), 400
+
+
+@app.errorhandler(MethodNotAllowed)
+def handle_method_not_allowed(e):
+    app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
+    return jsonify(message='The method is not allowed for the requested URL'), 405
+
+
+@app.errorhandler(InternalServerError)
+def handle_internal_server_error(e):
+    app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
+    return jsonify(message='Something went wrong, internal server error'), 500
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_request_entity_too_large(e):
+    app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
+    return jsonify(message='The file transmitted exceeds the capacity limit'), 413
+
+
+@app.errorhandler(ServerSelectionTimeoutError)
+def handle_not_found(e):
+    app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
+    return jsonify(message='Something went wrong application error'), 500
 
 
 def connect_cache():
@@ -69,12 +127,14 @@ def store_cache(query, context, sort, cache_key, reset=True, limit=200):
 
     for doc in docs:
         uid = hash(uuid.uuid4())
-        cache.jsonset(uid, Path.rootPath(), json.loads(json.dumps(doc, default=json_util.default)))
+        cache.jsonset(uid, Path.rootPath(), json.loads(
+            json.dumps(doc, default=json_util.default)))
         cache.sadd(cache_key, uid)
 
 
 def create_index(field_name_1, field_name_2):
-    mongo.db.dns.create_index([(field_name_1, DESCENDING), (field_name_2, DESCENDING)], background=True)
+    mongo.db.dns.create_index(
+        [(field_name_1, DESCENDING), (field_name_2, DESCENDING)], background=True)
 
 
 def fetch_match_condition(condition, query):
@@ -152,7 +212,8 @@ def fetch_match_condition(condition, query):
         elif condition == 'org':
             sub_query = query.lower()
 
-            query = {'whois.asn_description': {'$regex': sub_query, '$options': 'i'}}
+            query = {'whois.asn_description': {
+                     '$regex': sub_query, '$options': 'i'}}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -268,7 +329,7 @@ def fetch_latest_asn():
 
 
 def asn_lookup(ipv4):
-    asndb = pyasn.pyasn('rib.20191127.2000.dat', as_names_file=AS_NAMES_FILE_PATH)
+    asndb = pyasn.pyasn('rib.20191127.2000.dat', as_names_file='asn_names.json')
     asn, prefix = asndb.lookup(ipv4)
     name = asndb.get_as_name(asn)
 
@@ -395,8 +456,8 @@ def fetch_data_ip(ipv4):
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--debug', help='set the boolean for debug', type=bool, default=False)
-    parser.add_argument('--port', help='set the port', type=int, required=True)
+    parser.add_argument('--debug', help='debug flag', type=bool, default=False)
+    parser.add_argument('--port', help='port number', type=int, required=True)
     args = parser.parse_args()
 
     return args

@@ -24,19 +24,20 @@ def connect(host):
 
 
 def retrieve_dns(db, limit, skip):
-    return db.dns.find({'whois': {'$exists': False},
-                        'a_record.0': {'$exists': True}})[limit - skip:limit]
+    return db.dns.find({'whois.asn': {'$exists': False},
+                        'a_record.0': {'$exists': True}
+                        }).sort([('updated', -1)])[limit - skip:limit]
 
 
 def retrieve_asns(db, limit, skip):
-    return db.lookup.find({'whois': {'$exists': False}})[limit - skip:limit]
+    return db.lookup.find({'whois.asn': {'$exists': False}})[limit - skip:limit]
 
 
 def update_data_dns(db, ip, domain, post):
     try:
         if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(post['whois']['asn_cidr']):
             res = db.dns.update_many({'a_record': {'$in': [ip]},
-                                      'whois': {'$exists': False}}, {
+                                      'whois.asn': {'$exists': False}}, {
                                       '$set': post}, upsert=False)
 
             if res.modified_count > 0:
@@ -52,7 +53,7 @@ def update_data_dns(db, ip, domain, post):
 def update_data_lookup(db, asn, post):
     try:
         res = db.lookup.update_many({'asn': asn}, {'$set': post, '$unset': {
-                               'subnet': 0}}, upsert=False)
+                                     'subnet': 0}}, upsert=False)
         print(u'INFO: updated dns whois and cidr entry for AS{}, {} document modified'.format(asn, res.modified_count))
     except (DocumentTooLarge, DuplicateKeyError):
         pass
@@ -130,7 +131,7 @@ if __name__ == '__main__':
 
     jobs = []
     threads = args.worker
-    amount = round(db[args.collection].estimated_document_count() / threads)
+    amount = round(db[args.collection].estimated_document_count() / (threads + 50000))
     limit = amount
     print(limit, amount)
 

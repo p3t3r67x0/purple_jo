@@ -15,7 +15,7 @@ from flask import jsonify
 from flask_api import FlaskAPI, status
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError, ServerSelectionTimeoutError
-from werkzeug.exceptions import NotFound, BadRequest, MethodNotAllowed, RequestEntityTooLarge, InternalServerError
+from werkzeug.exceptions import NotFound, BadRequest, BadGateway, MethodNotAllowed, RequestEntityTooLarge, InternalServerError
 from werkzeug.routing import PathConverter
 from logging.config import dictConfig
 from flask_pymongo import PyMongo
@@ -70,6 +70,12 @@ def handle_not_found(e):
 def handle_bad_request(e):
     app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
     return jsonify(message='Bad request, the error has been reported'), 400
+
+
+@app.errorhandler(BadGateway)
+def handle_bad_request(e):
+    app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
+    return jsonify(message='Application programm interface is not reachable'), 502
 
 
 @app.errorhandler(MethodNotAllowed)

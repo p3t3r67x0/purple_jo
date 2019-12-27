@@ -78,6 +78,8 @@ Group=www-data
 WorkingDirectory=/home/<user>/git/purple_jo
 Environment="PATH=/home/<user>/git/purple_jo/venv/bin"
 ExecStart=/home/<user>/git/purple_jo/venv/bin/gunicorn --workers 4 --bind 127.0.0.1:9000 wsgi:app --access-logfile /var/log/purplejo/access.log --error-logfile /var/log/purplejo/error.log --log-level info
+Restart=on-failure
+RestartSec=2s
 
 [Install]
 WantedBy=multi-user.target

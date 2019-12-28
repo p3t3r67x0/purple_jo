@@ -92,3 +92,12 @@ Start the service and enable the service
 sudo systemctl start purplepee
 sudo systemctl enable purplepee
 ```
+
+
+## Setup Nginx with SSL
+
+Install dependencies from Ubuntu repository
+
+```bash
+sudo apt install nginx-full certbot python-certbot-nginx
+```

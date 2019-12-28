@@ -18,6 +18,10 @@ def connect(host):
     return MongoClient('mongodb://{}:27017'.format(host))
 
 
+def find_domain(domain):
+    return re.search(r'([\w\-.]{1,63}|[\w\-.]{1,63}[^\x00-\x7F\w-]{1,63})\.([\w\-.]{2,})|(([\w\d-]{1,63}|[\d\w-]*[^\x00-\x7F\w-]{1,63}))\.?([\w\d]{1,63}|[\d\w\-.]*[^\x00-\x7F\-.]{1,63})\.([a-z\.]{2,}|[\w]*[^\x00-\x7F\.]{2,})', domain)
+
+
 def retrieve_urls(db_url_data, skip, limit):
     return db_url_data.url.find({'domain_extracted': {'$exists': False}})[limit - skip:limit]
 
@@ -54,13 +58,13 @@ def worker(host, skip, limit):
 
     for url in urls:
         try:
-            domain = urlparse(url['url']).netloc
+            domain = find_domain(url['url'])
+
+            if domain is not None:
+                print(u'INFO: the url {} is beeing processed'.format(url['url']))
+                add_domains(db_url_data, db_ip_data, url['_id'], domain.group(0))
         except ValueError:
             continue
-
-        print(u'INFO: the url {} is beeing processed'.format(url['url']))
-        print(domain)
-        add_domains(db_url_data, db_ip_data, url['_id'], domain)
 
     client.close()
     return

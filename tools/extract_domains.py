@@ -18,6 +18,10 @@ def connect(host):
     return MongoClient('mongodb://{}:27017'.format(host))
 
 
+def match_ipv4(ipv4):
+    return re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ipv4)
+
+
 def find_domain(domain):
     return re.search(r'([\w\-.]{1,63}|[\w\-.]{1,63}[^\x00-\x7F\w-]{1,63})\.([\w\-.]{2,})|(([\w\d-]{1,63}|[\d\w-]*[^\x00-\x7F\w-]{1,63}))\.?([\w\d]{1,63}|[\d\w\-.]*[^\x00-\x7F\-.]{1,63})\.([a-z\.]{2,}|[\w]*[^\x00-\x7F\.]{2,})', domain)
 
@@ -60,7 +64,7 @@ def worker(host, skip, limit):
         try:
             domain = find_domain(url['url'])
 
-            if domain is not None:
+            if domain is not None and not match_ipv4(domain.group(0)):
                 print(u'INFO: the url {} is beeing processed'.format(url['url']))
                 add_domains(db_url_data, db_ip_data, url['_id'], domain.group(0))
         except ValueError:

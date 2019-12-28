@@ -89,8 +89,8 @@ WantedBy=multi-user.target
 Start the service and enable the service
 
 ```bash
-sudo systemctl start purplepee
-sudo systemctl enable purplepee
+sudo systemctl start purplejo
+sudo systemctl enable purplejo
 ```
 
 

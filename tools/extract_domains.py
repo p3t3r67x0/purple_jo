@@ -56,19 +56,18 @@ def worker(host, skip, limit):
 
     try:
         urls = retrieve_urls(db_url_data, limit, skip)
+
+        for url in urls:
+            try:
+                domain = find_domain(url['url'])
+
+                if domain is not None and not match_ipv4(domain.group(0)):
+                    print(u'INFO: the url {} is beeing processed'.format(url['url']))
+                    add_domains(db_url_data, db_ip_data, url['_id'], domain.group(0))
+            except ValueError:
+                continue
     except CursorNotFound:
-        client.close()
-        return
-
-    for url in urls:
-        try:
-            domain = find_domain(url['url'])
-
-            if domain is not None and not match_ipv4(domain.group(0)):
-                print(u'INFO: the url {} is beeing processed'.format(url['url']))
-                add_domains(db_url_data, db_ip_data, url['_id'], domain.group(0))
-        except ValueError:
-            continue
+        pass
 
     client.close()
     return

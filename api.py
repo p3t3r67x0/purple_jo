@@ -116,7 +116,7 @@ def fetch_from_cache(query, context, sort, limit, cache_key):
     cache_list = []
 
     if len(stored) == 0:
-        store_cache(query, context, sort, cache_key, limit)
+        store_cache(query, context, sort, limit, cache_key)
         return list(mongo.db.dns.find(query, context).sort([sort]).limit(limit))
 
     for store in stored:
@@ -125,7 +125,7 @@ def fetch_from_cache(query, context, sort, limit, cache_key):
     return cache_list
 
 
-def store_cache(query, context, sort, cache_key, reset=True, limit=200):
+def store_cache(query, context, sort, limit, cache_key, reset=False):
     if reset:
         cache.delete(cache_key)
 

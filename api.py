@@ -164,12 +164,14 @@ def fetch_match_condition(condition, query):
 
             return fetch_from_cache(query, context, sort, limit, 'port-{}'.format(sub_query))
         elif condition == 'status':
+            sub_query = int(query)
+
             query = {'header.status': query}
             context = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, context, sort, limit, 'status-{}'.format(query))
+            return fetch_from_cache(query, context, sort, limit, 'status-{}'.format(sub_query))
         elif condition == 'ssl':
             sub_query = query.lower()
 

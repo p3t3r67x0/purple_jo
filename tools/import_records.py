@@ -70,7 +70,7 @@ def worker(host, records):
         if r['resp_type'] == 'NS':
             ns_record = r['data'].lower().strip('.')
 
-            if not 'root-servers.net' in ns_record:
+            if not 'root-servers.net' in ns_record and not 'gtld-servers.net' in ns_record:
                 update_data(db, domain, 'ns_record', datetime.utcnow(), ns_record)
 
         if r['resp_type'] == 'MX':

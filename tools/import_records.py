@@ -68,7 +68,10 @@ def worker(host, records):
             update_data(db, domain, 'cname_record', datetime.utcnow(), cname_record)
 
         if r['resp_type'] == 'NS':
-            update_data(db, domain, 'ns_record', datetime.utcnow(), r['data'].lower().strip('.'))
+            ns_record = r['data'].lower().strip('.')
+
+            if not 'root-servers.net' in ns_record:
+                update_data(db, domain, 'ns_record', datetime.utcnow(), ns_record)
 
         if r['resp_type'] == 'MX':
             mx_record = {'preference': r['data'].split(' ')[0], 'exchange': r['data'].split(' ')[1].lower().strip('.')}

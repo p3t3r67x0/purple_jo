@@ -568,7 +568,7 @@ sudo apt install nginx-full certbot python-certbot-nginx
 ```
 
 
-Setup Nginx conig file in `/etc/nginx/sites-enabled/api_example_com`
+Setup nginx config file in `/etc/nginx/sites-enabled/api_example_com`
 
 ```cfg
 server {

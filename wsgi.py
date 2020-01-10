@@ -9,33 +9,30 @@ from datetime import datetime
 from api import app
 
 
-async def init_mongo(loop):
-    conn = AsyncIOMotorClient(app.config['MONGO_STATS_URI'], io_loop=loop)
+@asyncio.coroutine
+def setup_db():
+    return AsyncIOMotorClient(app.config['MONGO_STATS_URI']).stats_data
 
-    return conn['stats_data']
 
+class RestHandler:
+    @asyncio.coroutine
+    def trends(self, req):
+        mongo = req.app['db']
 
-async def setup_mongo(aioapp, loop):
-    mongo = await init_mongo(loop)
+        document = yield from mongo.entries.aggregate([{'$match': {'$and': [{'path': {'$regex': '^\/match'}}]}}, {
+            '$sortByCount': '$path'}, {'$project': {'count': 1, 'trend': '$_id', '_id': 0}}]).to_list(length=300)
 
-    async def close_mongo(aioapp):
-        mongo.client.close()
+        if not document:
+            return web.HTTPNotFound(text='Page not found, yolo!')
 
-    aioapp.on_cleanup.append(close_mongo)
-
-    return mongo
+        return web.json_response(document)
 
 
 async def stats(req, res):
+    mongo = req.app['db']
+
     if req.method != 'OPTIONS':
         stats = {}
-
-        stats['host'] = req.url.host
-        stats['port'] = req.url.port
-        stats['path'] = req.url.path
-        stats['scheme'] = req.url.scheme
-        stats['query'] = req.url.query_string
-        stats['fragment'] = req.url.fragment
 
         if 'origin' in req.headers:
             stats['origin'] = req.headers['origin']
@@ -58,9 +55,25 @@ async def stats(req, res):
         if 'accept-encoding' in req.headers:
             stats['accept_encoding'] = req.headers['accept-encoding']
 
-        stats['remote_address'] = req.remote
+        if 'x-forwarded-for' in req.headers:
+            stats['remote_address'] = req.headers['x-forwarded-for']
+
+        if 'x-forwarded-proto' in req.headers:
+            stats['scheme'] = req.headers['x-forwarded-proto']
+
+        if 'x-forwarded-host' in req.headers:
+            stats['host'] = req.headers['x-forwarded-host']
+
+        if 'x-forwarded-port' in req.headers:
+            stats['port'] = req.headers['x-forwarded-port']
+
+        stats['path'] = req.url.path
+        stats['query'] = req.url.query_string
+        stats['fragment'] = req.url.fragment
+
         stats['request_method'] = req.method
         stats['status_code'] = res.status
+        stats['created'] = datetime.utcnow()
 
         await mongo.entries.insert_one(stats)
 
@@ -69,15 +82,13 @@ async def on_prepare(req, res):
     await stats(req, res)
 
 
-async def init(app):
-    wsgi_handler = WSGIHandler(app)
-    aioapp = web.Application()
-    aioapp.on_response_prepare.append(on_prepare)
-    aioapp.router.add_route('*', '/{path_info:.*}', wsgi_handler)
-    mongo = await setup_mongo(aioapp, asyncio.get_running_loop())
-
-    return aioapp, mongo
-
-
 loop = asyncio.get_event_loop()
-app, mongo = loop.run_until_complete(init(app))
+
+wsgi_handler = WSGIHandler(app)
+aio_handler = RestHandler()
+aioapp = web.Application()
+
+aioapp['db'] = loop.run_until_complete(setup_db())
+aioapp.on_response_prepare.append(on_prepare)
+aioapp.router.add_get('/trends', aio_handler.trends)
+aioapp.router.add_route('*', '/{path_info:.*}', wsgi_handler)

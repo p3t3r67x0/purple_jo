@@ -47,10 +47,10 @@ sudo apt install mongodb
 
 ```bash
 # install build dependencies
-sudo apt install mongodb redis-server chromium-chromedriver virtualenv python3 python3-dev gcc
+sudo apt install mongodb redis-server chromium-chromedriver virtualenv python3.7 python3.7-dev gcc
 
 # create a virtualenv
-virtualenv -p /usr/bin/python3.6 venv
+virtualenv -p /usr/bin/python3.7 venv
 
 # activate virtualenv
 . venv/bin/activate
@@ -77,7 +77,7 @@ User=<user>
 Group=www-data
 WorkingDirectory=/home/<user>/git/purple_jo
 Environment="PATH=/home/<user>/git/purple_jo/venv/bin"
-ExecStart=/home/<user>/git/purple_jo/venv/bin/gunicorn --workers 4 --bind 127.0.0.1:9000 wsgi:app --access-logfile /var/log/purplejo/access.log --error-logfile /var/log/purplejo/error.log --log-level info
+ExecStart=/home/<user>/git/purple_jo/venv/bin/gunicorn --bind 127.0.0.1:5000 wsgi:app -k aiohttp.worker.GunicornWebWorker --workers 4 --threads 2 --access-logfile /var/log/purplejo/access.log --error-logfile /var/log/purplejo/error.log --log-level INFO
 Restart=on-failure
 RestartSec=2s
 

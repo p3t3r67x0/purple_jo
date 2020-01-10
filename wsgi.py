@@ -10,7 +10,7 @@ from api import app
 
 
 async def init_mongo(loop):
-    conn = AsyncIOMotorClient('mongodb://127.0.0.1:27017', io_loop=loop)
+    conn = AsyncIOMotorClient(app.config['MONGO_STATS_URI'], io_loop=loop)
 
     return conn['stats_data']
 

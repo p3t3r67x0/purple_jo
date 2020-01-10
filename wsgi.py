@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import asyncio
+import aiohttp_cors
 
 from aiohttp import web
 from aiohttp_wsgi import WSGIHandler
@@ -19,8 +20,9 @@ class RestHandler:
     def trends(self, req):
         mongo = req.app['db']
 
-        document = yield from mongo.entries.aggregate([{'$match': {'$and': [{'path': {'$regex': '^\/match'}}]}}, {
-            '$sortByCount': '$path'}, {'$project': {'count': 1, 'trend': '$_id', '_id': 0}}]).to_list(length=300)
+        document = yield from mongo.entries.aggregate([{'$project': {'status_code': 1, 'path': 1}},
+            {'$match': {'$and': [{'status_code': 200}, {'path': {'$regex': '^\/match'}}]}},
+            {'$sortByCount': '$path'}, {'$project': {'count': 1, 'trend': '$_id', '_id': 0}}]).to_list(length=300)
 
         if not document:
             return web.HTTPNotFound(text='Page not found, yolo!')
@@ -90,5 +92,16 @@ aioapp = web.Application()
 
 aioapp['db'] = loop.run_until_complete(setup_db())
 aioapp.on_response_prepare.append(on_prepare)
-aioapp.router.add_get('/trends', aio_handler.trends)
+
+cors = aiohttp_cors.setup(aioapp, defaults={
+    "*": aiohttp_cors.ResourceOptions(
+        allow_credentials=True,
+        expose_headers="*",
+        allow_headers="*",
+    )
+})
+
+trends_resource = cors.add(aioapp.router.add_resource('/trends'))
+cors.add(trends_resource.add_route('GET', aio_handler.trends))
+
 aioapp.router.add_route('*', '/{path_info:.*}', wsgi_handler)

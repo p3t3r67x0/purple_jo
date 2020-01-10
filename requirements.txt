@@ -1,4 +1,5 @@
 aiohttp==3.6.2
+aiohttp-cors==0.7.0
 aiohttp-wsgi==0.8.2
 appdirs==1.4.3
 async-timeout==3.0.1

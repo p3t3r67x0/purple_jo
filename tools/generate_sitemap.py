@@ -27,8 +27,7 @@ def retrieve_sitemap(input):
     for elm in root:
         children = elm.getchildren()
         loc = {'loc': children[0].text}
-        lastmod = {'lastmod': children[1].text}
-        sitemap.append([loc, lastmod])
+        sitemap.append([loc])
 
     return sitemap
 
@@ -40,7 +39,7 @@ def create_sitemap(urls, output):
     doc = etree.ElementTree(urlset)
 
     for uri in urls:
-        if uri.startswith('https://purplepee.co') or uri.startswith('https://api.purplepee.co'):
+        if uri is not None and (uri.startswith('https://purplepee.co') or uri.startswith('https://api.purplepee.co')):
             url = etree.SubElement(urlset, 'url')
             loc = etree.SubElement(url, 'loc')
             loc.text = uri

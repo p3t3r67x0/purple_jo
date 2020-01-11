@@ -111,6 +111,10 @@ def fetch_one_ip(ip):
     filter = {'_id': 0}
 
 
+def cache_key(key):
+    return re.sub(r'[\\\/\(\)\'\"\[\],;:#+~ ]', '-', key)
+
+
 def fetch_from_cache(query, filter, sort, limit, cache_key):
     stored = cache.smembers(cache_key)
     cache_list = []
@@ -153,7 +157,7 @@ def fetch_match_condition(condition, query):
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'registry-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'registry-{}'.format(cache_key(sub_query)))
         elif condition == 'port':
             sub_query = int(query)
 
@@ -162,7 +166,7 @@ def fetch_match_condition(condition, query):
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'port-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'port-{}'.format(cache_key(sub_query)))
         elif condition == 'status':
             sub_query = int(query)
 
@@ -171,25 +175,25 @@ def fetch_match_condition(condition, query):
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'status-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'status-{}'.format(cache_key(sub_query)))
         elif condition == 'ssl':
             sub_query = query.lower()
 
-            query = {'ssl_cert.subject.common_name': {'$regex': sub_query}}
+            query = {'ssl_cert.subject.common_name': sub_query}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'ssl-{}'.format(sub_query))
-        elif condition == 'app':
+            return fetch_from_cache(query, filter, sort, limit, 'ssl-{}'.format(cache_key(sub_query)))
+        elif condition == 'service':
             sub_query = query.lower()
 
-            query = {'header.x-powered-by': {'$regex': sub_query, '$options': 'i'}}
+            query = {'header.x-powered-by':query}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'app-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'service-{}'.format(cache_key(sub_query)))
         elif condition == 'country':
             sub_query = query.upper()
 
@@ -198,16 +202,16 @@ def fetch_match_condition(condition, query):
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'country-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'country-{}'.format(cache_key(sub_query)))
         elif condition == 'banner':
             sub_query = query.lower()
 
-            query = {'banner': {'$regex': '^{}'.format(sub_query), '$options': 'i'}}
+            query = {'banner': query}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'banner-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'banner-{}'.format(cache_key(sub_query)))
         elif condition == 'asn':
             sub_query = re.sub(r'[a-zA-Z:]', '', query.lower())
 
@@ -216,16 +220,16 @@ def fetch_match_condition(condition, query):
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'asn-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'asn-{}'.format(cache_key(sub_query)))
         elif condition == 'org':
             sub_query = re.sub(r'[\(\)]', '', query.lower())
 
-            query = {'whois.asn_description': {'$regex': '^{}'.format(sub_query), '$options': 'i'}}
+            query = {'whois.asn_description': query}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'org-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'org-{}'.format(cache_key(sub_query)))
         elif condition == 'cidr':
             sub_query = query.lower()
 
@@ -234,43 +238,43 @@ def fetch_match_condition(condition, query):
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'cidr-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'cidr-{}'.format(cache_key(sub_query)))
         elif condition == 'cname':
             sub_query = query.lower()
 
-            query = {'cname_record.target': {'$in': [query.lower()]}}
+            query = {'cname_record.target': {'$in': [sub_query]}}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'cname-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'cname-{}'.format(cache_key(sub_query)))
         elif condition == 'mx':
             sub_query = query.lower()
 
-            query = {'mx_record.exchange': {'$in': [query.lower()]}}
+            query = {'mx_record.exchange': {'$in': [sub_query]}}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'mx-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'mx-{}'.format(cache_key(sub_query)))
         elif condition == 'ns':
             sub_query = query.lower()
 
-            query = {'ns_record': {'$in': [query.lower()]}}
+            query = {'ns_record': {'$in': [sub_query]}}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'ns-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'ns-{}'.format(cache_key(sub_query)))
         elif condition == 'server':
             sub_query = query.lower()
 
-            query = {'header.server': {'$regex': sub_query, '$options': 'i'}}
+            query = {'header.server': query}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'server-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'server-{}'.format(cache_key(sub_query)))
         elif condition == 'site':
             sub_query = query.lower()
 
@@ -279,7 +283,7 @@ def fetch_match_condition(condition, query):
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'site-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'site-{}'.format(cache_key(sub_query)))
         elif condition == 'ipv4':
             sub_query = query.lower()
 
@@ -288,7 +292,7 @@ def fetch_match_condition(condition, query):
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'ipv4-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'ipv4-{}'.format(cache_key(sub_query)))
         elif condition == 'ipv6':
             sub_query = query.lower()
 
@@ -297,7 +301,7 @@ def fetch_match_condition(condition, query):
             sort = ('updated', -1)
             limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, 'ipv6-{}'.format(sub_query))
+            return fetch_from_cache(query, filter, sort, limit, 'ipv6-{}'.format(cache_key(sub_query)))
 
 
 def fetch_all_prefix(prefix):
@@ -383,13 +387,13 @@ def fetch_data_prefix(sub, prefix):
 
 @app.route('/match/<path:query>', methods=['GET'])
 def fetch_data_condition(query):
-    query_list = re.sub(r'[\'"(){}]', '', query).split(':')
-    f = query_list[0].lower()
+    ql = query.split(':')
+    f = ql[0].lower()
 
     if f == 'ipv6':
-        q = ':'.join(query_list[1:])
+        q = ':'.join(ql[1:])
     else:
-        q = query_list[1]
+        q = ql[1]
 
     data = list(fetch_match_condition(f, q))
 

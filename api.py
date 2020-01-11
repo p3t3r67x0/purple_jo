@@ -315,7 +315,7 @@ def fetch_all_asn(asn):
 def fetch_query_domain(q):
     sub_query = q.lower()
 
-    query = {'$text': {'$search': '\"{}\"'.format(q)}}
+    query = {'$text': {'$search': q}}
     filter = {'score': {'$meta': "textScore"}, '_id': 0}
     sort = ('score', {'$meta': 'textScore'})
     limit = 30

@@ -159,18 +159,18 @@ def fetch_match_condition(condition, query):
 
             return fetch_from_cache(query, filter, sort, limit, 'registry-{}'.format(cache_key(sub_query)))
         elif condition == 'port':
-            sub_query = int(query)
+            sub_query = query
 
-            query = {'ports.port': sub_query}
+            query = {'ports.port': int(query)}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'port-{}'.format(cache_key(sub_query)))
         elif condition == 'status':
-            sub_query = int(query)
+            sub_query = query
 
-            query = {'header.status': query}
+            query = {'header.status': int(query)}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30

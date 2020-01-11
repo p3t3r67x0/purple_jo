@@ -170,7 +170,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'status':
             sub_query = query
 
-            query = {'header.status': int(query)}
+            query = {'header.status': sub_query}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30

@@ -6,7 +6,7 @@ import aiohttp_cors
 from aiohttp import web
 from aiohttp_wsgi import WSGIHandler
 from motor.motor_asyncio import AsyncIOMotorClient
-from datetime import datetime
+from datetime import datetime, timedelta
 from api import app
 
 
@@ -19,10 +19,11 @@ class RestHandler:
     @asyncio.coroutine
     def trends(self, req):
         mongo = req.app['db']
+        created = datetime.utcnow() - timedelta(days=1)
 
-        document = yield from mongo.entries.aggregate([{'$project': {'status_code': 1, 'path': 1}},
-            {'$match': {'$and': [{'status_code': 200}, {'path': {'$regex': '^\/match'}}]}},
-            {'$sortByCount': '$path'}, {'$project': {'count': 1, 'trend': '$_id', '_id': 0}}]).to_list(length=300)
+        document = yield from mongo.entries.aggregate([{'$project': {'status_code': 1, 'created': 1, 'path': 1}},
+                                                       {'$match': {'$and': [{'status_code': 200}, {'created': {'$gte': created}}, {'path': {'$regex': '^\/match'}}]}},
+                                                       {'$sortByCount': '$path'}, {'$project': {'count': 1, 'trend': '$_id', '_id': 0}}]).to_list(length=300)
 
         if not document:
             return web.HTTPNotFound(text='Page not found, yolo!')

@@ -312,13 +312,15 @@ def fetch_all_asn(asn):
     return mongo.db.lookup.find({'whois.asn': asn}, {'_id': 0}).limit(5)
 
 
-def fetch_query_dns(domain):
-    query = {'$text': {'$search': '"{}"'.format(domain)}}
+def fetch_query_domain(q):
+    sub_query = q.lower()
+
+    query = {'$text': {'$search': '\"{}\"'.format(q)}}
     filter = {'score': {'$meta': "textScore"}, '_id': 0}
     sort = ('score', {'$meta': 'textScore'})
-    limit = 200
+    limit = 30
 
-    return fetch_from_cache(query, filter, sort, limit, domain)
+    return fetch_from_cache(query, filter, sort, limit, 'all-{}'.format(cache_key(sub_query)))
 
 
 def fetch_latest_dns():
@@ -365,14 +367,14 @@ def asn_lookup(ipv4):
     return {'prefix': prefix, 'name': name, 'asn': asn}
 
 
-@app.route('/dns/<string:domain>', methods=['GET'])
-def fetch_data_dns(domain):
-    data = list(fetch_query_dns(domain))
+@app.route('/query/<string:domain>', methods=['GET'])
+def fetch_data_domain(domain):
+    data = list(fetch_query_domain(domain))
 
     if data:
         return jsonify(data)
     else:
-        return [{}], status.HTTP_404_NOT_FOUND
+        return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/subnet/<string:sub>/<string:prefix>', methods=['GET'])
@@ -382,7 +384,7 @@ def fetch_data_prefix(sub, prefix):
     if data:
         return jsonify(data)
     else:
-        return [{}], status.HTTP_404_NOT_FOUND
+        return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/match/<path:query>', methods=['GET'])
@@ -400,7 +402,7 @@ def fetch_data_condition(query):
     if data:
         return jsonify(data)
     else:
-        return [{}], status.HTTP_404_NOT_FOUND
+        return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/dns/', methods=['GET'])
@@ -411,7 +413,7 @@ def fetch_latest_dns_data():
     if data:
         return jsonify(data)
     else:
-        return [{}], status.HTTP_404_NOT_FOUND
+        return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/asn', methods=['GET'])
@@ -421,7 +423,7 @@ def fetch_latest_asn_data():
     if data:
         return jsonify(data)
     else:
-        return [{}], status.HTTP_404_NOT_FOUND
+        return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/cidr', methods=['GET'])
@@ -431,7 +433,7 @@ def fetch_latest_cidr_data():
     if data:
         return jsonify(data)
     else:
-        return [{}], status.HTTP_404_NOT_FOUND
+        return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/ipv4', methods=['GET'])
@@ -451,12 +453,12 @@ def fetch_latest_ipv4_data():
     if v:
         return jsonify(v)
     else:
-        return [{}], status.HTTP_404_NOT_FOUND
+        return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/', methods=['GET'])
 def fetch_nothing():
-    return [{}], status.HTTP_404_NOT_FOUND
+    return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/ip/<string:ipv4>', methods=['GET'])
@@ -487,7 +489,7 @@ def fetch_data_ip(ipv4):
     if data:
         return jsonify(data)
     else:
-        return [{}], status.HTTP_404_NOT_FOUND
+        return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 def argparser():

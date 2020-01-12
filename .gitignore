@@ -108,3 +108,4 @@ venv.bak/
 *.sock
 *.json
 *.cfg
+/data

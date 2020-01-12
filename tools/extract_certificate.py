@@ -23,10 +23,11 @@ def connect(host):
 
 
 def retrieve_domains(db):
-    return db.dns.find({'ssl_cert': {'$exists': False},'domain': {
+    return db.dns.find({'ssl': {'$exists': False}, 'domain': {
                         '$regex': '^(([\w]*\.)?(?!(xn--)+)[\w]*\.[\w]+)$'},
-                        'cert_scan_failed': {'$exists': False}
-                        }).sort([('$natural', -1)])
+                        'cert_scan_failed': {'$exists': False},
+                        'ports.port': {'$in': [443]}
+                        }).sort([('updated', -1)])
 
 
 def update_data(db, doc_id, domain, post):
@@ -57,39 +58,36 @@ def extract_certificate(domain):
     issuer = {}
     subject = {}
     alt_names = []
-    ciphers = []
 
     for item in cert['subject']:
-        subject['_'.join(re.findall('.[^A-Z]*', item[0][0])).lower()] = item[0][1]
+        subject['_'.join(re.findall('.[^A-Z]*', item[0][0])
+                         ).lower()] = item[0][1]
 
     for item in cert['issuer']:
-        issuer['_'.join(re.findall('.[^A-Z]*', item[0][0])).lower()] = item[0][1]
+        issuer['_'.join(re.findall('.[^A-Z]*', item[0][0])
+                        ).lower()] = item[0][1]
 
     for item in cert['subjectAltName']:
         alt_names.append(item[1])
 
-    for item in cipher:
-        ciphers.append({'tls_version': item[1], 'name': item[0], 'bits': item[2]})
-
-    post = [{
+    post = {
         'issuer': issuer,
-        'ciphers': ciphers,
         'subject': subject,
         'subject_alt_names': alt_names,
         'serial': cert['serialNumber'],
-        'not_before': cert['notBefore'],
-        'not_after': cert['notAfter'],
+        'not_before': datetime.strptime(cert['notBefore'], '%b %d %H:%M:%S %Y %Z'),
+        'not_after': datetime.strptime(cert['notAfter'], '%b %d %H:%M:%S %Y %Z'),
         'version': cert['version'],
-    }]
+    }
 
     if 'OCSP' in cert and len(cert['OCSP']):
-        post[0]['ocsp'] = cert['OCSP'][0]
+        post['ocsp'] = cert['OCSP'][0].strip('/')
 
     if 'caIssuers' in cert and len(cert['caIssuers']):
-        post[0]['ca_issuers'] = cert['caIssuers'][0]
+        post['ca_issuers'] = cert['caIssuers'][0].strip('/')
 
     if 'crlDistributionPoints' in cert and len(cert['crlDistributionPoints']):
-        post[0]['crl_distribution_points'] = cert['crlDistributionPoints'][0]
+        post['crl_distribution_points'] = cert['crlDistributionPoints'][0].strip('/')
 
     return post
 
@@ -108,15 +106,18 @@ def main():
     db = client.ip_data
 
     for domain in retrieve_domains(db):
-        print(u'INFO: scanning domain {} for ssl certificate'.format(domain['domain']))
+        print(u'INFO: scanning domain {} for ssl certificate'.format(
+            domain['domain']))
 
         cert = extract_certificate(domain['domain'])
 
         if cert:
             print(cert)
-            update_data(db, domain['_id'], domain['domain'], {'ssl_cert': cert, 'updated': datetime.utcnow()})
+            update_data(db, domain['_id'], domain['domain'], {
+                        'ssl': cert, 'updated': datetime.utcnow()})
         else:
-            update_data(db, domain['_id'], domain['domain'], {'cert_scan_failed': datetime.utcnow()})
+            update_data(db, domain['_id'], domain['domain'], {
+                        'cert_scan_failed': datetime.utcnow()})
 
     client.close()
 

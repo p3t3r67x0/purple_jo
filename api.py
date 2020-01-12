@@ -188,7 +188,7 @@ def fetch_match_condition(condition, query):
         elif condition == 'service':
             sub_query = query.lower()
 
-            query = {'header.x-powered-by':query}
+            query = {'header.x-powered-by': query}
             filter = {'_id': 0}
             sort = ('updated', -1)
             limit = 30
@@ -203,6 +203,40 @@ def fetch_match_condition(condition, query):
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'country-{}'.format(cache_key(sub_query)))
+        elif condition == 'state':
+            sub_query = query.lower()
+
+            query = {'geo.state': query}
+            filter = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, filter, sort, limit, 'state-{}'.format(cache_key(sub_query)))
+        elif condition == 'city':
+            sub_query = query.lower()
+
+            query = {'geo.city': query}
+            filter = {'_id': 0}
+            sort = ('updated', -1)
+            limit = 30
+
+            return fetch_from_cache(query, filter, sort, limit, 'city-{}'.format(cache_key(sub_query)))
+        elif condition == 'loc':
+            sub_query = query.lower()
+            splited = query.split(',')
+
+            if len(splited) == 2:
+                query = {'geo.loc.coordinates': {'$near': {
+                    '$geometry': {'type': 'Point', 'coordinates': [float(splited[0]), float(splited[1])]},
+                    '$maxDistance': 50000
+                }}}
+                filter = {'_id': 0}
+                sort = ('updated', -1)
+                limit = 30
+
+                return fetch_from_cache(query, filter, sort, limit, 'loc-{}'.format(cache_key(sub_query)))
+            else:
+                return None
         elif condition == 'banner':
             sub_query = query.lower()
 
@@ -521,6 +555,11 @@ create_index('ns_record', 'updated')
 create_index('aaaa_record', 'updated')
 create_index('a_record', 'updated')
 create_index('domain', 'updated')
+create_index('geo.loc.coordinates', 'updated')
+create_index('geo.country_code', 'updated')
+create_index('geo.country', 'updated')
+create_index('geo.state', 'updated')
+create_index('geo.city', 'updated')
 
 
 if __name__ == '__main__':

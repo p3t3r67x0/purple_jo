@@ -121,7 +121,15 @@ def fetch_from_cache(query, filter, sort, limit, cache_key):
 
     if len(stored) == 0:
         store_cache(query, filter, sort, limit, cache_key)
-        return list(mongo.db.dns.find(query, filter).sort([sort]).limit(limit))
+        return list(mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit}, {'$addFields': {
+            'created_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$created'}},
+            'updated_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$updated'}},
+            'domain_crawled_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$domain_crawled'}},
+            'header_scan_failed_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$header_scan_failed'}},
+            'ssl.not_after_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$ssl.not_after'}},
+            'ssl.not_before_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$ssl.not_before'}}}},
+            {'$project': filter}, {'$sort': sort}, {'$limit': limit}]))
+        # return list(mongo.db.dns.find(query, filter).sort([sort]).limit(limit))
 
     for store in stored:
         cache_list.append(cache.jsonget(store, Path.rootPath()))
@@ -133,7 +141,15 @@ def store_cache(query, filter, sort, limit, cache_key, reset=False):
     if reset:
         cache.delete(cache_key)
 
-    docs = mongo.db.dns.find(query, filter).sort([sort]).limit(limit)
+    docs = mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit}, {'$addFields': {
+        'created_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$created'}},
+        'updated_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$updated'}},
+        'domain_crawled_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$domain_crawled'}},
+        'header_scan_failed_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$header_scan_failed'}},
+        'ssl.not_after_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$ssl.not_after'}},
+        'ssl.not_before_formatted': {'$dateToString': {'format': '%m/%d/%Y %H:%M:%S', 'date': '$ssl.not_before'}}}},
+        {'$project': filter}, {'$sort': sort}])
+    #docs = mongo.db.dns.find(query, filter).sort([sort]).limit(limit)
 
     for doc in docs:
         uid = hash(uuid.uuid4())
@@ -154,7 +170,7 @@ def fetch_match_condition(condition, query):
 
             query = {'whois.asn_registry': sub_query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'registry-{}'.format(cache_key(sub_query)))
@@ -163,7 +179,7 @@ def fetch_match_condition(condition, query):
 
             query = {'ports.port': int(query)}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'port-{}'.format(cache_key(sub_query)))
@@ -172,25 +188,73 @@ def fetch_match_condition(condition, query):
 
             query = {'header.status': sub_query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'status-{}'.format(cache_key(sub_query)))
         elif condition == 'ssl':
             sub_query = query.lower()
 
-            query = {'ssl_cert.subject.common_name': sub_query}
+            query = {'$or': [{'ssl.subject.common_name': sub_query},
+                             {'ssl.subject_alt_names': {'$in': [sub_query]}}]}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'ssl-{}'.format(cache_key(sub_query)))
+        elif condition == 'before':
+            sub_query = query.lower()
+
+            query = {'ssl.not_before': {
+                '$lte': datetime.strptime(query, '%m/%d/%Y %H:%M:%S')}}
+            filter = {'_id': 0}
+            sort = {'updated': -1}
+            limit = 30
+
+            return fetch_from_cache(query, filter, sort, limit, 'before-{}'.format(cache_key(sub_query)))
+        elif condition == 'after':
+            sub_query = query.lower()
+
+            query = {'ssl.not_after': {
+                '$lte': datetime.strptime(query, '%m/%d/%Y %H:%M:%S')}}
+            filter = {'_id': 0}
+            sort = {'updated': -1}
+            limit = 30
+
+            return fetch_from_cache(query, filter, sort, limit, 'after-{}'.format(cache_key(sub_query)))
+        elif condition == 'ca':
+            sub_query = query.lower()
+
+            query = {'ssl.ca_issuers': query}
+            filter = {'_id': 0}
+            sort = {'updated': -1}
+            limit = 30
+
+            return fetch_from_cache(query, filter, sort, limit, 'ca-{}'.format(cache_key(sub_query)))
+        elif condition == 'ocsp':
+            sub_query = query.lower()
+
+            query = {'ssl.ocsp': query}
+            filter = {'_id': 0}
+            sort = {'updated': -1}
+            limit = 30
+
+            return fetch_from_cache(query, filter, sort, limit, 'ocsp-{}'.format(cache_key(sub_query)))
+        elif condition == 'crl':
+            sub_query = query.lower()
+
+            query = {'ssl.crl_distribution_points': query}
+            filter = {'_id': 0}
+            sort = {'updated': -1}
+            limit = 30
+
+            return fetch_from_cache(query, filter, sort, limit, 'crl-{}'.format(cache_key(sub_query)))
         elif condition == 'service':
             sub_query = query.lower()
 
             query = {'header.x-powered-by': query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'service-{}'.format(cache_key(sub_query)))
@@ -199,7 +263,7 @@ def fetch_match_condition(condition, query):
 
             query = {'whois.asn_country_code': sub_query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'country-{}'.format(cache_key(sub_query)))
@@ -208,7 +272,7 @@ def fetch_match_condition(condition, query):
 
             query = {'geo.state': query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'state-{}'.format(cache_key(sub_query)))
@@ -217,7 +281,7 @@ def fetch_match_condition(condition, query):
 
             query = {'geo.city': query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'city-{}'.format(cache_key(sub_query)))
@@ -225,24 +289,24 @@ def fetch_match_condition(condition, query):
             sub_query = query.lower()
             splited = query.split(',')
 
-            if len(splited) == 2:
+            try:
                 query = {'geo.loc.coordinates': {'$near': {
                     '$geometry': {'type': 'Point', 'coordinates': [float(splited[0]), float(splited[1])]},
                     '$maxDistance': 50000
                 }}}
                 filter = {'_id': 0}
-                sort = ('updated', -1)
+                sort = {'updated': -1}
                 limit = 30
 
                 return fetch_from_cache(query, filter, sort, limit, 'loc-{}'.format(cache_key(sub_query)))
-            else:
-                return None
+            except ValueError:
+                return []
         elif condition == 'banner':
             sub_query = query.lower()
 
             query = {'banner': query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'banner-{}'.format(cache_key(sub_query)))
@@ -251,7 +315,7 @@ def fetch_match_condition(condition, query):
 
             query = {'whois.asn': sub_query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'asn-{}'.format(cache_key(sub_query)))
@@ -260,7 +324,7 @@ def fetch_match_condition(condition, query):
 
             query = {'whois.asn_description': query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'org-{}'.format(cache_key(sub_query)))
@@ -269,7 +333,7 @@ def fetch_match_condition(condition, query):
 
             query = {'whois.asn_cidr': query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'cidr-{}'.format(cache_key(sub_query)))
@@ -278,7 +342,7 @@ def fetch_match_condition(condition, query):
 
             query = {'cname_record.target': {'$in': [sub_query]}}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'cname-{}'.format(cache_key(sub_query)))
@@ -287,7 +351,7 @@ def fetch_match_condition(condition, query):
 
             query = {'mx_record.exchange': {'$in': [sub_query]}}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'mx-{}'.format(cache_key(sub_query)))
@@ -296,7 +360,7 @@ def fetch_match_condition(condition, query):
 
             query = {'ns_record': {'$in': [sub_query]}}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'ns-{}'.format(cache_key(sub_query)))
@@ -305,7 +369,7 @@ def fetch_match_condition(condition, query):
 
             query = {'header.server': query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'server-{}'.format(cache_key(sub_query)))
@@ -314,7 +378,7 @@ def fetch_match_condition(condition, query):
 
             query = {'domain': sub_query}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'site-{}'.format(cache_key(sub_query)))
@@ -323,7 +387,7 @@ def fetch_match_condition(condition, query):
 
             query = {'a_record': {'$in': [query]}}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'ipv4-{}'.format(cache_key(sub_query)))
@@ -332,7 +396,7 @@ def fetch_match_condition(condition, query):
 
             query = {'aaaa_record': {'$in': [query]}}
             filter = {'_id': 0}
-            sort = ('updated', -1)
+            sort = {'updated': -1}
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, 'ipv6-{}'.format(cache_key(sub_query)))
@@ -360,7 +424,7 @@ def fetch_query_domain(q):
 def fetch_latest_dns():
     query = {'updated': {'$exists': True}, 'scan_failed': {'$exists': False}}
     filter = {'_id': 0}
-    sort = ('updated', -1)
+    sort = {'updated': -1}
     limit = 200
 
     return fetch_from_cache(query, filter, sort, limit, 'latest_dns')
@@ -369,7 +433,7 @@ def fetch_latest_dns():
 def fetch_latest_cidr():
     query = {'whois.asn_cidr': {'$exists': True}}
     filter = {'_id': 0, 'whois.asn_country_code': 1, 'whois.asn_cidr': 1}
-    sort = ('updated', -1)
+    sort = {'updated': -1}
     limit = 200
 
     return fetch_from_cache(query, filter, sort, limit, 'latest_cidr')
@@ -378,7 +442,7 @@ def fetch_latest_cidr():
 def fetch_latest_ipv4():
     query = {'a_record': {'$exists': True}}
     filter = {'_id': 0, 'a_record': 1, 'country_code': 1}
-    sort = ('updated', -1)
+    sort = {'updated': -1}
     limit = 200
 
     return fetch_from_cache(query, filter, sort, limit, 'ilatest_pv4')
@@ -387,14 +451,15 @@ def fetch_latest_ipv4():
 def fetch_latest_asn():
     query = {'whois.asn': {'$exists': True}}
     filter = {'_id': 0, 'whois.asn': 1, 'whois.asn_country_code': 1}
-    sort = ('updated', -1)
+    sort = {'updated': -1}
     limit = 200
 
     return fetch_from_cache(query, filter, sort, limit, 'latest_asn')
 
 
 def asn_lookup(ipv4):
-    asndb = pyasn.pyasn('rib.20191127.2000.dat', as_names_file='asn_names.json')
+    asndb = pyasn.pyasn('rib.20191127.2000.dat',
+                        as_names_file='asn_names.json')
     asn, prefix = asndb.lookup(ipv4)
     name = asndb.get_as_name(asn)
 
@@ -426,7 +491,7 @@ def fetch_data_condition(query):
     ql = query.split(':')
     f = ql[0].lower()
 
-    if f == 'ipv6':
+    if f == 'ipv6' or f == 'ca' or f == 'crl' or f == 'ocsp' or f == 'before' or f == 'after':
         q = ':'.join(ql[1:])
     else:
         q = ql[1]
@@ -539,7 +604,11 @@ cache = connect_cache()
 
 # create index for all match methods
 create_index('ports.port', 'updated')
-create_index('ssl_cert.subject.common_name', 'updated')
+create_index('ssl.ocsp', 'updated')
+create_index('ssl.ca_issuers', 'updated')
+create_index('ssl.subject_alt_names', 'updated')
+create_index('ssl.subject.common_name', 'updated')
+create_index('ssl.crl_distribution_points', 'updated')
 create_index('header.x-powered-by', 'updated')
 create_index('banner', 'updated')
 create_index('whois.asn', 'updated')

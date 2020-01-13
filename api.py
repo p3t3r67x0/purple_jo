@@ -605,6 +605,8 @@ cache = connect_cache()
 # create index for all match methods
 create_index('ports.port', 'updated')
 create_index('ssl.ocsp', 'updated')
+create_index('ssl.not_after', 'updated')
+create_index('ssl.not_before', 'updated')
 create_index('ssl.ca_issuers', 'updated')
 create_index('ssl.subject_alt_names', 'updated')
 create_index('ssl.subject.common_name', 'updated')

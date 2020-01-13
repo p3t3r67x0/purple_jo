@@ -261,7 +261,8 @@ def fetch_match_condition(condition, query):
         elif condition == 'country':
             sub_query = query.upper()
 
-            query = {'whois.asn_country_code': sub_query}
+            query = {'$and': [{'geo.country_code': query},
+                    {'whois.asn_country_code': query}]}
             filter = {'_id': 0}
             sort = {'updated': -1}
             limit = 30

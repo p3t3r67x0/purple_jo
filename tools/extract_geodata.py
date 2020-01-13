@@ -57,7 +57,8 @@ def extract_geodata(db, ip, df):
                                      'state': r[4].iloc[0],
                                      'city': r[5].iloc[0],
                                      'loc': {
-                                         'coordinates': [r[7].iloc[0], r[6].iloc[0]]
+                                         'coordinates': [round(r[7].iloc[0], 5),
+                                                         round(r[6].iloc[0], 5)]
                                      }}, 'updated': datetime.utcnow()})
 
 

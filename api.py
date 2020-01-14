@@ -462,7 +462,7 @@ def fetch_query_domain(q):
 
     query = {'$text': {'$search': q}}
     filter = {'score': {'$meta': "textScore"}, '_id': 0}
-    sort = ('score', {'$meta': 'textScore'})
+    sort = {'score', {'$meta': 'textScore'}}
     context = 'normal'
     limit = 30
 

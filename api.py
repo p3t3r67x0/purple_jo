@@ -6,7 +6,6 @@ import socket
 import argparse
 import json
 import uuid
-import sys
 import os
 
 from datetime import datetime
@@ -172,9 +171,12 @@ def store_cache(query, filter, sort, limit, context, cache_key, reset=False):
 
     for doc in docs:
         uid = hash(uuid.uuid4())
+        expire = 3600 * 24
         cache.jsonset(uid, Path.rootPath(), json.loads(
             json.dumps(doc, default=json_util.default)))
         cache.sadd(cache_key, uid)
+        cache.expire(cache_key, expire)
+        cache.expire(uid, expire)
 
 
 def create_index(field_name_1, field_name_2):

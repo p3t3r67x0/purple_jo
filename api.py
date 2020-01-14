@@ -8,7 +8,7 @@ import json
 import uuid
 import os
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import jsonify
 from flask_api import FlaskAPI, status
@@ -487,7 +487,9 @@ def fetch_query_domain(q):
 
 
 def fetch_latest_dns():
-    query = {'updated': {'$exists': True}, 'scan_failed': {'$exists': False}}
+    date = datetime.utcnow() - timedelta(days=5)
+
+    query = {'updated': {'$gte': date}}
     filter = {'_id': 0}
     sort = {'updated': -1}
     context = 'normal'
@@ -508,12 +510,12 @@ def fetch_latest_cidr():
 
 def fetch_latest_ipv4():
     query = {'a_record': {'$exists': True}}
-    filter = {'_id': 0, 'a_record': 1, 'country_code': 1}
+    filter = {'_id': 0, 'a_record': 1, 'geo.country_code': 1}
     sort = {'updated': -1}
     context = 'normal'
     limit = 200
 
-    return fetch_from_cache(query, filter, sort, limit, context, 'ilatest_pv4')
+    return fetch_from_cache(query, filter, sort, limit, context, 'latest_pv4')
 
 
 def fetch_latest_asn():

@@ -54,7 +54,7 @@ app.url_map.converters['match'] = EverythingConverter
 
 
 @app.errorhandler(TypeError)
-def handle_not_found(e):
+def handle_type_error(e):
     app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
     return jsonify(message='Something went wrong application error'), 500
 
@@ -96,7 +96,7 @@ def handle_request_entity_too_large(e):
 
 
 @app.errorhandler(ServerSelectionTimeoutError)
-def handle_not_found(e):
+def handle_server_selection_timeout(e):
     app.logger.error('type: {}, args: {}'.format(type(e).__name__, e.args))
     return jsonify(message='Something went wrong application error'), 500
 
@@ -114,6 +114,20 @@ def cache_key(key):
     return re.sub(r'[\\\/\(\)\'\"\[\],;:#+~\. ]', '-', key)
 
 
+def extra_fields(context):
+    data = {'created_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$created'}},
+            'updated_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$updated'}},
+            'domain_crawled_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$domain_crawled'}},
+            'header_scan_failed_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$header_scan_failed'}},
+            'ssl.not_after_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_after'}},
+            'ssl.not_before_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_before'}}}
+
+    if context == 'text':
+        data['score'] = {'$meta': "textScore"}
+
+    return data
+
+
 def fetch_from_cache(query, filter, sort, limit, context, cache_key):
     stored = cache.smembers(cache_key)
     cache_list = []
@@ -121,24 +135,15 @@ def fetch_from_cache(query, filter, sort, limit, context, cache_key):
     if len(stored) == 0:
         store_cache(query, filter, sort, limit, context, cache_key)
 
-        if context == 'spatial':
-            return list(mongo.db.dns.aggregate([{'$geoNear': query}, {'$limit': limit}, {'$addFields': {
-                'created_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$created'}},
-                'updated_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$updated'}},
-                'domain_crawled_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$domain_crawled'}},
-                'header_scan_failed_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$header_scan_failed'}},
-                'ssl.not_after_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_after'}},
-                'ssl.not_before_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_before'}}}},
-                {'$project': filter}, {'$sort': sort}]))
+        if context == 'text':
+            return list(mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit},
+                {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}]))
+        elif context == 'spatial':
+            return list(mongo.db.dns.aggregate([{'$geoNear': query}, {'$limit': limit},
+                {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}]))
         else:
-            return list(mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit}, {'$addFields': {
-                'created_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$created'}},
-                'updated_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$updated'}},
-                'domain_crawled_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$domain_crawled'}},
-                'header_scan_failed_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$header_scan_failed'}},
-                'ssl.not_after_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_after'}},
-                'ssl.not_before_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_before'}}}},
-                {'$project': filter}, {'$sort': sort}]))
+            return list(mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit},
+                {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}]))
 
     for store in stored:
         cache_list.append(cache.jsonget(store, Path.rootPath()))
@@ -150,24 +155,15 @@ def store_cache(query, filter, sort, limit, context, cache_key, reset=False):
     if reset:
         cache.delete(cache_key)
 
-    if context == 'spatial':
-        docs = mongo.db.dns.aggregate([{'$geoNear': query}, {'$limit': limit}, {'$addFields': {
-            'created_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$created'}},
-            'updated_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$updated'}},
-            'domain_crawled_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$domain_crawled'}},
-            'header_scan_failed_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$header_scan_failed'}},
-            'ssl.not_after_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_after'}},
-            'ssl.not_before_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_before'}}}},
-            {'$project': filter}, {'$sort': sort}])
+    if context == 'text':
+        docs = mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit},
+            {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}])
+    elif context == 'spatial':
+        docs = mongo.db.dns.aggregate([{'$geoNear': query}, {'$limit': limit},
+            {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}])
     else:
-        docs = mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit}, {'$addFields': {
-            'created_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$created'}},
-            'updated_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$updated'}},
-            'domain_crawled_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$domain_crawled'}},
-            'header_scan_failed_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$header_scan_failed'}},
-            'ssl.not_after_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_after'}},
-            'ssl.not_before_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_before'}}}},
-            {'$project': filter}, {'$sort': sort}])
+        docs = mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit},
+            {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}])
 
     for doc in docs:
         uid = hash(uuid.uuid4())
@@ -461,9 +457,9 @@ def fetch_query_domain(q):
     sub_query = q.lower()
 
     query = {'$text': {'$search': q}}
-    filter = {'score': {'$meta': "textScore"}, '_id': 0}
-    sort = {'score', {'$meta': 'textScore'}}
-    context = 'normal'
+    filter = {'_id': 0}
+    sort = {'score': {'$meta': 'textScore'}}
+    context = 'text'
     limit = 30
 
     return fetch_from_cache(query, filter, sort, limit, context, 'all-{}'.format(cache_key(sub_query)))

@@ -227,7 +227,7 @@ def fetch_match_condition(condition, query):
             sub_query = query.lower()
 
             query = {'ssl.not_before': {
-                '$lte': datetime.strptime(query, '%Y-%m-%d %H:%M:%S')}}
+                '$gte': datetime.strptime(query, '%Y-%m-%d %H:%M:%S')}}
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
@@ -255,6 +255,27 @@ def fetch_match_condition(condition, query):
             limit = 30
 
             return fetch_from_cache(query, filter, sort, limit, context, 'ca-{}'.format(cache_key(sub_query)))
+        elif condition == 'issuer':
+            sub_query = query.lower()
+
+            query = {'$or': [{'ssl.issuer.organization_name': query},
+                    {'ssl.issuer.common_name': query}]}
+            filter = {'_id': 0}
+            sort = {'updated': -1}
+            context = 'normal'
+            limit = 30
+
+            return fetch_from_cache(query, filter, sort, limit, context, 'issuer-{}'.format(cache_key(sub_query)))
+        elif condition == 'unit':
+            sub_query = query.lower()
+
+            query = {'ssl.issuer.organizational_unit_name': query}
+            filter = {'_id': 0}
+            sort = {'updated': -1}
+            context = 'normal'
+            limit = 30
+
+            return fetch_from_cache(query, filter, sort, limit, context, 'unit-{}'.format(cache_key(sub_query)))
         elif condition == 'ocsp':
             sub_query = query.lower()
 
@@ -651,21 +672,18 @@ def argparser():
 cache = connect_cache()
 
 # create index for all match methods
-create_index('ports.port', 'updated')
-create_index('ssl.ocsp', 'updated')
-create_index('ssl.not_after', 'updated')
-create_index('ssl.not_before', 'updated')
-create_index('ssl.ca_issuers', 'updated')
-create_index('ssl.subject_alt_names', 'updated')
-create_index('ssl.subject.common_name', 'updated')
-create_index('ssl.crl_distribution_points', 'updated')
 create_index('header.x-powered-by', 'updated')
 create_index('banner', 'updated')
+create_index('ports.port', 'updated')
+
+# create index for whois section
 create_index('whois.asn', 'updated')
 create_index('whois.asn_description', 'updated')
 create_index('whois.asn_country_code', 'updated')
 create_index('whois.asn_registry', 'updated')
 create_index('whois.asn_cidr', 'updated')
+
+# create index for records section
 create_index('cname_record.target', 'updated')
 create_index('mx_record.exchange', 'updated')
 create_index('header.server', 'updated')
@@ -674,11 +692,25 @@ create_index('ns_record', 'updated')
 create_index('aaaa_record', 'updated')
 create_index('a_record', 'updated')
 create_index('domain', 'updated')
+
+# create index for geo section
 create_index('geo.loc.coordinates', 'updated')
 create_index('geo.country_code', 'updated')
 create_index('geo.country', 'updated')
 create_index('geo.state', 'updated')
 create_index('geo.city', 'updated')
+create_index('ssl.ocsp', 'updated')
+
+# create index for ssl section
+create_index('ssl.not_after', 'updated')
+create_index('ssl.not_before', 'updated')
+create_index('ssl.ca_issuers', 'updated')
+create_index('ssl.issuer.common_name', 'updated')
+create_index('ssl.issuer.organization_name', 'updated')
+create_index('ssl.issuer.organizational_unit_name', 'updated')
+create_index('ssl.subject_alt_names', 'updated')
+create_index('ssl.subject.common_name', 'updated')
+create_index('ssl.crl_distribution_points', 'updated')
 
 
 if __name__ == '__main__':

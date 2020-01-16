@@ -24,35 +24,32 @@ def retrieve_domains(db, client, skip, limit):
         client.close()
 
 
-def update_data(db, client, domain, post):
+def update_data(db, domain, post):
     try:
         res = db.dns.update_one({'domain': domain}, {'$set': post}, upsert=False)
 
         if res.modified_count > 0:
             print('INFO: added qrcode for domain {}'.format(domain))
-    except KeyboardInterrupt:
-        client.close()
-        return
     except DuplicateKeyError:
         return
 
 
-def generate_qrcode(id, domain):
+def generate_qrcode(db, domain, date):
     url = pyqrcode.create('https://{}'.format(domain))
-    return url.png_as_base64_str(scale=5, quiet_zone=0)
+    qrcode = url.png_as_base64_str(scale=5, quiet_zone=0)
+    update_data(db, domain, {'updated': date, 'qrcode': qrcode})
 
 
 def worker(host, skip, limit):
     client = connect(host)
     db = client.ip_data
-    now = datetime.utcnow()
+    date = datetime.utcnow()
 
     try:
         domains = retrieve_domains(db, client, limit, skip)
 
         for domain in domains:
-            qrcode = generate_qrcode(domain['_id'], domain['domain'])
-            update_data(db, client, domain['domain'], {'updated': now, 'qrcode': qrcode})
+            generate_qrcode(db, domain['domain'], date)
     except KeyboardInterrupt:
         client.close()
         return

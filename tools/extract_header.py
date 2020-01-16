@@ -23,12 +23,15 @@ def connect(host):
     return MongoClient('mongodb://{}:27017'.format(host))
 
 
-def update_data(db, doc_id, domain, post):
+def update_data(db, domain, post):
     try:
-        db.dns.update_one({'_id': doc_id}, {'$set': post}, upsert=False)
-        print(u'INFO: updated domain {} header'.format(domain))
+        data = db.dns.update_one({'domain': domain}, {
+                                 '$set': post}, upsert=False)
+
+        if data.modified_count > 0:
+            print(u'INFO: updated domain {} header'.format(domain))
     except WriteError:
-        db.dns.update_one({'_id': doc_id},
+        db.dns.update_one({'domain': domain},
                           {'$set': {'header_scan_failed': datetime.utcnow()}}, upsert=False)
     except DuplicateKeyError:
         pass
@@ -40,7 +43,7 @@ def retrieve_domains(db, skip, limit):
                         'ports.port': {'$in': [80, 443]}})[limit - skip:limit]
 
 
-def grab_http_header(domain):
+def extract_header(db, domain, date):
     ua = UserAgent()
     headers = []
 
@@ -49,6 +52,7 @@ def grab_http_header(domain):
         r = requests.head(u'https://{}'.format(domain),
                           timeout=1, allow_redirects=False, headers=h)
     except (InvalidHeader, InvalidURL, ReadTimeout, ConnectionError, ChunkedEncodingError):
+        update_data(db, domain, {'header_scan_failed': date})
         return
 
     try:
@@ -58,10 +62,13 @@ def grab_http_header(domain):
         headers = {k.lower(): v for k, v in r.headers.items()}
         headers.update(status)
         headers.update(http)
-
-        return headers
     except UnicodeDecodeError:
         return
+
+    if headers:
+        update_data(db, domain, {'header': headers, 'updated': date})
+    else:
+        update_data(db, domain, {'header_scan_failed': date})
 
 
 def worker(host, skip, limit):
@@ -76,15 +83,7 @@ def worker(host, skip, limit):
 
     for domain in domains:
         print(u'INFO: scanning {} header'.format(domain['domain']))
-        header = grab_http_header(domain['domain'])
-
-        if header:
-            print(header)
-            update_data(db, domain['_id'], domain['domain'], {
-                        'header': header, 'updated': datetime.utcnow()})
-        else:
-            update_data(db, domain['_id'], domain['domain'],
-                        {'header_scan_failed': datetime.utcnow()})
+        extract_header(db, domain['domain'], datetime.utcnow())
 
     client.close()
     return
@@ -92,7 +91,8 @@ def worker(host, skip, limit):
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--worker', help='set worker count',
+                        type=int, required=True)
     parser.add_argument('--host', help='set the host', type=str, required=True)
     args = parser.parse_args()
 
@@ -110,7 +110,8 @@ if __name__ == '__main__':
     limit = amount
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(args.host, limit, amount))
+        j = multiprocessing.Process(
+            target=worker, args=(args.host, limit, amount))
         jobs.append(j)
         j.start()
         limit = limit + amount

@@ -33,17 +33,13 @@ def retrieve_asns(db, limit, skip):
     return db.lookup.find({'whois.asn': {'$exists': False}})[limit - skip:limit]
 
 
-def update_data_dns(db, ip, domain, post):
+def update_data_dns(db, ip, post):
     try:
         if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(post['whois']['asn_cidr']):
-            res = db.dns.update_many({'a_record': {'$in': [ip]},
-                                      'whois.asn': {'$exists': False}}, {
-                                      '$set': post}, upsert=False)
+            res = db.dns.update_one({'a_record.0': ip}, {'$set': post}, upsert=False)
 
             if res.modified_count > 0:
-                print(u'INFO: updated {} whois entries for domain {}'.format(res.modified_count, domain))
-            else:
-                print(u'INFO: nothing to update for domain {}'.format(domain))
+                print(u'INFO: updated {} whois {}'.format(ip, post))
         else:
             print('INFO: IP {} is not in subnet {}'.format(ip, post['whois']['asn_cidr']))
     except (AddressValueError, DuplicateKeyError):
@@ -61,7 +57,7 @@ def update_data_lookup(db, asn, post):
 
 def get_whois(ip):
     try:
-        whois = IPASN(Net(ip)).lookup(retry_count=10, asn_methods=['whois'])
+        whois = IPASN(Net(ip)).lookup(retry_count=0, asn_methods=['whois'])
     except Exception:
         whois = None
 
@@ -81,13 +77,20 @@ def get_cidr(ip, asn):
 
         return x
     except ASNOriginLookupError:
-        return None
+        pass
+
+
+def handle_whois(db, ip, date):
+    whois = get_whois(ip)
+
+    if whois and len(whois) > 0:
+        update_data_dns(db, ip, {'updated': date, 'whois': whois})
 
 
 def worker(host, limit, skip, col):
     client = connect(host)
     db = client.ip_data
-    now = datetime.utcnow()
+    date = datetime.utcnow()
 
     if col == 'lookup':
         try:
@@ -96,22 +99,18 @@ def worker(host, limit, skip, col):
                 cidr = get_cidr(asn['ip'], asn['asn'])
 
                 if whois and cidr and len(whois) > 0:
-                    update_data_lookup(db, asn['asn'], {'updated': now, 'cidr': cidr, 'whois': whois})
+                    update_data_lookup(db, asn['asn'], {'updated': date, 'cidr': cidr, 'whois': whois})
         except CursorNotFound:
             pass
 
     elif col == 'dns':
         try:
             for dns in retrieve_dns(db, limit, skip):
-                whois = get_whois(dns['a_record'][0])
-
-                if whois and len(whois) > 0:
-                    update_data_dns(db, dns['a_record'][0], dns['domain'], {'updated': now, 'whois': whois})
+                handle_whois(db, dns['a_record'][0], date)
         except CursorNotFound:
             pass
 
     client.close()
-    return
 
 
 def argparser():

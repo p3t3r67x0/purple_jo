@@ -30,9 +30,9 @@ def retrieve_domains(db):
                         }).sort([('updated', -1)])
 
 
-def update_data(db, doc_id, domain, post):
+def update_data(db, domain, post):
     try:
-        db.dns.update_one({'_id': doc_id}, {'$set': post}, upsert=False)
+        db.dns.update_one({'domain': domain}, {'$set': post}, upsert=False)
         print(u'INFO: updated domain {} ssl cert'.format(domain))
     except (ServerSelectionTimeoutError, NotMasterError, DuplicateKeyError):
         pass
@@ -92,6 +92,15 @@ def extract_certificate(domain):
     return post
 
 
+def handle_certificate(db, domain, date):
+    cert = extract_certificate(domain)
+
+    if cert:
+        update_data(db, domain, {'ssl': cert, 'updated': date})
+    else:
+        update_data(db, domain, {'ssl_scan_failed': date})
+
+
 def argparser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', help='set the host', type=str, required=True)
@@ -106,18 +115,7 @@ def main():
     db = client.ip_data
 
     for domain in retrieve_domains(db):
-        print(u'INFO: scanning domain {} for ssl certificate'.format(
-            domain['domain']))
-
-        cert = extract_certificate(domain['domain'])
-
-        if cert:
-            print(cert)
-            update_data(db, domain['_id'], domain['domain'], {
-                        'ssl': cert, 'updated': datetime.utcnow()})
-        else:
-            update_data(db, domain['_id'], domain['domain'], {
-                        'cert_scan_failed': datetime.utcnow()})
+        handle_certificate(db, domain['domain'], datetime.utcnow())
 
     client.close()
 

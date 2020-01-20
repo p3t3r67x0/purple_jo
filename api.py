@@ -131,7 +131,7 @@ def extra_fields(context):
     return data
 
 
-def fetch_from_cache(query, filter, sort, limit, context, reset, cache_key):
+def fetch_from_cache(query, filter, unwind, sort, limit, context, reset, cache_key):
     if reset:
         cache.delete(cache_key)
 
@@ -139,13 +139,16 @@ def fetch_from_cache(query, filter, sort, limit, context, reset, cache_key):
     cache_list = []
 
     if len(stored) == 0:
-        store_cache(query, filter, sort, limit, context, cache_key)
+        store_cache(query, filter, unwind, sort, limit, context, cache_key)
 
         if context == 'text':
             return list(mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit},
                 {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}]))
         elif context == 'spatial':
             return list(mongo.db.dns.aggregate([{'$geoNear': query}, {'$limit': limit},
+                {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}]))
+        elif context == 'unwind':
+            return list(mongo.db.dns.aggregate([{'$match': query}, {'$unwind': unwind}, {'$limit': limit},
                 {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}]))
         else:
             return list(mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit},
@@ -158,12 +161,15 @@ def fetch_from_cache(query, filter, sort, limit, context, reset, cache_key):
 
 reset = False
 
-def store_cache(query, filter, sort, limit, context, cache_key):
+def store_cache(query, filter, unwind, sort, limit, context, cache_key):
     if context == 'text':
         docs = mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit},
             {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}])
     elif context == 'spatial':
         docs = mongo.db.dns.aggregate([{'$geoNear': query}, {'$limit': limit},
+            {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}])
+    elif context == 'unwind':
+        docs = mongo.db.dns.aggregate([{'$match': query}, {'$unwind': unwind}, {'$limit': limit},
             {'$addFields': extra_fields(context)}, {'$project': filter}, {'$sort': sort}])
     else:
         docs = mongo.db.dns.aggregate([{'$match': query}, {'$limit': limit},
@@ -193,10 +199,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'registry-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'registry-{}'.format(cache_key(sub_query)))
         elif condition == 'port':
             sub_query = query
 
@@ -204,10 +211,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'port-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'port-{}'.format(cache_key(sub_query)))
         elif condition == 'status':
             sub_query = query
 
@@ -215,10 +223,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'status-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'status-{}'.format(cache_key(sub_query)))
         elif condition == 'ssl':
             sub_query = query.lower()
 
@@ -227,10 +236,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'ssl-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'ssl-{}'.format(cache_key(sub_query)))
         elif condition == 'before':
             sub_query = query.lower()
 
@@ -239,10 +249,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'before-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'before-{}'.format(cache_key(sub_query)))
         elif condition == 'after':
             sub_query = query.lower()
 
@@ -251,10 +262,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'after-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'after-{}'.format(cache_key(sub_query)))
         elif condition == 'ca':
             sub_query = query.lower()
 
@@ -262,10 +274,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'ca-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'ca-{}'.format(cache_key(sub_query)))
         elif condition == 'issuer':
             sub_query = query.lower()
 
@@ -274,10 +287,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'issuer-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'issuer-{}'.format(cache_key(sub_query)))
         elif condition == 'unit':
             sub_query = query.lower()
 
@@ -286,10 +300,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'unit-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'unit-{}'.format(cache_key(sub_query)))
         elif condition == 'ocsp':
             sub_query = query.lower()
 
@@ -297,10 +312,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'ocsp-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'ocsp-{}'.format(cache_key(sub_query)))
         elif condition == 'crl':
             sub_query = query.lower()
 
@@ -308,10 +324,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'crl-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'crl-{}'.format(cache_key(sub_query)))
         elif condition == 'service':
             sub_query = query.lower()
 
@@ -319,10 +336,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'service-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'service-{}'.format(cache_key(sub_query)))
         elif condition == 'country':
             sub_query = query.upper()
 
@@ -331,10 +349,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'country-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'country-{}'.format(cache_key(sub_query)))
         elif condition == 'state':
             sub_query = query.lower()
 
@@ -342,10 +361,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'state-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'state-{}'.format(cache_key(sub_query)))
         elif condition == 'city':
             sub_query = query.lower()
 
@@ -353,10 +373,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'city-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'city-{}'.format(cache_key(sub_query)))
         elif condition == 'loc':
             sub_query = query.lower()
             splited = query.split(',')
@@ -368,11 +389,12 @@ def fetch_match_condition(condition, query):
                     'maxDistance': 50000, 'spherical': True}
                 filter = {'_id': 0}
                 sort = {'updated': -1}
+                unwind = False
                 context = 'spatial'
                 limit = 30
                 reset = False
 
-                return fetch_from_cache(query, filter, sort, limit, context, reset, 'loc-{}'.format(cache_key(sub_query)))
+                return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'loc-{}'.format(cache_key(sub_query)))
             except ValueError:
                 return []
         elif condition == 'banner':
@@ -382,10 +404,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'banner-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'banner-{}'.format(cache_key(sub_query)))
         elif condition == 'asn':
             sub_query = re.sub(r'[a-zA-Z:]', '', query.lower())
 
@@ -393,10 +416,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'asn-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'asn-{}'.format(cache_key(sub_query)))
         elif condition == 'org':
             sub_query = re.sub(r'[\(\)]', '', query.lower())
             print(query)
@@ -405,10 +429,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'org-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'org-{}'.format(cache_key(sub_query)))
         elif condition == 'cidr':
             sub_query = query.lower()
 
@@ -416,10 +441,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'cidr-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'cidr-{}'.format(cache_key(sub_query)))
         elif condition == 'cname':
             sub_query = query.lower()
 
@@ -427,10 +453,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'cname-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'cname-{}'.format(cache_key(sub_query)))
         elif condition == 'mx':
             sub_query = query.lower()
 
@@ -438,10 +465,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'mx-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'mx-{}'.format(cache_key(sub_query)))
         elif condition == 'ns':
             sub_query = query.lower()
 
@@ -449,10 +477,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'ns-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'ns-{}'.format(cache_key(sub_query)))
         elif condition == 'server':
             sub_query = query.lower()
 
@@ -460,10 +489,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'server-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'server-{}'.format(cache_key(sub_query)))
         elif condition == 'site':
             sub_query = query.lower()
 
@@ -471,11 +501,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
-            fetch = False
+            limit = 30
 
-            result = fetch_from_cache(query, filter, sort, limit, context, reset, 'site-{}'.format(cache_key(sub_query)))
+            result = fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'site-{}'.format(cache_key(sub_query)))
 
             if len(result) == 1:
                 required_keys = ['a_record', 'qrcode', 'geo']
@@ -491,7 +521,7 @@ def fetch_match_condition(condition, query):
 
             if fetch:
                 handle_query(sub_query, df)
-                return fetch_from_cache(query, filter, sort, limit, context, True, 'site-{}'.format(cache_key(sub_query)))
+                return fetch_from_cache(query, filter, unwind, sort, limit, context, True, 'site-{}'.format(cache_key(sub_query)))
             else:
                 return result
         elif condition == 'ipv4':
@@ -501,10 +531,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'ipv4-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'ipv4-{}'.format(cache_key(sub_query)))
         elif condition == 'ipv6':
             sub_query = query.lower()
 
@@ -512,10 +543,11 @@ def fetch_match_condition(condition, query):
             filter = {'_id': 0}
             sort = {'updated': -1}
             context = 'normal'
-            limit = 30
+            unwind = False
             reset = False
+            limit = 30
 
-            return fetch_from_cache(query, filter, sort, limit, context, reset, 'ipv6-{}'.format(cache_key(sub_query)))
+            return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'ipv6-{}'.format(cache_key(sub_query)))
 
 
 def fetch_all_prefix(prefix):
@@ -533,10 +565,11 @@ def fetch_query_domain(q):
     filter = {'_id': 0}
     sort = {'score': {'$meta': 'textScore'}}
     context = 'text'
-    limit = 30
+    unwind = False
     reset = False
+    limit = 30
 
-    return fetch_from_cache(query, filter, sort, limit, context, reset, 'all-{}'.format(cache_key(sub_query)))
+    return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'all-{}'.format(cache_key(sub_query)))
 
 
 def fetch_latest_dns():
@@ -546,10 +579,11 @@ def fetch_latest_dns():
     filter = {'_id': 0}
     sort = {'updated': -1}
     context = 'normal'
-    limit = 200
+    unwind = False
     reset = False
+    limit = 200
 
-    return fetch_from_cache(query, filter, sort, limit, context, reset, 'latest_dns')
+    return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'latest_dns')
 
 
 def fetch_latest_cidr():
@@ -557,21 +591,23 @@ def fetch_latest_cidr():
     filter = {'_id': 0, 'whois.asn_country_code': 1, 'whois.asn_cidr': 1}
     sort = {'updated': -1}
     context = 'normal'
-    limit = 200
+    unwind = False
     reset = False
+    limit = 200
 
-    return fetch_from_cache(query, filter, sort, limit, context, reset, 'latest_cidr')
+    return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'latest_cidr')
 
 
 def fetch_latest_ipv4():
-    query = {'a_record': {'$exists': True}}
-    filter = {'_id': 0, 'a_record': 1, 'geo.country_code': 1}
+    query = {'a_record.0': {'$exists': True}}
+    filter = {'_id': 0, 'a_record': '$a_record', 'country_code': '$geo.country_code'}
     sort = {'updated': -1}
-    context = 'normal'
-    limit = 200
+    unwind = '$a_record'
+    context = 'unwind'
     reset = False
+    limit = 200
 
-    return fetch_from_cache(query, filter, sort, limit, context, reset, 'latest_pv4')
+    return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'latest_ipv4')
 
 
 def fetch_latest_asn():
@@ -579,10 +615,11 @@ def fetch_latest_asn():
     filter = {'_id': 0, 'whois.asn': 1, 'whois.asn_country_code': 1}
     sort = {'updated': -1}
     context = 'normal'
-    limit = 200
+    unwind = False
     reset = False
+    limit = 200
 
-    return fetch_from_cache(query, filter, sort, limit, context, reset, 'latest_asn')
+    return fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'latest_asn')
 
 
 def asn_lookup(ipv4):
@@ -596,20 +633,20 @@ def asn_lookup(ipv4):
 
 @app.route('/query/<string:domain>', methods=['GET'])
 def fetch_data_domain(domain):
-    data = list(fetch_query_domain(domain))
+    items = list(fetch_query_domain(domain))
 
-    if data:
-        return jsonify(data)
+    if items:
+        return jsonify(items)
     else:
         return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/subnet/<string:sub>/<string:prefix>', methods=['GET'])
 def fetch_data_prefix(sub, prefix):
-    data = list(fetch_all_prefix('{}/{}'.format(sub, prefix)))
+    items = list(fetch_all_prefix('{}/{}'.format(sub, prefix)))
 
-    if data:
-        return jsonify(data)
+    if items:
+        return jsonify(items)
     else:
         return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
@@ -624,10 +661,10 @@ def fetch_data_condition(query):
     else:
         q = ql[1]
 
-    data = list(fetch_match_condition(f, q))
+    items = list(fetch_match_condition(f, q))
 
-    if data:
-        return jsonify(data)
+    if items:
+        return jsonify(items)
     else:
         return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
@@ -635,50 +672,40 @@ def fetch_data_condition(query):
 @app.route('/dns/', methods=['GET'])
 @app.route('/dns', methods=['GET'])
 def fetch_latest_dns_data():
-    data = fetch_latest_dns()
+    items = fetch_latest_dns()
 
-    if data:
-        return jsonify(data)
+    if items:
+        return jsonify(items)
     else:
         return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/asn', methods=['GET'])
 def fetch_latest_asn_data():
-    data = fetch_latest_asn()
+    items = fetch_latest_asn()
 
-    if data:
-        return jsonify(data)
+    if items:
+        return jsonify(items)
     else:
         return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/cidr', methods=['GET'])
 def fetch_latest_cidr_data():
-    data = fetch_latest_cidr()
+    items = fetch_latest_cidr()
 
-    if data:
-        return jsonify(data)
+    if items:
+        return jsonify(items)
     else:
         return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
 
 @app.route('/ipv4', methods=['GET'])
 def fetch_latest_ipv4_data():
-    data = fetch_latest_ipv4()
-    v = []
+    items = list(fetch_latest_ipv4())
 
-    for d in data:
-        if 'country_code' in d:
-            c = d['country_code']
-        else:
-            c = None
-
-        for r in d['a_record']:
-            v.append({'a_record': r, 'country_code': c})
-
-    if v:
-        return jsonify(v)
+    if items:
+        return jsonify(items)
     else:
         return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 
@@ -689,10 +716,10 @@ def fetch_nothing():
 
 
 @app.route('/ip/<string:ipv4>', methods=['GET'])
-def fetch_data_ip(ipv4):
-    data = list(fetch_one_ip(ipv4))
+def fetch_data_ipv4(ipv4):
+    items = list(fetch_one_ip(ipv4))
 
-    if len(data) == 0:
+    if len(items) == 0:
         res = asn_lookup(ipv4)
 
         try:
@@ -711,10 +738,10 @@ def fetch_data_ip(ipv4):
         if '_id' in prop:
             del prop['_id']
 
-        data = [prop]
+        items = [prop]
 
-    if data:
-        return jsonify(data)
+    if items:
+        return jsonify(items)
     else:
         return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
 

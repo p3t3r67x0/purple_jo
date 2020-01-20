@@ -503,6 +503,7 @@ def fetch_match_condition(condition, query):
             context = 'normal'
             unwind = False
             reset = False
+            fetch = False
             limit = 30
 
             result = fetch_from_cache(query, filter, unwind, sort, limit, context, reset, 'site-{}'.format(cache_key(sub_query)))

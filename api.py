@@ -21,6 +21,7 @@ from flask_pymongo import PyMongo
 from rejson import Client, Path
 from bson import json_util
 
+from tools.extract_graph import extract_graph
 from tools.extract_geodata import read_dataframe
 from update_entry import handle_query
 
@@ -704,6 +705,16 @@ def fetch_latest_cidr_data():
 @app.route('/ipv4', methods=['GET'])
 def fetch_latest_ipv4_data():
     items = list(fetch_latest_ipv4())
+
+    if items:
+        return jsonify(items)
+    else:
+        return jsonify({'status': 404, 'message': 'no documents found'}), status.HTTP_404_NOT_FOUND
+
+
+@app.route('/graph/<string:site>', methods=['GET'])
+def fetch_graph(site):
+    items = extract_graph(mongo.db, site)
 
     if items:
         return jsonify(items)

@@ -14,27 +14,29 @@ def connect(host):
 
 def retrieve_entries(db, domain):
     return db.dns.aggregate([{'$match': {'domain': domain}},
-                             {'$graphLookup': {'from': 'dns', 'startWith': '$mx_record.exchange',
-                                               'connectFromField': 'mx_record.exchange', 'connectToField': 'domain', 'as': 'mx_records'}},
-                             {'$graphLookup': {'from': 'dns', 'startWith': '$ns_record', 'connectFromField': 'ns_record',
-                                               'connectToField': 'domain', 'maxDepth': 0, 'as': 'ns_records'}},
-                             {'$graphLookup': {'from': 'dns', 'startWith': '$a_record',
-                                               'connectFromField': 'unknown', 'connectToField': 'a_record', 'as': 'a_records'}},
                              {'$graphLookup': {'from': 'dns', 'startWith': '$ssl.subject_alt_names',
                                                'connectFromField': 'domain', 'connectToField': 'ssl.subject_alt_names', 'as': 'certificates'}},
                              {'$graphLookup': {'from': 'dns', 'startWith': '$cname_record.target',
-                                               'connectFromField': 'unknown', 'connectToField': 'cname_record.target', 'as': 'cname_records'}},
+                                               'connectFromField': 'domain', 'connectToField': 'cname_record.target', 'as': 'cname_records'}},
+                             {'$graphLookup': {'from': 'dns', 'startWith': '$mx_record.exchange',
+                                               'connectFromField': 'mx_record.exchange', 'connectToField': 'domain', 'as': 'mx_records'}},
+                             {'$graphLookup': {'from': 'dns', 'startWith': '$ns_record', 'connectFromField': 'ns_record',
+                                               'connectToField': 'domain', 'as': 'ns_records'}},
                              {'$project': {
-                                 'a_records.a_record': 1,
-                                 'a_records.domain': 1,
-                                 'ns_records.a_record': 1,
-                                 'ns_records.domain': 1,
-                                 'mx_records.a_record': 1,
-                                 'mx_records.domain': 1,
-                                 'cname_records.a_record': 1,
-                                 'cname_records.domain': 1,
-                                 'certificates.a_record': 1,
-                                 'certificates.domain': 1,
+                                 'main.domain': '$domain',
+                                 'main.a_record': '$a_record',
+                                 'zzz': {'$setUnion': ['$certificates', '$cname_records', '$mx_records', '$ns_records']}
+                             }},
+                             {'$unwind': '$zzz'},
+                             {'$group': {
+                                 '_id': '$_id',
+                                 'main': {'$addToSet': '$main'},
+                                 'all': {'$addToSet': '$zzz'}
+                             }},
+                             {'$project': {
+                                 'all.domain': 1,
+                                 'all.a_record': 1,
+                                 'main': 1,
                                  '_id': 0}}
                              ])
 
@@ -52,14 +54,14 @@ def extract_graph(db, domain):
     results = list(retrieve_entries(db, domain))
     summary_s = set()
     edges_s = set()
+    main_s = set()
     groups = set()
     groups_d = {}
     nodes = []
     edges = []
-    main = None
 
     if len(results) > 0:
-        for i in results[0]['a_records']:
+        for i in results[0]['main']:
             other = update_summary(summary_s, i)
             summary_s.union(other)
 
@@ -67,46 +69,20 @@ def extract_graph(db, domain):
                 for j in i['a_record']:
                     groups.add(j)
 
-        for i in results[0]['cname_records']:
+        for i in results[0]['all']:
             other = update_summary(summary_s, i)
             summary_s.union(other)
 
             if 'a_record' in i:
                 for j in i['a_record']:
                     groups.add(j)
-
-        for i in results[0]['mx_records']:
-            other = update_summary(summary_s, i)
-            summary_s.union(other)
-
-            if 'a_record' in i:
-                for j in i['a_record']:
-                    groups.add(j)
-
-        for i in results[0]['ns_records']:
-            other = update_summary(summary_s, i)
-            summary_s.union(other)
-
-            if 'a_record' in i:
-                for j in i['a_record']:
-                    groups.add(j)
-
-        for i in results[0]['certificates']:
-            other = update_summary(summary_s, i)
-            summary_s.union(other)
-
-            if 'a_record' in i:
-                for j in i['a_record']:
-                    groups.add(j)
-
 
         for i, v in enumerate(groups):
             groups_d[v] = i
 
-
         for i, v in enumerate(summary_s):
             if v[0] == domain:
-                main = i
+                main_s.add(i)
 
             g = []
             e = {}
@@ -126,15 +102,14 @@ def extract_graph(db, domain):
 
             nodes.append(o)
 
+    for v in nodes:
+        for j in main_s:
+            e = {}
+            e['from'] = j
+            e['to'] = v['id']
 
-    for i, v in enumerate(nodes):
-        e = {}
-        e['from'] = main
-        e['to'] = v['id']
-
-        if e['from'] != e['to'] and (e['to'], e['from']) not in edges_s:
-            edges_s.add((e['from'], e['to']))
-
+            if e['from'] != e['to'] and (e['to'], e['from']) not in edges_s:
+                edges_s.add((e['from'], e['to']))
 
     for i in edges_s:
         e = {}
@@ -143,14 +118,17 @@ def extract_graph(db, domain):
 
         edges.append(e)
 
-
-    return {'nodes': nodes, 'edges': edges}
+    if len(nodes) > 0 and len(edges) > 0:
+        return {'nodes': nodes, 'edges': edges}
+    else:
+        return {}
 
 
 def argparser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', help='set the host', type=str, required=True)
-    parser.add_argument('--domain', help='set the host', type=str, required=True)
+    parser.add_argument('--domain', help='set domain name',
+                        type=str, required=True)
     args = parser.parse_args()
 
     return args

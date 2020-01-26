@@ -21,9 +21,9 @@ from flask_pymongo import PyMongo
 from rejson import Client, Path
 from bson import json_util
 
-from tools.extract_graph import extract_graph
-from tools.extract_geodata import read_dataframe
-from update_entry import handle_query
+from tools.utils.extract_graph import extract_graph
+from tools.utils.extract_geodata import read_dataframe
+from tools.utils.update_entry import handle_query
 
 
 dictConfig({

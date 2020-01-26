@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
-from tools.extract_whois import handle_whois
-from tools.extract_header import extract_header
-from tools.extract_records import handle_records
-from tools.extract_geodata import extract_geodata
-from tools.extract_certificate import handle_certificate
-from tools.generate_qrcode import generate_qrcode
+from .extract_whois import handle_whois
+from .extract_header import extract_header
+from .extract_records import handle_records
+from .extract_geodata import extract_geodata
+from .extract_certificate import handle_certificate
+from .generate_qrcode import generate_qrcode
 
 from datetime import datetime
 from pymongo import MongoClient

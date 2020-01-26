@@ -57,7 +57,7 @@ def retrieve_records(domain, record):
             elif record == 'NS':
                 records.append(item.target.to_unicode().strip('.').lower())
             elif record == 'SOA':
-                records.append(item.to_text().lower())
+                records.append(item.to_text().replace('\\', '').lower())
             elif record == 'CNAME':
                 post = {'target': item.target.to_unicode().strip('.').lower()}
                 records.append(post)

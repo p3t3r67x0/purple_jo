@@ -35,7 +35,7 @@ def update_data(db, domain, post):
 
 
 def generate_qrcode(db, domain, date):
-    url = pyqrcode.create('https://{}'.format(domain))
+    url = pyqrcode.create(u'https://{}'.format(domain), encoding='utf-8')
     qrcode = url.png_as_base64_str(scale=5, quiet_zone=0)
     update_data(db, domain, {'updated': date, 'qrcode': qrcode})
 

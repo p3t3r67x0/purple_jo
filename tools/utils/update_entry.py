@@ -23,8 +23,8 @@ def update_header(db, domain):
     extract_header(db, domain, datetime.utcnow())
 
 
-def update_records(db, domain):
-    handle_records(db, domain, datetime.utcnow())
+def update_records(db, domain, type, record):
+    handle_records(db, domain, datetime.utcnow(), type, record)
 
 
 def update_qrcode(db, domain):
@@ -43,11 +43,11 @@ def update_whois(db, ip):
     handle_whois(db, ip, datetime.utcnow())
 
 
-def handle_query(domain, df):
+def handle_query(domain, df, type=None, record=None):
     client = connect('localhost')
     db = client.ip_data
 
-    update_records(db, domain)
+    update_records(db, domain, type, record)
 
     records = retrieve_records(db, domain)
 

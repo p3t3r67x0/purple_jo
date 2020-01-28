@@ -29,6 +29,10 @@ def update_data(db, domain, date, type, record):
         return
 
 
+def update_failed(db, type, domain, post):
+    db.dns.update_one({type: domain}, {'$set': post}, upsert=False)
+
+
 def add_data(db, domain, post):
     try:
         post['domain'] = domain.lower()
@@ -57,7 +61,10 @@ def retrieve_records(domain, record):
             elif record == 'NS':
                 records.append(item.target.to_unicode().strip('.').lower())
             elif record == 'SOA':
-                records.append(item.to_text().replace('\\', '').lower())
+                if len(records) > 0:
+                    records[0] = item.to_text().replace('\\', '').lower()
+                else:
+                    records.append(item.to_text().replace('\\', '').lower())
             elif record == 'CNAME':
                 post = {'target': item.target.to_unicode().strip('.').lower()}
                 records.append(post)
@@ -71,7 +78,7 @@ def retrieve_records(domain, record):
         return
 
 
-def handle_records(db, domain, date):
+def handle_records(db, domain, date, type=None, record=None):
     a_records = retrieve_records(domain, 'A')
     ns_records = retrieve_records(domain, 'NS')
     mx_records = retrieve_records(domain, 'MX')
@@ -134,6 +141,7 @@ def handle_records(db, domain, date):
                 print(u'INFO: updated {}, CNAME record with {}'.format(domain, cname_record))
 
     if not any([a_records, aaaa_records, mx_records, ns_records, soa_records, cname_records]):
+        update_failed(db, type, domain, {record: datetime.utcnow()})
         print(u'INFO: coud not find any records for domain {}'.format(domain))
 
 

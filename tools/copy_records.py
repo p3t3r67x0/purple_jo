@@ -17,7 +17,8 @@ def connect(host):
 
 
 def retrieve_mx_records(db, skip, limit):
-    return db.dns.find({'mx_record.exchange': {'$exists': True}},
+    return db.dns.find({'mx_record.exchange': {'$exists': True},
+                        'mx_scan_failed': {'$exists': False}},
                        {'_id': 0, 'mx_record.exchange': 1})[limit - skip:limit]
 
 
@@ -40,7 +41,7 @@ def worker(df, host, skip, limit):
         data = retrieve_domain(db, mx_record)
 
         if not data:
-            handle_query(mx_record, df)
+            handle_query(mx_record, df, 'mx_record.exchange', 'mx_scan_failed')
 
 
 def argparser():

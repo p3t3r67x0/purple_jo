@@ -30,7 +30,8 @@ def update_data(db, domain, date, type, record):
 
 
 def update_failed(db, type, domain, post):
-    db.dns.update_one({type: domain}, {'$set': post}, upsert=False)
+    if type is not None:
+        db.dns.update_one({type: domain}, {'$set': post}, upsert=False)
 
 
 def add_data(db, domain, post):

@@ -49,7 +49,7 @@ def extract_header(db, domain, date):
 
     try:
         h = {'User-Agent': ua.random}
-        r = requests.head(u'https://{}'.format(domain),
+        r = requests.head(u'http://{}'.format(domain),
                           timeout=1, allow_redirects=False, headers=h)
     except (InvalidHeader, InvalidURL, ReadTimeout, ConnectionError, ChunkedEncodingError):
         update_data(db, domain, {'header_scan_failed': date})

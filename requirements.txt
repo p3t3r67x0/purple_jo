@@ -6,7 +6,7 @@ async-timeout==3.0.1
 attrs==19.3.0
 Automat==0.8.0
 Babel==2.9.1
-certifi==2019.11.28
+certifi==2022.12.7
 certstream==1.10
 cffi==1.13.2
 chardet==3.0.4

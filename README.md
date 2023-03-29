@@ -1,4 +1,22 @@
-# purple_jo
+# Purplepee Backend
+
+Here we go with some updated notes to get the beef running
+
+
+## Database Setup
+
+```
+sudo apt-get install gnupg
+wget --quiet -O - https://www.mongodb.org/static/pgp/server-6.0.asc | gpg --dearmor > mongodb-keyring.gpg
+sudo mv mongodb-keyring.gpg /etc/apt/trusted.gpg.d/
+sudo chown root:root /etc/apt/trusted.gpg.d/mongodb-keyring.gpg
+sudo chmod ugo+r /etc/apt/trusted.gpg.d/mongodb-keyring.gpg
+sudo chmod go-w /etc/apt/trusted.gpg.d/mongodb-keyring.gpg
+echo "deb [arch=amd64,arm64 signed-by=/etc/apt/trusted.gpg.d/mongodb-keyring.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
+sudo apt update
+sudo apt install mongodb-org
+```
+
 
 API and backend of Purple Pee an open source ASN lookup project. Made for the public.
 
@@ -501,27 +519,21 @@ Example output of `curl https://api.purplepee.co/match/asn:46279` entries
 }]
 ```
 
-## Database Setup
-
-```bash
-sudo apt install mongodb
-```
-
 
 ## Build Setup
 
 ```bash
 # install build dependencies
-sudo apt install mongodb redis-server chromium-chromedriver virtualenv python3.7 python3.7-dev gcc
+sudo apt install redis-server chromium-chromedriver virtualenv python3 python3-dev gcc
 
 # create a virtualenv
-virtualenv -p /usr/bin/python3.7 venv
+virtualenv  venv
 
 # activate virtualenv
 . venv/bin/activate
 
 # install dependencies
-pip3 install -r requirements.txt
+pip install -r requirements.txt
 
 # serve at 127.0.0.1:5000
 gunicorn --bind 127.0.0.1:5000 wsgi:app --access-logfile - --error-logfile - --log-level info

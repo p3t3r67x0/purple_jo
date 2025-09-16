@@ -17,16 +17,25 @@ def connect(host):
 
 def retrieve_domains(db, client, skip, limit):
     try:
-        return db.dns.find({'qrcode': {'$exists': False}, 'domain': {
-                            '$regex': '^(([\w]*\.)?(?!(xn--)+)[\w]*\.[\w]+)$'}}).sort(
-                           [('updated', -1)])[limit - skip:limit]
+        return db.dns.find(
+            {
+                'qrcode': {'$exists': False},
+                'domain': {
+                    '$regex': r'^(([\w]*\.)?(?!(xn--)+)[\w]*\.[\w]+)$'
+                }
+            }
+        ).sort([('updated', -1)])[limit - skip:limit]
     except KeyboardInterrupt:
         client.close()
 
 
 def update_data(db, domain, post):
     try:
-        res = db.dns.update_one({'domain': domain}, {'$set': post}, upsert=False)
+        res = db.dns.update_one(
+            {'domain': domain},
+            {'$set': post},
+            upsert=False
+        )
 
         if res.modified_count > 0:
             print('INFO: added qrcode for domain {}'.format(domain))
@@ -43,7 +52,7 @@ def generate_qrcode(db, domain, date):
 def worker(host, skip, limit):
     client = connect(host)
     db = client.ip_data
-    date = datetime.utcnow()
+    date = datetime.now()
 
     try:
         domains = retrieve_domains(db, client, limit, skip)
@@ -62,8 +71,18 @@ def worker(host, skip, limit):
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', help='set worker count', type=int, required=True)
-    parser.add_argument('--host', help='set the host', type=str, required=True)
+    parser.add_argument(
+        '--worker',
+        help='set worker count',
+        type=int,
+        required=True
+    )
+    parser.add_argument(
+        '--host',
+        help='set the host',
+        type=str,
+        required=True
+    )
     args = parser.parse_args()
 
     return args
@@ -81,7 +100,10 @@ if __name__ == '__main__':
     client.close()
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(args.host, limit, amount))
+        j = multiprocessing.Process(
+            target=worker,
+            args=(args.host, limit, amount)
+        )
         jobs.append(j)
         j.start()
         limit = limit + amount

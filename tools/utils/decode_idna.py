@@ -16,7 +16,7 @@ def connect(host):
 
 
 def retrieve_domains(db):
-    return db.dns.find({'domain': {'$regex': '([\w\-]*\.)?(xn--)+[\w]*'}})
+    return db.dns.find({'domain': {'$regex': r'([\w\-]*\.)?(xn--)+[\w]*'}})
 
 
 def update_data(db, id, domain, post):
@@ -46,7 +46,7 @@ def main():
         return
 
     for domain in domains:
-        now = datetime.utcnow()
+        now = datetime.now()
         idna_domain = domain['domain']
 
         try:
@@ -55,8 +55,8 @@ def main():
             decoded_domain = None
 
         if decoded_domain and idna_domain != decoded_domain:
-            update_data(db, domain['_id'], decoded_domain, {'updated': now, 'domain': decoded_domain})
-
+            update_data(db, domain['_id'], decoded_domain, {
+                        'updated': now, 'domain': decoded_domain})
 
     client.close()
 

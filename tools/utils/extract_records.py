@@ -113,7 +113,11 @@ def argparser():
 if __name__ == "__main__":
     args = argparser()
     print(
-        f"INFO: Starting {args.workers} processes, each with {CONCURRENCY} concurrent DNS tasks")
+        (
+            f"INFO: Starting {args.workers} processes, "
+            f"each with {CONCURRENCY} concurrent DNS tasks"
+        )
+    )
 
     with multiprocessing.Pool(processes=args.workers) as pool:
         pool.map(start_process, [args.host] * args.workers)

@@ -1,78 +1,92 @@
 #!/usr/bin/env python3
-
-import re
-import time
-import multiprocessing
 import argparse
-
-from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError
+import asyncio
+import multiprocessing
+from motor.motor_asyncio import AsyncIOMotorClient
 
 from utils.extract_geodata import read_dataframe
 from utils.update_entry import handle_query
 
 
-def connect(host):
-    return MongoClient('mongodb://{}:27017'.format(host))
+async def connect(host: str):
+    """Async connection to MongoDB."""
+    return AsyncIOMotorClient(f"mongodb://{host}:27017").ip_data
 
 
-def retrieve_mx_records(db, skip, limit):
-    return db.dns.find({'mx_record.exchange': {'$exists': True},
-                        'mx_scan_failed': {'$exists': False}},
-                       {'_id': 0, 'mx_record.exchange': 1})[limit - skip:limit]
+async def retrieve_mx_records(db, skip: int, limit: int):
+    """Retrieve domains with MX records."""
+    cursor = db.dns.find(
+        {"mx_record.exchange": {"$exists": True},
+            "mx_scan_failed": {"$exists": False}},
+        {"_id": 0, "mx_record.exchange": 1},
+        skip=skip,
+        limit=limit,
+    )
+    return [doc async for doc in cursor]
 
 
-def retrieve_domain(db, domain):
-    return db.dns.find_one({'domain': domain})
+async def retrieve_domain(db, domain: str):
+    """Retrieve domain details."""
+    return await db.dns.find_one({"domain": domain})
 
 
-def worker(df, host, skip, limit):
-    client = connect(host)
-    db = client.ip_data
+async def worker(df, host: str, skip: int, limit: int):
+    """Async worker scanning MX records in range."""
+    db = await connect(host)
     mx_records_uniq = set()
 
-    mx_records = retrieve_mx_records(db, limit, skip)
+    mx_records = await retrieve_mx_records(db, skip, limit)
 
     for mx_record in mx_records:
-        for mx in mx_record['mx_record']:
-            mx_records_uniq.add(mx['exchange'])
+        for mx in mx_record.get("mx_record", []):
+            mx_records_uniq.add(mx["exchange"])
 
-    for mx_record in mx_records_uniq:
-        data = retrieve_domain(db, mx_record)
+    tasks = []
+    for mx in mx_records_uniq:
+        tasks.append(handle_mx(db, df, mx))
 
-        if not data:
-            handle_query(mx_record, df, 'mx_record.exchange', 'mx_scan_failed')
+    await asyncio.gather(*tasks)
+
+
+async def handle_mx(db, df, mx):
+    """Check if MX domain exists, otherwise process it."""
+    data = await retrieve_domain(db, mx)
+    if not data:
+        # handle_query is synchronous → run it in thread pool
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, handle_query, mx, df, "mx_record.exchange", "mx_scan_failed")
+
+
+def run_worker(df, host: str, skip: int, limit: int):
+    """Entry point for multiprocessing worker."""
+    asyncio.run(worker(df, host, skip, limit))
 
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', help='set worker count', type=int, required=True)
-    parser.add_argument('--host', help='set the host', type=str, required=True)
-    args = parser.parse_args()
+    parser.add_argument("--workers", type=int, required=True,
+                        help="number of processes")
+    parser.add_argument("--host", type=str, required=True, help="MongoDB host")
+    return parser.parse_args()
 
-    return args
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = argparser()
-    df = read_dataframe('data/geodata.csv')
-    client = connect(args.host)
+    df = read_dataframe("data/geodata.csv")
+
+    # Use one sync client to get total count (Motor not needed here)
+    client = AsyncIOMotorClient(f"mongodb://{args.host}:27017")
     db = client.ip_data
+    total = db.dns.estimated_document_count()
 
-    jobs = []
-    threads = args.worker
-    amount = round(db.dns.estimated_document_count() / (threads + 5000))
-    limit = amount
-    print(limit, amount)
+    # Divide work
+    amount = max(1, round(total / (args.workers + 5000)))
+    ranges = [(i * amount, amount) for i in range(args.workers)]
 
-    for f in range(threads):
-        j = multiprocessing.Process(
-            target=worker, args=(df, args.host, limit, amount))
-        jobs.append(j)
-        j.start()
-        limit = limit + amount
+    print(f"[INFO] Spawning {args.workers} workers, batch size {amount}")
 
-    for j in jobs:
-        client.close()
-        j.join()
-        print('exitcode = {}'.format(j.exitcode))
+    with multiprocessing.Pool(processes=args.workers) as pool:
+        pool.starmap(run_worker, [(df, args.host, skip, limit)
+                     for skip, limit in ranges])
+
+    print("[INFO] All workers finished")

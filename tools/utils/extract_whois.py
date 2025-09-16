@@ -10,7 +10,7 @@ from ipwhois.exceptions import ASNOriginLookupError
 from ipaddress import AddressValueError
 
 from pymongo import MongoClient, UpdateOne
-from pymongo.errors import CursorNotFound, DuplicateKeyError, DocumentTooLarge
+from pymongo.errors import DuplicateKeyError, DocumentTooLarge
 
 
 BATCH_SIZE = 100  # how many docs each worker processes at once
@@ -50,11 +50,12 @@ def handle_dns_batch(db, docs):
         if not whois:
             continue
         try:
-            if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(whois["asn_cidr"]):
+            asn_cidr = whois["asn_cidr"]
+            if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(asn_cidr):
                 ops.append(
                     UpdateOne(
                         {"a_record.0": ip},
-                        {"$set": {"updated": datetime.utcnow(), "whois": whois}},
+                        {"$set": {"updated": datetime.now(), "whois": whois}},
                         upsert=False,
                     )
                 )
@@ -76,7 +77,7 @@ def handle_ipv4_batch(db, docs):
                 UpdateOne(
                     {"asn": ip},
                     {
-                        "$set": {"updated": datetime.utcnow(), "whois": whois},
+                        "$set": {"updated": datetime.now(), "whois": whois},
                         "$unset": {"subnet": 0},
                     },
                     upsert=False,

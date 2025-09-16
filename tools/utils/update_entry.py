@@ -20,19 +20,19 @@ def retrieve_records(db, domain):
 
 
 def update_header(db, domain):
-    extract_header(db, domain, datetime.utcnow())
+    extract_header(db, domain, datetime.now())
 
 
 def update_records(db, domain, type, record):
-    handle_records(db, domain, datetime.utcnow(), type, record)
+    handle_records(db, domain, datetime.now(), type, record)
 
 
 def update_qrcode(db, domain):
-    generate_qrcode(db, domain, datetime.utcnow())
+    generate_qrcode(db, domain, datetime.now())
 
 
 def update_certificate(db, domain):
-    handle_certificate(db, domain, datetime.utcnow())
+    handle_certificate(db, domain, datetime.now())
 
 
 def update_geodata(db, ip, df):
@@ -40,7 +40,7 @@ def update_geodata(db, ip, df):
 
 
 def update_whois(db, ip):
-    handle_whois(db, ip, datetime.utcnow())
+    handle_whois(db, ip, datetime.now())
 
 
 def handle_query(domain, df, type=None, record=None):

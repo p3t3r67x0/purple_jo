@@ -1,146 +1,134 @@
 #!/usr/bin/env python3
-
 import argparse
 import ipaddress
 import multiprocessing
-import argparse
+from datetime import datetime
 
 from ipwhois.net import Net
 from ipwhois.asn import ASNOrigin, IPASN
 from ipwhois.exceptions import ASNOriginLookupError
-
 from ipaddress import AddressValueError
 
-from pymongo import MongoClient
-from pymongo.errors import CursorNotFound
-from pymongo.errors import DuplicateKeyError
-from pymongo.errors import DocumentTooLarge
+from pymongo import MongoClient, UpdateOne
+from pymongo.errors import CursorNotFound, DuplicateKeyError, DocumentTooLarge
 
-from datetime import datetime
+
+BATCH_SIZE = 100  # how many docs each worker processes at once
 
 
 def connect(host):
-    return MongoClient('mongodb://{}:27017'.format(host))
+    return MongoClient(f"mongodb://{host}:27017", connect=False)
 
 
-def retrieve_dns(db, limit, skip):
-    return db.dns.find({'whois.asn': {'$exists': False},
-                        'a_record.0': {'$exists': True}
-                        }).sort([('updated', -1)])[limit - skip:limit]
-
-
-def retrieve_asns(db, limit, skip):
-    return db.lookup.find({'whois.asn': {'$exists': False}})[limit - skip:limit]
-
-
-def update_data_dns(db, ip, post):
+def get_whois(ip: str):
     try:
-        if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(post['whois']['asn_cidr']):
-            res = db.dns.update_one({'a_record.0': ip}, {'$set': post}, upsert=False)
-
-            if res.modified_count > 0:
-                print(u'INFO: updated {} whois {}'.format(ip, post))
-        else:
-            print('INFO: IP {} is not in subnet {}'.format(ip, post['whois']['asn_cidr']))
-    except (AddressValueError, DuplicateKeyError):
-        pass
-
-
-def update_data_lookup(db, asn, post):
-    try:
-        res = db.lookup.update_many({'asn': asn}, {'$set': post, '$unset': {
-                                     'subnet': 0}}, upsert=False)
-        print(u'INFO: updated dns whois and cidr entry for AS{}, {} document modified'.format(asn, res.modified_count))
-    except (DocumentTooLarge, DuplicateKeyError):
-        pass
-
-
-def get_whois(ip):
-    try:
-        whois = IPASN(Net(ip)).lookup(retry_count=0, asn_methods=['whois'])
+        return IPASN(Net(ip)).lookup(retry_count=0, asn_methods=["whois"])
     except Exception:
-        whois = None
-
-    return whois
+        return None
 
 
-def get_cidr(ip, asn):
+def get_cidr(ip: str, asn: str):
     try:
-        x = []
-
-        cidr = ASNOrigin(Net(ip)).lookup(
-            asn=str(asn), retry_count=10, asn_methods=['whois'])
-
-        if cidr and len(cidr['nets']) > 0:
-            for c in cidr['nets']:
-                x.append(c['cidr'])
-
-        return x
+        cidrs = []
+        result = ASNOrigin(Net(ip)).lookup(
+            asn=str(asn), retry_count=10, asn_methods=["whois"]
+        )
+        if result and "nets" in result and result["nets"]:
+            for c in result["nets"]:
+                cidrs.append(c["cidr"])
+        return cidrs
     except ASNOriginLookupError:
-        pass
+        return []
 
 
-def handle_whois(db, ip, date):
-    whois = get_whois(ip)
+def handle_dns_batch(db, docs):
+    ops = []
+    for dns in docs:
+        ip = dns["a_record"][0]
+        whois = get_whois(ip)
+        print(f"INFO: fetched {whois} for {ip}")
+        if not whois:
+            continue
+        try:
+            if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(whois["asn_cidr"]):
+                ops.append(
+                    UpdateOne(
+                        {"a_record.0": ip},
+                        {"$set": {"updated": datetime.utcnow(), "whois": whois}},
+                        upsert=False,
+                    )
+                )
+        except (AddressValueError, DuplicateKeyError):
+            continue
+    if ops:
+        db.dns.bulk_write(ops, ordered=False)
 
-    if whois and len(whois) > 0:
-        update_data_dns(db, ip, {'updated': date, 'whois': whois})
+
+def handle_ipv4_batch(db, docs):
+    ops = []
+    for asn in docs:
+        ip = asn["ip"]
+        whois = get_whois(ip)
+        if not whois:
+            continue
+        try:
+            ops.append(
+                UpdateOne(
+                    {"asn": ip},
+                    {
+                        "$set": {"updated": datetime.utcnow(), "whois": whois},
+                        "$unset": {"subnet": 0},
+                    },
+                    upsert=False,
+                )
+            )
+        except (DocumentTooLarge, DuplicateKeyError):
+            continue
+    if ops:
+        db.lookup.bulk_write(ops, ordered=False)
 
 
-def worker(host, limit, skip, col):
+def worker(host, collection):
     client = connect(host)
     db = client.ip_data
-    date = datetime.utcnow()
 
-    if col == 'lookup':
-        try:
-            for asn in retrieve_asns(db, limit, skip):
-                whois = get_whois(asn['ip'])
-                cidr = get_cidr(asn['ip'], asn['asn'])
+    while True:
+        query = {"whois.asn": {"$exists": False}}
+        if collection == "dns":
+            query["a_record.0"] = {"$exists": True}
 
-                if whois and cidr and len(whois) > 0:
-                    update_data_lookup(db, asn['asn'], {'updated': date, 'cidr': cidr, 'whois': whois})
-        except CursorNotFound:
-            pass
+        docs = list(db[collection].find(query, limit=BATCH_SIZE))
+        if not docs:
+            break
 
-    elif col == 'dns':
-        try:
-            for dns in retrieve_dns(db, limit, skip):
-                handle_whois(db, dns['a_record'][0], date)
-        except CursorNotFound:
-            pass
+        ids = [d["_id"] for d in docs]
+        db[collection].update_many({"_id": {"$in": ids}}, {
+                                   "$set": {"claimed": True}})
+
+        if collection == "dns":
+            handle_dns_batch(db, docs)
+        else:
+            handle_ipv4_batch(db, docs)
 
     client.close()
 
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--collection', help='set collection to update', type=str, required=True)
-    parser.add_argument('--worker', help='set worker count', type=int, required=True)
-    parser.add_argument('--host', help='set the host', type=str, required=True)
-    args = parser.parse_args()
-
-    return args
+    parser.add_argument("--collection", choices=["dns", "ipv4"], required=True)
+    parser.add_argument("--worker", type=int, required=True)
+    parser.add_argument("--host", type=str, required=True)
+    return parser.parse_args()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = argparser()
-    client = connect(args.host)
-    db = client.ip_data
 
-    jobs = []
-    threads = args.worker
-    amount = round(db[args.collection].estimated_document_count() / (threads + 50000))
-    limit = amount
-    print(limit, amount)
+    print(
+        f"INFO: starting WHOIS fetcher for collection={args.collection}, workers={args.worker}, batch_size={BATCH_SIZE}"
+    )
 
-    for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(args.host, limit, amount, args.collection))
-        jobs.append(j)
-        j.start()
-        limit = limit + amount
+    with multiprocessing.Pool(processes=args.worker) as pool:
+        pool.starmap(worker, [(args.host, args.collection)] * args.worker)
 
-    for j in jobs:
-        j.join()
-        client.close()
-        print('exitcode = {}'.format(j.exitcode))
+    print("INFO: all workers finished.")

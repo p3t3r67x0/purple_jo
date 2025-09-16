@@ -36,7 +36,7 @@ def update_data(db, ip, post):
 
 
 def read_dataframe(input):
-    return pd.read_csv(input, header=None, sep=',')
+    return pd.read_csv(input, header=None, sep=',', low_memory=False)
 
 
 def lookup_geodata(df, l):
@@ -59,7 +59,7 @@ def extract_geodata(db, ip, df):
                                      'loc': {
                                          'coordinates': [round(r[7].iloc[0], 5),
                                                          round(r[6].iloc[0], 5)]
-                                     }}, 'updated': datetime.utcnow()})
+        }}, 'updated': datetime.now()})
 
 
 def worker(host, skip, limit, df):

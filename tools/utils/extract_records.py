@@ -1,192 +1,121 @@
 #!/usr/bin/env python3
-
-import multiprocessing
+import asyncio
 import argparse
-
-from dns import resolver
-from dns.name import EmptyLabel
-from dns.name import LabelTooLong
-from dns.resolver import NoAnswer
-from dns.resolver import NXDOMAIN
-from dns.resolver import NoNameservers
-from dns.exception import Timeout
-
+import multiprocessing
 from datetime import datetime
 
-from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import UpdateOne
+import dns.asyncresolver
+import dns.exception
 
 
-def connect(host):
-    return MongoClient('mongodb://{}:27017'.format(host))
+CONCURRENCY = 200   # number of in-flight DNS queries per process
+BATCH_SIZE = 100    # number of domains claimed from DB at once
 
 
-def update_data(db, domain, date, type, record):
+async def resolve_record(resolver, domain, rtype):
+    """Resolve a DNS record asynchronously, return normalized results or None."""
     try:
-        return db.dns.update_one({'domain': domain}, {'$set': {'updated': date},
-                                                      '$addToSet': {type: record}}, upsert=False)
-    except DuplicateKeyError:
-        return
-
-
-def update_failed(db, type, domain, post):
-    if type is not None:
-        db.dns.update_one({type: domain}, {'$set': post}, upsert=False)
-
-
-def add_data(db, domain, post):
-    try:
-        post['domain'] = domain.lower()
-        post['created'] = datetime.utcnow()
-        post_id = db.dns.insert_one(post)
-    except DuplicateKeyError:
-        return
-
-
-def retrieve_domains(db, skip, limit):
-    return db.dns.find({'updated': {'$exists': False}}).sort([('$natural', -1)])[limit - skip:limit]
-
-
-def retrieve_records(domain, record):
-    records = []
-
-    try:
-        res = resolver.Resolver()
-        res.timeout = 1
-        res.lifetime = 1
-        items = res.query(domain, record)
-
-        for item in items:
-            if record not in ['MX', 'NS', 'SOA', 'CNAME']:
+        answer = await resolver.resolve(domain, rtype, lifetime=2)
+        records = []
+        for item in answer:
+            if rtype == "A":
                 records.append(item.address)
-            elif record == 'NS':
-                records.append(item.target.to_unicode().strip('.').lower())
-            elif record == 'SOA':
-                if len(records) > 0:
-                    records[0] = item.to_text().replace('\\', '').lower()
-                else:
-                    records.append(item.to_text().replace('\\', '').lower())
-            elif record == 'CNAME':
-                post = {'target': item.target.to_unicode().strip('.').lower()}
-                records.append(post)
-            else:
-                post = {'preference': item.preference,
-                        'exchange': item.exchange.to_unicode().lower().strip('.')}
-                records.append(post)
-
+            elif rtype == "AAAA":
+                records.append(item.address)
+            elif rtype == "NS":
+                records.append(item.target.to_unicode().strip(".").lower())
+            elif rtype == "SOA":
+                records.append(item.to_text().replace("\\", "").lower())
+            elif rtype == "CNAME":
+                records.append(
+                    {"target": item.target.to_unicode().strip(".").lower()})
+            elif rtype == "MX":
+                records.append({
+                    "preference": item.preference,
+                    "exchange": item.exchange.to_unicode().lower().strip("."),
+                })
         return records
-    except (Timeout, LabelTooLong, NoNameservers, EmptyLabel, NoAnswer, NXDOMAIN):
-        return
+    except (dns.exception.DNSException, Exception):
+        return None
 
 
-def handle_records(db, domain, date, type=None, record=None):
-    a_records = retrieve_records(domain, 'A')
-    ns_records = retrieve_records(domain, 'NS')
-    mx_records = retrieve_records(domain, 'MX')
-    soa_records = retrieve_records(domain, 'SOA')
-    aaaa_records = retrieve_records(domain, 'AAAA')
-    cname_records = retrieve_records(domain, 'CNAME')
+async def handle_domain(domain, resolver):
+    """Query all record types concurrently and build update ops."""
+    record_types = {
+        "a_record": "A",
+        "aaaa_record": "AAAA",
+        "ns_record": "NS",
+        "mx_record": "MX",
+        "soa_record": "SOA",
+        "cname_record": "CNAME",
+    }
 
-    if a_records:
-        for a_record in a_records:
-            data = update_data(db, domain, date, 'a_record', a_record)
+    tasks = {key: resolve_record(resolver, domain, rtype)
+             for key, rtype in record_types.items()}
+    results = await asyncio.gather(*tasks.values())
 
-            if data.modified_count == 0:
-                add_data(db, domain, {'a_record': a_records})
-            else:
-                print(u'INFO: updated {}, A record with {}'.format(domain, a_record))
+    update = {"updated": datetime.utcnow()}
+    for key, recs in zip(tasks.keys(), results):
+        if recs:
+            update[key] = recs
 
-    if aaaa_records:
-        for aaaa_record in aaaa_records:
-            data = update_data(db, domain, date, 'aaaa_record', aaaa_record)
-
-            if data.modified_count == 0:
-                add_data(db, domain, {'aaaa_record': aaaa_records})
-            else:
-                print(u'INFO: updated {}, AAAA record with {}'.format(domain, aaaa_record))
-
-    if ns_records:
-        for ns_record in ns_records:
-            data = update_data(db, domain, date, 'ns_record', ns_record)
-
-            if data.modified_count == 0:
-                add_data(db, domain, {'ns_record': ns_records})
-            else:
-                print(u'INFO: updated {}, NS record with {}'.format(domain, ns_record))
-
-    if mx_records:
-        for mx_record in mx_records:
-            data = update_data(db, domain, date, 'mx_record', mx_record)
-
-            if data.modified_count == 0:
-                add_data(db, domain, {'mx_record': mx_records})
-            else:
-                print(u'INFO: updated {}, MX record with {}'.format(domain, mx_record))
-
-    if soa_records:
-        for soa_record in soa_records:
-            data = update_data(db, domain, date, 'soa_record', soa_record)
-
-            if data.modified_count == 0:
-                add_data(db, domain, {'soa_record': soa_records})
-            else:
-                print(u'INFO: updated {}, SOA record with {}'.format(domain, soa_record))
-
-    if cname_records:
-        for cname_record in cname_records:
-            data = update_data(db, domain, date, 'cname_record', cname_record)
-
-            if data.modified_count == 0:
-                add_data(db, domain, {'cname_record': cname_records})
-            else:
-                print(u'INFO: updated {}, CNAME record with {}'.format(domain, cname_record))
-
-    if not any([a_records, aaaa_records, mx_records, ns_records, soa_records, cname_records]):
-        update_failed(db, type, domain, {record: datetime.utcnow()})
-        print(u'INFO: coud not find any records for domain {}'.format(domain))
+    if update:
+        return UpdateOne({"domain": domain}, {"$set": update}, upsert=True)
+    return None
 
 
-def worker(host, skip, limit):
-    client = connect(args.host)
+async def worker_loop(mongo_host):
+    client = AsyncIOMotorClient(f"mongodb://{mongo_host}:27017")
     db = client.ip_data
+    resolver = dns.asyncresolver.Resolver()
+    sem = asyncio.Semaphore(CONCURRENCY)
 
-    domains = retrieve_domains(db, limit, skip)
+    while True:
+        docs = await db.dns.find(
+            {"updated": {"$exists": False}, "claimed": {"$ne": True}},
+            {"domain": 1},
+            limit=BATCH_SIZE,
+        ).to_list(length=BATCH_SIZE)
 
-    for domain in domains:
-        handle_records(db, domain['domain'], datetime.utcnow())
+        if not docs:
+            break
+
+        ids = [d["_id"] for d in docs]
+        await db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed": True}})
+
+        async def bounded_task(doc):
+            async with sem:
+                return await handle_domain(doc["domain"], resolver)
+
+        tasks = [bounded_task(doc) for doc in docs]
+        ops = [op for op in await asyncio.gather(*tasks) if op]
+
+        if ops:
+            await db.dns.bulk_write(ops, ordered=False)
 
     client.close()
-    return
+
+
+def start_process(mongo_host):
+    asyncio.run(worker_loop(mongo_host))
 
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', help='set worker count',
-                        type=int, required=True)
-    parser.add_argument('--host', help='set the host', type=str, required=True)
-    args = parser.parse_args()
-
-    return args
+    parser.add_argument("--host", type=str, required=True, help="MongoDB host")
+    parser.add_argument("--workers", type=int, required=True,
+                        help="Number of processes")
+    return parser.parse_args()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = argparser()
-    client = connect(args.host)
-    db = client.ip_data
+    print(
+        f"INFO: Starting {args.workers} processes, each with {CONCURRENCY} concurrent DNS tasks")
 
-    jobs = []
-    threads = args.worker
-    amount = round(db.dns.estimated_document_count() / threads)
-    limit = amount
+    with multiprocessing.Pool(processes=args.workers) as pool:
+        pool.map(start_process, [args.host] * args.workers)
 
-    for f in range(threads):
-        j = multiprocessing.Process(
-            target=worker, args=(args.host, limit, amount))
-        jobs.append(j)
-        j.start()
-        limit = limit + amount
-
-    for j in jobs:
-        j.join()
-        client.close()
-        print('exitcode = {}'.format(j.exitcode))
+    print("INFO: All workers finished")

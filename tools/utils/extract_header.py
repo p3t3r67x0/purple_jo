@@ -1,122 +1,109 @@
 #!/usr/bin/env python3
-
-import requests
-import multiprocessing
+import asyncio
+import httpx
 import argparse
-
-from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError
-from pymongo.errors import CursorNotFound
-from pymongo.errors import WriteError
-
-from requests.exceptions import InvalidURL
-from requests.exceptions import ReadTimeout
-from requests.exceptions import ChunkedEncodingError
-from requests.exceptions import ConnectionError
-
-from urllib3.exceptions import InvalidHeader
-from fake_useragent import UserAgent
+import multiprocessing
 from datetime import datetime
+from fake_useragent import UserAgent
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import UpdateOne
 
 
-def connect(host):
-    return MongoClient('mongodb://{}:27017'.format(host))
+BATCH_SIZE = 100
+CONCURRENCY = 200   # requests in flight per process
 
 
-def update_data(db, domain, post):
+async def fetch_header(client, ua, domain):
+    url = f"http://{domain}"
     try:
-        data = db.dns.update_one({'domain': domain}, {
-                                 '$set': post}, upsert=False)
-
-        if data.modified_count > 0:
-            print(u'INFO: updated domain {} header'.format(domain))
-    except WriteError:
-        db.dns.update_one({'domain': domain},
-                          {'$set': {'header_scan_failed': datetime.utcnow()}}, upsert=False)
-    except DuplicateKeyError:
-        pass
-
-
-def retrieve_domains(db, skip, limit):
-    return db.dns.find({'header': {'$exists': False},
-                        'header_scan_failed': {'$exists': False},
-                        'ports.port': {'$in': [80, 443]}})[limit - skip:limit]
-
-
-def extract_header(db, domain, date):
-    ua = UserAgent()
-    headers = []
-
-    try:
-        h = {'User-Agent': ua.random}
-        r = requests.head(u'http://{}'.format(domain),
-                          timeout=1, allow_redirects=False, headers=h)
-    except (InvalidHeader, InvalidURL, ReadTimeout, ConnectionError, ChunkedEncodingError):
-        update_data(db, domain, {'header_scan_failed': date})
-        return
-
-    try:
-        http = {'version': '{}.{}'.format(
-            str(r.raw.version)[0], str(r.raw.version)[1])}
-        status = {'status': '{}'.format(r.status_code)}
+        r = await client.head(
+            url,
+            timeout=2.0,
+            follow_redirects=False,
+            headers={"User-Agent": ua.random},
+        )
+        http = {"version": str(r.http_version)}
+        status = {"status": str(r.status_code)}
         headers = {k.lower(): v for k, v in r.headers.items()}
         headers.update(status)
         headers.update(http)
-    except UnicodeDecodeError:
-        return
-
-    if headers:
-        update_data(db, domain, {'header': headers, 'updated': date})
-    else:
-        update_data(db, domain, {'header_scan_failed': date})
+        print(
+            f"[{multiprocessing.current_process().name}] fetched {domain} ({r.status_code})")
+        return {"domain": domain, "header": headers, "updated": datetime.now()}
+    except Exception:
+        return {"domain": domain, "header_scan_failed": datetime.now()}
 
 
-def worker(host, skip, limit):
-    args = argparser()
-    client = connect(args.host)
+async def process_batch(db, client, ua, docs):
+    tasks = [fetch_header(client, ua, doc["domain"]) for doc in docs]
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+
+    ops = [UpdateOne({"domain": res["domain"]}, {"$set": res})
+           for res in results]
+
+    if ops:
+        await db.dns.bulk_write(ops, ordered=False)
+
+
+async def worker_loop(mongo_host):
+    client = AsyncIOMotorClient(f"mongodb://{mongo_host}:27017")
     db = client.ip_data
+    ua = UserAgent()
 
-    try:
-        domains = retrieve_domains(db, limit, skip)
-    except CursorNotFound:
-        return
+    async with httpx.AsyncClient(http2=True) as http_client:
+        sem = asyncio.Semaphore(CONCURRENCY)
 
-    for domain in domains:
-        print(u'INFO: scanning {} header'.format(domain['domain']))
-        extract_header(db, domain['domain'], datetime.utcnow())
+        while True:
+            docs = await db.dns.find(
+                {
+                    "header": {"$exists": False},
+                    "header_scan_failed": {"$exists": False},
+                    "ports.port": {"$in": [80, 443]},
+                    "claimed": {"$exists": False},
+                },
+                {"domain": 1},
+                limit=BATCH_SIZE,
+            ).to_list(length=BATCH_SIZE)
+
+            if not docs:
+                break
+
+            ids = [d["_id"] for d in docs]
+            await db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed": True}})
+
+            async def bounded_process(doc):
+                async with sem:
+                    return await fetch_header(http_client, ua, doc["domain"])
+
+            tasks = [bounded_process(doc) for doc in docs]
+            results = await asyncio.gather(*tasks)
+            ops = [UpdateOne({"domain": res["domain"]}, {"$set": res})
+                   for res in results]
+
+            if ops:
+                await db.dns.bulk_write(ops, ordered=False)
 
     client.close()
-    return
+
+
+def start_process(mongo_host):
+    asyncio.run(worker_loop(mongo_host))
 
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', help='set worker count',
-                        type=int, required=True)
-    parser.add_argument('--host', help='set the host', type=str, required=True)
-    args = parser.parse_args()
-
-    return args
+    parser.add_argument("--host", type=str, required=True, help="MongoDB host")
+    parser.add_argument("--workers", type=int, required=True,
+                        help="Number of processes")
+    return parser.parse_args()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = argparser()
-    client = connect(args.host)
-    db = client.ip_data
+    print(
+        f"INFO: Starting {args.workers} processes, each with {CONCURRENCY} concurrent requests")
 
-    jobs = []
-    threads = args.worker
-    amount = round(db.dns.estimated_document_count() / (threads + 50000))
-    limit = amount
+    with multiprocessing.Pool(processes=args.workers) as pool:
+        pool.map(start_process, [args.host] * args.workers)
 
-    for f in range(threads):
-        j = multiprocessing.Process(
-            target=worker, args=(args.host, limit, amount))
-        jobs.append(j)
-        j.start()
-        limit = limit + amount
-
-    for j in jobs:
-        j.join()
-        client.close()
-        print('exitcode = {}'.format(j.exitcode))
+    print("INFO: All workers finished")

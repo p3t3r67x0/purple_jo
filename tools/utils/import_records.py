@@ -31,12 +31,14 @@ def update_data(db, domain, record_type, now, record):
         # print({'domain': domain}, {'$set': {'updated': now}, '$addToSet': {record_type: record}})
         res = db.dns.update_one({'domain': domain, record_type:
                                  {'$not': {'$in': [record]}}},
-                                 {'$set': {'updated': now}, '$addToSet':
+                                {'$set': {'updated': now}, '$addToSet':
                                  {record_type: record}}, upsert=False)
         if res.modified_count > 0:
-            print('INFO: updated {} document type {} for domain {}'.format(res.modified_count, record_type, domain))
+            print('INFO: updated {} document type {} for domain {}'.format(
+                res.modified_count, record_type, domain))
         else:
-            print('INFO: nothing to do for type {} of record {}'.format(record_type, record))
+            print('INFO: nothing to do for type {} of record {}'.format(
+                record_type, record))
     except AutoReconnect:
         time.sleep(30)
     except DuplicateKeyError:
@@ -58,36 +60,44 @@ def worker(host, records):
         domain = r['query_name'].lower().strip('.')
 
         if r['resp_type'] == 'A':
-            update_data(db, domain, 'a_record', datetime.utcnow(), r['data'].lower().strip('.'))
+            update_data(db, domain, 'a_record', datetime.now(),
+                        r['data'].lower().strip('.'))
 
         if r['resp_type'] == 'AAAA':
-            update_data(db, domain, 'aaaa_record', datetime.utcnow(), r['data'].lower().strip('.'))
+            update_data(db, domain, 'aaaa_record', datetime.now(),
+                        r['data'].lower().strip('.'))
 
         if r['resp_type'] == 'CNAME':
             cname_record = {'target': r['data'].lower().strip('.')}
-            update_data(db, domain, 'cname_record', datetime.utcnow(), cname_record)
+            update_data(db, domain, 'cname_record',
+                        datetime.now(), cname_record)
 
         if r['resp_type'] == 'NS':
             ns_record = r['data'].lower().strip('.')
 
             if not 'root-servers.net' in ns_record and not 'gtld-servers.net' in ns_record:
-                update_data(db, domain, 'ns_record', datetime.utcnow(), ns_record)
+                update_data(db, domain, 'ns_record', datetime.now(), ns_record)
 
         if r['resp_type'] == 'MX':
-            mx_record = {'preference': r['data'].split(' ')[0], 'exchange': r['data'].split(' ')[1].lower().strip('.')}
-            update_data(db, domain, 'mx_record', datetime.utcnow(), mx_record)
+            mx_record = {'preference': r['data'].split(
+                ' ')[0], 'exchange': r['data'].split(' ')[1].lower().strip('.')}
+            update_data(db, domain, 'mx_record', datetime.now(), mx_record)
 
         if r['resp_type'] == 'SOA':
-            update_data(db, domain, 'soa_record', datetime.utcnow(), r['data'].lower().strip('.'))
+            update_data(db, domain, 'soa_record', datetime.now(),
+                        r['data'].lower().strip('.'))
 
     client.close()
+
     return
 
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input', help='set input file name', type=str, required=True)
-    parser.add_argument('--worker', help='set worker count', type=int, required=True)
+    parser.add_argument('--input', help='set input file name',
+                        type=str, required=True)
+    parser.add_argument('--worker', help='set worker count',
+                        type=int, required=True)
     parser.add_argument('--host', help='set the host', type=str, required=True)
     args = parser.parse_args()
 
@@ -104,7 +114,8 @@ if __name__ == '__main__':
     print(limit, amount)
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(args.host, (records[limit - amount:limit]),))
+        j = multiprocessing.Process(target=worker, args=(
+            args.host, (records[limit - amount:limit]),))
         jobs.append(j)
         j.start()
         limit = limit + amount

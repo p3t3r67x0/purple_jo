@@ -23,10 +23,12 @@ def retrieve_domains(db, skip, limit):
 
 def update_data(db, ip, post):
     try:
-        res = db.dns.update_one({'a_record': {'$in': [ip]}}, {'$set': post}, upsert=False)
+        res = db.dns.update_one({'a_record': {'$in': [ip]}}, {
+                                '$set': post}, upsert=False)
 
         if res.modified_count > 0:
-            print('INFO: updated ip {} country code {} with {} documents'.format(ip, post['country_code'], res.modified_count))
+            print('INFO: updated ip {} country code {} with {} documents'.format(
+                ip, post['country_code'], res.modified_count))
     except DuplicateKeyError:
         pass
 
@@ -35,14 +37,28 @@ def extract_geodata(db, ip, input):
     reader = database.Reader(input)
 
     try:
-        data = reader.country(ip)
+        response = reader.city(ip)
+        print(response)
+        country_code = response.country.iso_code
+        country = response.country.name
+        state = response.subdivisions.most_specific.name
+        city = response.city.name
+        latitude = response.location.latitude
+        longitude = response.location.longitude
+        
+        if latitude is not None or longitude is not None:
+            longitude = round(longitude, 5)
+            latitude = round(latitude, 5)
+
+        update_data(db, ip, {'country_code': country_code,
+                             'country': country,
+                             'state': state,
+                             'city': city,
+                             'loc': {'coordinates': [longitude, latitude]}})
     except AddressNotFoundError:
-        return
-
-    country_code = data.registered_country.iso_code
-
-    if country_code:
-        update_data(db, ip, {'country_code': country_code})
+        print("IP not found in database")
+    finally:
+        reader.close()
 
 
 def worker(host, skip, limit):
@@ -64,8 +80,10 @@ def worker(host, skip, limit):
 
 def argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', help='set worker count', type=int, required=True)
-    parser.add_argument('--input', help='set the input file', type=str, required=True)
+    parser.add_argument('--worker', help='set worker count',
+                        type=int, required=True)
+    parser.add_argument('--input', help='set the input file',
+                        type=str, required=True)
     parser.add_argument('--host', help='set the host', type=str, required=True)
     args = parser.parse_args()
 
@@ -83,7 +101,8 @@ if __name__ == '__main__':
     limit = amount
 
     for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(args.host, limit, amount))
+        j = multiprocessing.Process(
+            target=worker, args=(args.host, limit, amount))
         jobs.append(j)
         j.start()
         limit = limit + amount

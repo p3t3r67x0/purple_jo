@@ -1,76 +1,92 @@
 #!/usr/bin/env python3
 
-import os
-import pyasn
 import multiprocessing
-import argparse
-
+import click
+import pyasn
 from datetime import datetime
 from pymongo import MongoClient
 
-
-AS_NAMES_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asn_names.json')
+# Global ASN DB (loaded once in main)
+asn_db = None
 
 
 def connect(host):
-    return MongoClient('mongodb://{}:27017'.format(host))
+    """Return a new MongoDB client for this process."""
+    return MongoClient(f"mongodb://{host}:27017")
 
 
-def retrieve_ips(db, limit, skip):
-    return db.lookup.find({'name': {'$exists': False}}).sort([('_id', -1)])[limit - skip:limit]
+def retrieve_ips(db, skip, limit):
+    """Retrieve IP records with pagination."""
+    cursor = db.ipv4.find({"name": {"$exists": False}}).skip(skip).limit(limit)
+    return list(cursor)
 
 
 def asn_lookup(ipv4):
-    asndb = pyasn.pyasn('rib.20191127.2000.dat', as_names_file=AS_NAMES_FILE_PATH)
-    asn, prefix = asndb.lookup(ipv4)
-    name = asndb.get_as_name(asn)
+    """Lookup ASN info from global pyasn db."""
+    global asn_db
+    asn, prefix = asn_db.lookup(ipv4)
+    name = asn_db.get_as_name(asn)
+    return {"name": name, "asn": asn, "prefix": prefix}
 
-    return {'name': name}
 
-
-def worker(host, skip, limit):
+def worker_func(args):
+    """Worker task: update ASN info for a batch of IPs."""
+    host, skip, limit = args
     client = connect(host)
     db = client.ip_data
 
-    for i in retrieve_ips(db, skip, limit):
-        res = asn_lookup(i['ip'])
+    ips = retrieve_ips(db, skip, limit)
+    print(
+        f"[Worker {multiprocessing.current_process().name}] Loaded {len(ips)} IPs (skip={skip}, limit={limit})"
+    )
 
-        db.lookup.update_one({'ip': i['ip']}, {'$set': {
-                             'updated': datetime.utcnow(),
-                             'name': res['name']}}, upsert=False)
+    for doc in ips:
+        ip = doc["ip"]
+        print(
+            f"[Worker {multiprocessing.current_process().name}] Processing {ip}"
+        )
+        res = asn_lookup(ip)
 
-        print('INFO: updated document with ip {} and added asn name {}'.format(i['ip'], res['name']))
+        db.ipv4.update_one(
+            {"ip": ip},
+            {"$set": {"updated": datetime.now(), **res}},
+            upsert=False,
+        )
+
+        print(
+            f"[Worker {multiprocessing.current_process().name}] Updated {ip} with ASN {res['name']}"
+        )
 
     client.close()
-    return
 
 
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', help='set worker count', type=int, required=True)
-    parser.add_argument('--host', help='set the host', type=str, required=True)
-    args = parser.parse_args()
+@click.command()
+@click.option("--worker", required=True, type=int, help="number of worker processes")
+@click.option("--host", required=True, type=str, help="MongoDB host")
+def main(worker, host):
+    global asn_db
+    asn_db = pyasn.pyasn(
+        "../../data/rib.20250901.1600.dat",
+        as_names_file="../../data/asn_names.json",
+    )
 
-    return args
-
-
-if __name__ == '__main__':
-    args = argparser()
-    client = connect(args.host)
+    client = connect(host)
     db = client.ip_data
+    total = db.ipv4.count_documents({"name": {"$exists": False}})
+    client.close()
 
-    jobs = []
-    threads = args.worker
-    amount = round(db.lookup.estimated_document_count() / (threads + 50000))
-    limit = amount
+    # Split work evenly across workers
+    batch_size = (total + worker - 1) // worker
+    tasks = [(host, i * batch_size, batch_size) for i in range(worker)]
 
-    for f in range(threads):
-        j = multiprocessing.Process(target=worker, args=(args.host, limit, amount))
-        jobs.append(j)
-        j.start()
-        limit = limit + amount
+    print(
+        f"INFO: Found {total} IPs, batch size {batch_size}, spawning {worker} workers"
+    )
 
-    for j in jobs:
-        j.join()
-        client.close()
-        print('exitcode = {}'.format(j.exitcode))
+    with multiprocessing.Pool(processes=worker) as pool:
+        pool.map(worker_func, tasks)
+
+
+if __name__ == "__main__":
+    multiprocessing.set_start_method("fork")  # workers inherit ASN DB
+    main()

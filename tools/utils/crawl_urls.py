@@ -1,80 +1,98 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import re
-import time
+import idna
 import math
-import requests
+import asyncio
 import multiprocessing
-import argparse
+import click
+import httpx
 
-from lxml import html
-from urllib.parse import urljoin, urlparse
 from fake_useragent import UserAgent
+from lxml import html
 from lxml.etree import ParserError, XMLSyntaxError
-
-from requests.exceptions import (
-    Timeout, InvalidURL, InvalidSchema, MissingSchema, ConnectionError,
-    ChunkedEncodingError, ContentDecodingError, TooManyRedirects
-)
-
-from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError, AutoReconnect, WriteError, CursorNotFound
-from idna.core import IDNAError
+from urllib.parse import urljoin, urlparse
 from datetime import datetime
 
+from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import (
+    DuplicateKeyError,
+    AutoReconnect,
+    WriteError,
+    CursorNotFound,
+)
 
-def check_mail(url):
-    return re.match(r'\b[\w.+-]+?@[-_\w]+[.]+[-_.\w]+\b', url)
+
+# -----------------------------
+# MongoDB
+# -----------------------------
+def connect_async(host: str):
+    client = AsyncIOMotorClient(f"mongodb://{host}:27017")
+    return client.url_data, client.ip_data
 
 
-def connect(host):
-    # IMPORTANT: make a fresh client inside each worker, not in parent
-    return MongoClient(f'mongodb://{host}:27017', connect=False)
-
-
-def retrieve_domains(db_ip_data, skip, limit):
-    return list(
-        db_ip_data.dns.find({'domain_crawled': {'$exists': False}})
-        .sort([("$natural", -1)])
-        .skip(skip)
-        .limit(limit)
+async def retrieve_domains(db_ip_data, skip: int, limit: int):
+    cursor = db_ip_data.dns.find(
+        {"domain_crawled": {"$exists": False}},
+        sort=[("$natural", 1)],
+        skip=skip,
+        limit=limit,
     )
+    return [doc async for doc in cursor]
 
 
-def update_data(db_ip_data, domain):
+async def update_data(db_ip_data, domain: str, failed: bool = False):
+    """Mark domain as crawled or failed."""
+    field = "crawl_failed" if failed else "domain_crawled"
     try:
-        res = db_ip_data.dns.update_one(
-            {'domain': domain},
-            {'$set': {'domain_crawled': datetime.utcnow()}},
-            upsert=False
+        res = await db_ip_data.dns.update_one(
+            {"domain": domain},
+            {"$set": {field: datetime.utcnow()}},
+            upsert=False,
         )
         if res.modified_count > 0:
-            print(f'INFO: domain {domain} updated')
+            print(
+                f"[INFO] domain {domain} {'FAILED' if failed else 'updated'}")
     except DuplicateKeyError:
         pass
 
 
-def add_urls(db_url_data, db_ip_data, url, domain):
+async def add_urls(db_url_data, url: str):
     try:
-        post = {'url': url.lower(), 'created': datetime.utcnow()}
-        post_id = db_url_data.url.insert_one(post).inserted_id
-        print(f'INFO: added url {url} with id {post_id}')
-        update_data(db_ip_data, domain)
+        post = {"url": url.lower(), "created": datetime.utcnow()}
+        res = await db_url_data.url.insert_one(post)
+        print(f"[INFO] added url {url} with id {res.inserted_id}")
     except AutoReconnect:
-        time.sleep(5)
+        await asyncio.sleep(5)
     except (DuplicateKeyError, WriteError) as e:
-        print(e)
+        print(f"[WARN] {e}")
 
 
-def get_urls(ua, url):
+# -----------------------------
+# HTTP crawling
+# -----------------------------
+async def get_urls(ua, url):
+    # Try to convert to punycode (IDNA)
     try:
-        headers = {'User-Agent': ua.chrome}
-        res = requests.get(f'http://{url}', timeout=2, headers=headers)
-        content = res.text
-    except (Timeout, ConnectionError, TooManyRedirects,
-            IDNAError, InvalidURL, InvalidSchema, MissingSchema,
-            ContentDecodingError, ChunkedEncodingError):
+        safe_domain = idna.encode(url).decode("ascii")
+    except idna.IDNAError:
+        click.echo(f"[WARN] Skipping invalid domain: {url}")
+        return None
+
+    headers = {"User-Agent": ua.chrome}
+    base_url = f"http://{safe_domain}"
+    url_set = set()
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=5,
+            follow_redirects=True
+        ) as client:
+            res = await client.get(base_url, headers=headers)
+            content = res.text
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        click.echo(f"[WARN] Failed to fetch {base_url}: {e}")
         return None
 
     try:
@@ -82,70 +100,91 @@ def get_urls(ua, url):
     except (ValueError, ParserError, XMLSyntaxError):
         return None
 
-    links = doc.xpath('//a/@href')
-    base_url = f'http://{url}'
-    url_set = set()
-
+    links = doc.xpath("//a/@href")
     for link in links:
         link = link.lower().strip()
-        if link.startswith(('#', '+', 'tel:', 'javascript:', 'mailto:')):
+        if link.startswith(("#", "+", "tel:", "javascript:", "mailto:")):
             continue
-        elif link.startswith(('/', '?', '..')):
+        elif link.startswith(("/", "?", "..")):
             link = urljoin(base_url, link)
 
-        if urlparse(link).netloc:
-            url_set.add(link)
+        try:
+            parsed = urlparse(link)
+            if parsed.netloc:
+                url_set.add(link)
+        except ValueError:
+            continue
 
     return url_set
 
 
-def worker(task):
-    host, skip, limit = task
-    client = connect(host)
-    db_url_data = client.url_data
-    db_ip_data = client.ip_data
+# -----------------------------
+# Worker
+# -----------------------------
+async def async_worker(host: str, skip: int, limit: int):
+    db_url_data, db_ip_data = connect_async(host)
     ua = UserAgent()
 
     try:
-        domains = retrieve_domains(db_ip_data, skip, limit)
+        domains = await retrieve_domains(db_ip_data, skip, limit)
     except CursorNotFound:
-        client.close()
         return f"Worker {skip}:{skip+limit} cursor error"
 
-    for domain in domains:
-        d = domain['domain']
-        print(f'INFO: processing domain {d}')
-        links = get_urls(ua, d)
+    for doc in domains:
+        d = doc["domain"]
+        click.echo(f"[INFO] processing domain {d}")
+
+        links = await get_urls(ua, d)  # your pure function
+
+        if links is None:
+            # invalid IDNA host or fetch/parsing error
+            await update_data(db_ip_data, d, failed=True)
+            continue
 
         if links:
-            for link in links:
-                add_urls(db_url_data, db_ip_data, link, d)
+            await asyncio.gather(
+                *(add_urls(db_url_data, link) for link in links),
+                return_exceptions=True
+            )
 
-    client.close()
+        # mark as crawled even if links was an empty set
+        await update_data(db_ip_data, d, failed=False)
+
     return f"Worker {skip}:{skip+limit} done ({len(domains)} domains)"
 
 
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', type=int, required=True,
-                        help='set worker count')
-    parser.add_argument('--host', type=str, required=True,
-                        help='set Mongo host')
-    return parser.parse_args()
+def run_worker(task):
+    host, skip, limit = task
+    return asyncio.run(async_worker(host, skip, limit))
 
 
-if __name__ == '__main__':
-    args = argparser()
-    client = connect(args.host)
-    db = client.ip_data
+# -----------------------------
+# CLI with Click
+# -----------------------------
+@click.command()
+@click.option(
+    "--worker", "-w",
+    type=int,
+    required=True,
+    help="Number of processes"
+)
+@click.option("--host", "-h", type=str, required=True, help="Mongo host")
+def main(worker, host):
+    sync_client = MongoClient(f"mongodb://{host}:27017")
+    total_docs = sync_client.ip_data.dns.count_documents(
+        {"domain_crawled": {"$exists": False}}
+    )
+    sync_client.close()
 
-    total_docs = db.dns.count_documents({'domain_crawled': {'$exists': False}})
-    client.close()
+    click.echo(f"[INFO] total documents to process: {total_docs}")
 
-    chunk_size = math.ceil(total_docs / args.worker)
-    tasks = [(args.host, i * chunk_size, chunk_size)
-             for i in range(args.worker)]
+    chunk_size = math.ceil(total_docs / worker)
+    tasks = [(host, i * chunk_size, chunk_size) for i in range(worker)]
 
-    with multiprocessing.Pool(processes=args.worker) as pool:
-        for result in pool.imap_unordered(worker, tasks):
-            print(result)
+    with multiprocessing.Pool(processes=worker) as pool:
+        for result in pool.imap_unordered(run_worker, tasks):
+            click.echo(result)
+
+
+if __name__ == "__main__":
+    main()

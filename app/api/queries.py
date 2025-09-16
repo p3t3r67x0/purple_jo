@@ -234,7 +234,7 @@ async def fetch_match_condition(mongo, condition: str, query: str):
         "state": lambda q: {
             "$expr": {
                 "$regexMatch": {
-                    "input": {"$toLower": "$state"},
+                    "input": {"$toLower": "$geo.state"},
                     "regex": q.lower()
                 }
             }
@@ -242,7 +242,7 @@ async def fetch_match_condition(mongo, condition: str, query: str):
         "city": lambda q: {
             "$expr": {
                 "$regexMatch": {
-                    "input": {"$toLower": "$city"},
+                    "input": {"$toLower": "$geo.city"},
                     "regex": q.lower()
                 }
             }

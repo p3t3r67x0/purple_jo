@@ -20,3 +20,5 @@ from .utils import (
 
 # asn lookup comes from services
 from app.services import asn_lookup
+
+from .trends import fetch_request_trends

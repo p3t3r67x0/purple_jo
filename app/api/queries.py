@@ -1,3 +1,4 @@
+import logging
 import re
 
 from datetime import datetime, timedelta
@@ -10,6 +11,10 @@ from app.api.utils import (
     cache_key,
     fetch_from_cache
 )
+
+from asyncio.log import logger
+
+logger.setLevel(logging.INFO)
 
 
 async def fetch_query_domain(mongo, domain: str):
@@ -80,22 +85,17 @@ async def fetch_latest_cidr(mongo):
     )
 
 
-async def fetch_latest_ipv4(mongo, page: int = 1, page_size: int = 10):
+async def fetch_latest_ipv4(mongo, page: int = 1, page_size: int = 60):
     skip = (page - 1) * page_size
     pipeline = [
+        {"$match": {"a_record": {"$exists": True, "$ne": []}}},
         {"$sort": {"updated": -1}},
         {"$skip": skip},
         {"$limit": page_size},
-        {"$project": {
-            "_id": 0,
-            "ip": 1,
-            "asn": 1,
-            "name": 1,
-            "prefix": 1,
-            "updated": 1,
-        }},
+        {"$unwind": "$a_record"},
+        {"$project": {"_id": 0, "a_record": 1, "country_code": 1}}
     ]
-    cursor = mongo.ipv4.aggregate(pipeline)
+    cursor = mongo.dns.aggregate(pipeline)
     results = [doc async for doc in cursor]
     return {"page": page, "page_size": page_size, "results": results}
 
@@ -194,6 +194,23 @@ async def fetch_match_condition(mongo, condition: str, query: str):
     if condition == "country":
         sub_query = query.upper()
 
+    def _build_geo_query(q: str):
+        try:
+            lat, lon = map(float, q.split(","))
+            return {
+                "geo.loc": {
+                    "$nearSphere": {
+                        "$geometry": {
+                            "type": "Point",
+                            "coordinates": [lat, lon]
+                        },
+                        "$maxDistance": 50000,
+                    }
+                }
+            }
+        except ValueError:
+            return {}
+
     # Dispatcher map
     condition_map = {
         "registry": lambda q: {"whois.asn_registry": q},
@@ -234,7 +251,7 @@ async def fetch_match_condition(mongo, condition: str, query: str):
         "state": lambda q: {
             "$expr": {
                 "$regexMatch": {
-                    "input": {"$toLower": "$state"},
+                    "input": {"$toLower": "$geo.state"},
                     "regex": q.lower()
                 }
             }
@@ -242,12 +259,12 @@ async def fetch_match_condition(mongo, condition: str, query: str):
         "city": lambda q: {
             "$expr": {
                 "$regexMatch": {
-                    "input": {"$toLower": "$city"},
+                    "input": {"$toLower": "$geo.city"},
                     "regex": q.lower()
                 }
             }
         },
-        "loc": lambda q: _build_geo_query(q),
+        "loc": _build_geo_query,
         "banner": lambda q: {
             "$expr": {
                 "$regexMatch": {
@@ -283,32 +300,21 @@ async def fetch_match_condition(mongo, condition: str, query: str):
         "cname": lambda q: {"cname_record.target": {"$in": [q]}},
         "mx": lambda q: {"mx_record.exchange": {"$in": [q]}},
         "ns": lambda q: {"ns_record": {"$in": [q]}},
-        "server": lambda q: {"header.server": q},
+        "server": lambda q: {
+            "$expr": {
+                "$regexMatch": {
+                    "input": {"$toLower": "$header.server"},
+                    "regex": q.lower()
+                }
+            }
+        },
         "site": lambda q: {"domain": q},
         "ipv4": lambda q: {"a_record": {"$in": [q]}},
         "ipv6": lambda q: {"aaaa_record": {"$in": [q]}},
     }
 
-    def _build_geo_query(q: str):
-        try:
-            lat, lon = map(float, q.split(","))
-            return {
-                "geo.loc": {
-                    "$nearSphere": {
-                        "$geometry": {
-                            "type": "Point",
-                            "coordinates": [lat, lon]
-                        },
-                        "$maxDistance": 50000,
-                    }
-                }
-            }
-        except ValueError:
-            return {}
-
     # Build query
     builder = condition_map.get(condition)
-
     print(f"Using builder for condition: {condition}")
     if not builder:
         return []
@@ -319,9 +325,18 @@ async def fetch_match_condition(mongo, condition: str, query: str):
     cursor = mongo.dns.find(mongo_query, {"_id": 0}).sort(
         "updated", -1).limit(30)
     results = await cursor.to_list(length=30)
+    print(f"Found {len(results)} results in DB for condition: {condition}")
+    
+    only_domains = bool(results) and all(
+        isinstance(doc.get("a_record"), list) and len(doc["a_record"]) >= 1
+        for doc in results
+    )
+    
+    print(only_domains)
 
-    # Fallback: run live scan if nothing found
-    if not results and condition in ["site", "domain"]:
+    # Fallback live-scan if nothing OR only bare domains
+    # (keep your condition guard)
+    if (not results or not only_domains) and condition in ["site", "domain"]:
         return [await perform_live_scan(mongo, query)]
 
     return results

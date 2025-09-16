@@ -5,7 +5,18 @@ from app.responses import MongoJSONResponse
 from app.middleware import log_stats
 from app.db import db, recreate_text_index
 
-from app.routes import query, subnet, match, dns, cidr, ipv4, asn, graph, ip, stats, trends
+from app.routes import (
+    query,
+    subnet,
+    match,
+    dns,
+    cidr,
+    ipv4,
+    asn,
+    graph,
+    ip,
+    trends,
+)
 
 app = FastAPI(default_response_class=MongoJSONResponse)
 
@@ -35,7 +46,6 @@ app.include_router(asn.router)
 app.include_router(graph.router)
 app.include_router(ip.router)
 app.include_router(trends.router)
-app.include_router(stats.router)
 
 
 @app.on_event("startup")

@@ -21,6 +21,20 @@ sudo apt install mongodb-org
 API and backend of Purple Pee an open source ASN lookup project. Made for the public.
 
 
+## Request Trends
+
+The API exposes aggregated request statistics via `GET /trends/requests`. You can
+control the time window and aggregation interval using the query parameters:
+
+```text
+/trends/requests?interval=minute&lookback_minutes=120&buckets=30&top_paths=5
+```
+
+The response includes a timeline of request counts, the most frequently used
+paths, and a short list of the most recent calls so that you can quickly spot
+usage patterns.
+
+
 Example output of `curl https://api.purplepee.co/match/asn:46279` entries
 
 ```json

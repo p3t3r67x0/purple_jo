@@ -109,3 +109,8 @@ venv.bak/
 *.json
 *.cfg
 /data
+*.swp
+*.swo
+.DS_Store
+.vscode/
+.idea/

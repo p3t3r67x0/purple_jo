@@ -384,8 +384,22 @@ async def fetch_match_condition(
         "ca": lambda q: {"ssl.ca_issuers": q},
         "issuer": lambda q: {
             "$or": [
-                {"ssl.issuer.organization_name": q},
-                {"ssl.issuer.common_name": q},
+                {
+                    "$expr": {
+                        "$eq": [
+                            {"$toLower": "$ssl.issuer.organization_name"},
+                            q.lower(),
+                        ]
+                    }
+                },
+                {
+                    "$expr": {
+                        "$eq": [
+                            {"$toLower": "$ssl.issuer.common_name"},
+                            q.lower(),
+                        ]
+                    }
+                },
             ]
         },
         "unit": lambda q: {

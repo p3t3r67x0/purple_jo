@@ -1,7 +1,10 @@
 from typing import Awaitable, Callable, TypeVar
 
+import logging
+
 from aiocache import Cache
 from aiocache.serializers import PickleSerializer
+from aiocache.exceptions import InvalidCacheType
 
 from app.config import (
     CACHE_EXPIRE,
@@ -15,15 +18,26 @@ from app.config import (
 T = TypeVar("T")
 
 
-cache = Cache(
-    Cache.REDIS,
-    endpoint=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD,
-    db=REDIS_DB,
-    namespace=REDIS_NAMESPACE,
-    serializer=PickleSerializer(),
-)
+logger = logging.getLogger(__name__)
+
+
+def _create_cache() -> Cache:
+    try:
+        return Cache(
+            Cache.REDIS,
+            endpoint=REDIS_HOST,
+            port=REDIS_PORT,
+            password=REDIS_PASSWORD,
+            db=REDIS_DB,
+            namespace=REDIS_NAMESPACE,
+            serializer=PickleSerializer(),
+        )
+    except InvalidCacheType:
+        logger.warning("Redis backend unavailable, falling back to in-memory cache")
+        return Cache(Cache.MEMORY, serializer=PickleSerializer())
+
+
+cache = _create_cache()
 
 
 async def fetch_from_cache(

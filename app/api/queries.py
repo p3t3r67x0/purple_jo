@@ -2,7 +2,7 @@ import logging
 import re
 import socket
 from datetime import datetime, timedelta
-from typing import Tuple
+from typing import Optional, Tuple
 
 from asyncio.log import logger
 
@@ -173,11 +173,23 @@ async def fetch_latest_ipv4(mongo, page: int = 1, page_size: int = 60):
     )
 
 
-async def fetch_latest_asn(mongo, page: int = 1, page_size: int = 50):
-    """Return the most recently seen ASNs."""
+async def fetch_latest_asn(
+    mongo,
+    page: int = 1,
+    page_size: int = 50,
+    country_code: Optional[str] = None,
+):
+    """Return the most recently seen ASNs, optionally filtered by country code."""
 
     query = {"whois.asn": {"$exists": True}}
-    projection = {"_id": 0, "whois.asn": 1, "whois.asn_country_code": 1}
+    if country_code:
+        query["whois.asn_country_code"] = country_code.upper()
+    projection = {
+        "_id": 0,
+        "whois.asn": 1,
+        "whois.asn_country_code": 1,
+        "whois.asn_description": 1,
+    }
     skip, limit = _pagination_bounds(page, page_size)
 
     async def loader():
@@ -191,7 +203,8 @@ async def fetch_latest_asn(mongo, page: int = 1, page_size: int = 50):
         total = await mongo.dns.count_documents(query)
         return results, total
 
-    key = f"asn:latest:{page}:{page_size}"
+    country_key = country_code.upper() if country_code else "all"
+    key = f"asn:latest:{country_key}:{page}:{page_size}"
     return await cached_paginated_fetch(
         key,
         loader,

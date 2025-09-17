@@ -11,6 +11,9 @@ from typing import Dict, Literal, Optional, Tuple
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.api.utils import paginate
+from app.cache import fetch_from_cache
+
 # Mapping of supported aggregation intervals to the MongoDB format string used
 # in ``$dateToString`` and the Python ``timedelta`` that represents the bucket
 # width.
@@ -25,6 +28,12 @@ _DATE_FORMATS: Dict[
 _PARSE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 
+def _pagination_bounds(page: int, page_size: int) -> Tuple[int, int]:
+    safe_page = max(page, 1)
+    safe_page_size = max(page_size, 1)
+    return (safe_page - 1) * safe_page_size, safe_page_size
+
+
 async def fetch_request_trends(
     mongo: AsyncIOMotorDatabase,
     *,
@@ -34,6 +43,8 @@ async def fetch_request_trends(
     top_paths: int,
     recent_limit: int,
     path: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 25,
 ) -> dict:
     """Aggregate request statistics for the trend endpoint.
 
@@ -62,89 +73,126 @@ async def fetch_request_trends(
 
     format_str, bucket_delta = _DATE_FORMATS[interval]
 
-    timeline_pipeline = [
-        {"$match": match_stage},
-        {
-            "$group": {
-                "_id": {
-                    "$dateToString": {
-                        "format": format_str,
-                        "date": "$created",
-                    }
-                },
-                "count": {"$sum": 1},
-            }
-        },
-        {"$sort": {"_id": -1}},
-        {"$limit": buckets},
-        {"$sort": {"_id": 1}},
-    ]
+    skip, limit = _pagination_bounds(page, page_size)
 
-    timeline_cursor = mongo.stats_data.aggregate(timeline_pipeline)
-    timeline_docs = [doc async for doc in timeline_cursor]
-
-    timeline = []
-    for doc in timeline_docs:
-        bucket_start = datetime.strptime(doc["_id"], _PARSE_FORMAT)
-        timeline.append(
-            {
-                "window_start": bucket_start.isoformat(),
-                "window_end": (bucket_start + bucket_delta).isoformat(),
-                "count": doc["count"],
-            }
-        )
-
-    top_paths_data = []
-    if top_paths > 0:
-        top_paths_pipeline = [
+    async def loader() -> dict:
+        timeline_pipeline = [
             {"$match": match_stage},
-            {"$group": {"_id": "$path", "count": {"$sum": 1}}},
-            {"$sort": {"count": -1}},
-            {"$limit": top_paths},
-            {"$project": {"_id": 0, "path": "$_id", "count": 1}},
+            {
+                "$group": {
+                    "_id": {
+                        "$dateToString": {
+                            "format": format_str,
+                            "date": "$created",
+                        }
+                    },
+                    "count": {"$sum": 1},
+                }
+            },
+            {"$sort": {"_id": -1}},
+            {"$limit": buckets},
         ]
-        top_cursor = mongo.stats_data.aggregate(top_paths_pipeline)
-        top_paths_data = [doc async for doc in top_cursor]
+        if skip:
+            timeline_pipeline.append({"$skip": skip})
+        timeline_pipeline.extend([{"$limit": limit}, {"$sort": {"_id": 1}}])
 
-    recent_requests = []
-    if recent_limit > 0:
-        recent_cursor = (
-            mongo.stats_data.find(
-                match_stage,
+        timeline_cursor = mongo.stats_data.aggregate(timeline_pipeline)
+        timeline_docs = [doc async for doc in timeline_cursor]
+
+        timeline = []
+        for doc in timeline_docs:
+            bucket_start = datetime.strptime(doc["_id"], _PARSE_FORMAT)
+            timeline.append(
                 {
-                    "_id": 0,
-                    "path": 1,
-                    "request_method": 1,
-                    "status_code": 1,
-                    "remote_address": 1,
-                    "created": 1,
-                },
-            )
-            .sort("created", -1)
-            .limit(recent_limit)
-        )
-        async for doc in recent_cursor:
-            created = doc.get("created")
-            recent_requests.append(
-                {
-                    "path": doc.get("path"),
-                    "request_method": doc.get("request_method"),
-                    "status_code": doc.get("status_code"),
-                    "remote_address": doc.get("remote_address"),
-                    "created": created.isoformat() if created else None,
+                    "window_start": bucket_start.isoformat(),
+                    "window_end": (bucket_start + bucket_delta).isoformat(),
+                    "count": doc["count"],
                 }
             )
 
-    total_requests = await mongo.stats_data.count_documents(match_stage)
+        count_cursor = mongo.stats_data.aggregate(
+            [
+                {"$match": match_stage},
+                {
+                    "$group": {
+                        "_id": {
+                            "$dateToString": {
+                                "format": format_str,
+                                "date": "$created",
+                            }
+                        }
+                    }
+                },
+                {"$count": "count"},
+            ]
+        )
+        count_docs = await count_cursor.to_list(length=1)
+        total_buckets = count_docs[0]["count"] if count_docs else 0
+        total_buckets = min(total_buckets, buckets)
 
-    return {
-        "interval": interval,
-        "lookback_minutes": lookback_minutes,
-        "since": since.isoformat(),
-        "path_filter": path,
-        "bucket_count": len(timeline),
-        "total_requests": total_requests,
-        "timeline": timeline,
-        "top_paths": top_paths_data,
-        "recent_requests": recent_requests,
-    }
+        timeline_page = paginate(
+            page=page,
+            page_size=page_size,
+            total=total_buckets,
+            results=timeline,
+        )
+
+        top_paths_data = []
+        if top_paths > 0:
+            top_paths_pipeline = [
+                {"$match": match_stage},
+                {"$group": {"_id": "$path", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+                {"$limit": top_paths},
+                {"$project": {"_id": 0, "path": "$_id", "count": 1}},
+            ]
+            top_cursor = mongo.stats_data.aggregate(top_paths_pipeline)
+            top_paths_data = [doc async for doc in top_cursor]
+
+        recent_requests = []
+        if recent_limit > 0:
+            recent_cursor = (
+                mongo.stats_data.find(
+                    match_stage,
+                    {
+                        "_id": 0,
+                        "path": 1,
+                        "request_method": 1,
+                        "status_code": 1,
+                        "remote_address": 1,
+                        "created": 1,
+                    },
+                )
+                .sort("created", -1)
+                .limit(recent_limit)
+            )
+            async for doc in recent_cursor:
+                created = doc.get("created")
+                recent_requests.append(
+                    {
+                        "path": doc.get("path"),
+                        "request_method": doc.get("request_method"),
+                        "status_code": doc.get("status_code"),
+                        "remote_address": doc.get("remote_address"),
+                        "created": created.isoformat() if created else None,
+                    }
+                )
+
+        total_requests = await mongo.stats_data.count_documents(match_stage)
+
+        return {
+            "interval": interval,
+            "lookback_minutes": lookback_minutes,
+            "since": since.isoformat(),
+            "path_filter": path,
+            "bucket_count": timeline_page["total"],
+            "total_requests": total_requests,
+            "timeline": timeline_page,
+            "top_paths": top_paths_data,
+            "recent_requests": recent_requests,
+        }
+
+    cache_key = \
+        f"trends:{interval}:{lookback_minutes}:{buckets}:{top_paths}:{recent_limit}:{path}:{page}:{page_size}"
+
+    return await fetch_from_cache(cache_key, loader, ttl=60)

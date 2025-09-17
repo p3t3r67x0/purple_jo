@@ -1,34 +1,52 @@
 # app/api/utils.py
+import math
+from typing import Any, Awaitable, Callable, Dict, Iterable, Tuple
+
 from bson import ObjectId
-from app.cache import cache
+
+from app.cache import fetch_from_cache
 
 
-async def fetch_from_cache(mongo, query, filter=None, unwind=False, sort=None,
-                           limit=None, skip=0, context="normal", reset=False,
-                           cache_key_str=None):
-    """
-    Generic helper to fetch from cache or query Mongo as fallback.
-    """
-    key = cache_key_str or str(query)
-    data = await cache.get(key)
+PaginationResult = Dict[str, Any]
 
-    if data and not reset:
-        return data
 
-    # Build Mongo query
-    cursor = mongo.dns.find(query, filter or {})
-    if sort:
-        cursor = cursor.sort(list(sort.items()))
-    if skip:
-        cursor = cursor.skip(skip)
-    if limit:
-        cursor = cursor.limit(limit)
+def paginate(
+    *,
+    page: int,
+    page_size: int,
+    total: int,
+    results: Iterable[Any],
+) -> PaginationResult:
+    """Create a standard pagination payload."""
 
-    results = await cursor.to_list(length=limit or 100)
+    safe_page_size = max(page_size, 1)
+    total_pages = math.ceil(total / safe_page_size) if total else 0
+    return {
+        "page": page,
+        "page_size": safe_page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+        "has_previous": page > 1 and total > 0,
+        "results": list(results),
+    }
 
-    # Cache results
-    await cache.set(key, results, ttl=300)
-    return results
+
+async def cached_paginated_fetch(
+    key: str,
+    loader: Callable[[], Awaitable[Tuple[Iterable[Any], int]]],
+    *,
+    page: int,
+    page_size: int,
+    ttl: int = 300,
+) -> PaginationResult:
+    """Fetch ``loader`` results and wrap them in pagination metadata."""
+
+    async def _populate() -> PaginationResult:
+        data, total = await loader()
+        return paginate(page=page, page_size=page_size, total=total, results=data)
+
+    return await fetch_from_cache(key, _populate, ttl=ttl)
 
 
 def fix_mongo_ids(doc):

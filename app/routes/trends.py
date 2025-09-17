@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api import fetch_request_trends
+from app.config import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from app.deps import get_mongo
 
 
@@ -18,6 +19,8 @@ async def request_trends(
     top_paths: int = Query(5, ge=0, le=50),
     recent_limit: int = Query(20, ge=0, le=100),
     path: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     mongo: AsyncIOMotorDatabase = Depends(get_mongo),
 ):
     """Return aggregated request trends for the API."""
@@ -30,4 +33,6 @@ async def request_trends(
         top_paths=top_paths,
         recent_limit=recent_limit,
         path=path,
+        page=page,
+        page_size=page_size,
     )

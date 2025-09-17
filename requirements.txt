@@ -39,3 +39,4 @@ typing_extensions==4.15.0
 urllib3==2.5.0
 uvicorn==0.35.0
 yarl==1.20.1
+redis==5.1.1

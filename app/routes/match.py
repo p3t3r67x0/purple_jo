@@ -1,6 +1,8 @@
-from fastapi import APIRouter, HTTPException, Depends
-from app.api import fetch_match_condition
+from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
+
+from app.api import fetch_match_condition
+from app.config import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from app.deps import get_mongo
 
 
@@ -10,7 +12,9 @@ router = APIRouter()
 @router.get("/match/{query:path}")
 async def match(
     query: str,
-    mongo: AsyncIOMotorDatabase = Depends(get_mongo)
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    mongo: AsyncIOMotorDatabase = Depends(get_mongo),
 ):
     ql = query.split(":")
     condition = ql[0].lower()
@@ -20,7 +24,13 @@ async def match(
     else:
         q = ql[1] if len(ql) > 1 else ql[0]
 
-    items = await fetch_match_condition(mongo, condition, q)
-    if items:
+    items = await fetch_match_condition(
+        mongo,
+        condition,
+        q,
+        page=page,
+        page_size=page_size,
+    )
+    if items.get("results"):
         return items
     raise HTTPException(status_code=404, detail="No documents found")

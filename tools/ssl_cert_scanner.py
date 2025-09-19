@@ -14,6 +14,7 @@ from pymongo import UpdateOne
 BATCH_SIZE = 50      # how many domains each process pulls from DB at once
 CONCURRENCY = 100    # concurrent TLS handshakes per process
 TIMEOUT = 3          # socket/TLS timeout
+TLS_PORTS = [443]    # ports to probe for TLS certificates
 
 
 async def test_tls_version(domain: str, port: int = 443):
@@ -147,7 +148,13 @@ async def worker_loop(mongo_host):
             {
                 "ssl": {"$exists": False},
                 "cert_scan_failed": {"$exists": False},
-                "ports.port": {"$in": [443]},
+                "ports": {
+                    "$elemMatch": {
+                        "port": {"$in": TLS_PORTS},
+                        "status": "open",
+                        "proto": "tcp",
+                    }
+                },
                 "claimed": {"$exists": False},
             },
             {"domain": 1},

@@ -48,6 +48,12 @@ TEXT_INDEX_FIELDS = (
 
 TEXT_INDEX_NAME = "all_fields_text_index"
 
+DOMAIN_UNIQUE_INDEX = IndexModel(
+    [("domain", 1)],
+    name="domain_unique_index",
+    unique=True,
+)
+
 TEXT_INDEX_DEFINITION = IndexModel(
     TEXT_INDEX_FIELDS,
     name=TEXT_INDEX_NAME,
@@ -65,4 +71,4 @@ async def recreate_text_index() -> None:
             # Index did not exist or could not be dropped; continue regardless.
             pass
 
-    await db.dns.create_indexes([TEXT_INDEX_DEFINITION])
+    await db.dns.create_indexes([DOMAIN_UNIQUE_INDEX, TEXT_INDEX_DEFINITION])

@@ -1,6 +1,7 @@
 # Purplepee Backend
 
-Here we go with some updated notes to get the beef running
+API backend for the Purplepee open-source ASN lookup project. The service is
+implemented with **FastAPI** and served with **Uvicorn**.
 
 
 ## Database Setup
@@ -18,7 +19,44 @@ sudo apt install mongodb-org
 ```
 
 
-API and backend of Purple Pee an open source ASN lookup project. Made for the public.
+When you are done installing MongoDB, make sure it is running locally and the
+connection strings in `config.cfg` (or your environment variables) point to the
+correct instance.
+
+
+## Application Setup
+
+The backend now runs on FastAPI; Flask is no longer used. Use Python 3.10+.
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Create a `.env` file or export the relevant environment variables if you do not
+want to rely on `config.cfg`.
+
+
+## Running the API
+
+Development server with auto-reload:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+Production-style startup (example):
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+Interactive API documentation is available once the server is running:
+
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
 
 
 ## Request Trends
@@ -537,20 +575,21 @@ Example output of `curl https://api.purplepee.co/match/asn:46279` entries
 ## Build Setup
 
 ```bash
-# install build dependencies
-sudo apt install redis-server chromium-chromedriver virtualenv python3 python3-dev gcc
+# install build/runtime dependencies you might need
+sudo apt install redis-server chromium-chromedriver python3 python3-dev gcc
 
 # create a virtualenv
-virtualenv  venv
+python3 -m venv venv
 
 # activate virtualenv
 . venv/bin/activate
 
-# install dependencies
+# install python dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
 
-# serve at 127.0.0.1:5000
-gunicorn --bind 127.0.0.1:5000 wsgi:app --access-logfile - --error-logfile - --log-level info
+# optional: run the API locally (bound to localhost:8000)
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2 --log-level info
 ```
 
 
@@ -560,7 +599,7 @@ Create a file `/etc/systemd/system/purplejo.service` with following content
 
 ```bash
 [Unit]
-Description=Gunicorn instance to serve purplejo
+Description=Uvicorn instance to serve purplejo
 After=network.target
 
 [Service]
@@ -568,7 +607,7 @@ User=<user>
 Group=www-data
 WorkingDirectory=/home/<user>/git/purple_jo
 Environment="PATH=/home/<user>/git/purple_jo/venv/bin"
-ExecStart=/home/<user>/git/purple_jo/venv/bin/gunicorn --bind 127.0.0.1:5000 wsgi:aioapp -k aiohttp.worker.GunicornWebWorker --workers 4 --threads 2 --access-logfile /var/log/purplejo/access.log --error-logfile /var/log/purplejo/error.log --log-level INFO
+ExecStart=/home/<user>/git/purple_jo/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4 --log-level info --proxy-headers
 Restart=on-failure
 RestartSec=2s
 
@@ -639,7 +678,7 @@ server {
             add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
         }
 
-        proxy_pass http://127.0.0.1:5000/;
+        proxy_pass http://127.0.0.1:8000/;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $http_host;

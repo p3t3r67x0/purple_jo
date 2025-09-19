@@ -1,5 +1,9 @@
 # app/services/live_scan.py
 from datetime import datetime
+from typing import List
+
+import idna
+from fastapi import HTTPException
 
 from .dns import fetch_dns_records
 from .http import fetch_site_headers
@@ -11,12 +15,43 @@ from .geoip import fetch_geoip
 from .qrcode import generate_qrcode
 
 
+def _is_valid_domain(domain: str) -> bool:
+    if not domain:
+        return False
+
+    try:
+        ascii_domain = idna.encode(domain.strip()).decode("ascii")
+    except idna.IDNAError:
+        return False
+
+    if ascii_domain.endswith("."):
+        ascii_domain = ascii_domain[:-1]
+
+    if len(ascii_domain) == 0 or len(ascii_domain) > 253:
+        return False
+
+    labels: List[str] = ascii_domain.split(".")
+    if len(labels) < 2:
+        return False
+
+    for label in labels:
+        if not 0 < len(label) <= 63:
+            return False
+        if label.startswith("-") or label.endswith("-"):
+            return False
+
+    return True
+
+
 async def perform_live_scan(mongo, domain: str) -> dict:
     """
     Run a full live scan enrichment pipeline for a domain.
     Includes DNS, headers, SSL, GeoIP, WHOIS, banners, ports, QR code.
     Saves the result to Mongo.
     """
+    if not _is_valid_domain(domain):
+        raise HTTPException(status_code=400, detail={"error": "invalid_domain", "domain": domain})
+
     now = datetime.now().isoformat()
     dns_records = await fetch_dns_records(domain)
     headers = await fetch_site_headers(domain)
@@ -48,12 +83,7 @@ async def perform_live_scan(mongo, domain: str) -> dict:
         "header": headers,
         "ports": ports_info,
         "whois": whois_info,
-        "country_code": geo_info.get("country_code"),
-        "city": geo_info.get("city"),
-        "country": geo_info.get("country"),
-        "state": geo_info.get("state"),
-        "loc": geo_info.get("loc"),
-        "qrcode": qrcode_info.get("qrcode"),
+        "geo": geo_info,
         "banner": banner_info,
         "ssl": ssl_info,
     }

@@ -1,5 +1,6 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.responses import MongoJSONResponse
 from app.middleware import log_stats
@@ -18,16 +19,15 @@ from app.routes import (
     trends,
 )
 
-app = FastAPI(default_response_class=MongoJSONResponse)
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await recreate_text_index()
+    print("INFO: Recreated text index")
+    yield
+
+
+app = FastAPI(default_response_class=MongoJSONResponse, lifespan=lifespan)
 
 # Middleware
 app.middleware("http")(log_stats)
@@ -46,9 +46,3 @@ app.include_router(asn.router)
 app.include_router(graph.router)
 app.include_router(ip.router)
 app.include_router(trends.router)
-
-
-@app.on_event("startup")
-async def startup_event():
-    await recreate_text_index()
-    print("INFO: Recreated text index")

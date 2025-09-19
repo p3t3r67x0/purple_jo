@@ -7,6 +7,9 @@ from datetime import datetime
 from typing import Iterable, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
+import aio_pika
+from aio_pika import DeliveryMode, Message
+from aiormq.exceptions import AMQPConnectionError
 import click
 import httpx
 import idna
@@ -35,14 +38,20 @@ def connect_async(host: str):
     return client.url_data, client.ip_data
 
 
-def build_domain_cursor(db_ip_data, skip: int, limit: int):
-    return db_ip_data.dns.find(
+def iter_pending_domains(sync_client: MongoClient, batch_size: int = 5000):
+    cursor = sync_client.ip_data.dns.find(
         {"domain_crawled": {"$exists": False}},
         {"domain": 1},
         sort=[("$natural", 1)],
-        skip=skip,
-        limit=limit,
+        batch_size=batch_size,
     )
+    try:
+        for doc in cursor:
+            domain = doc.get("domain")
+            if domain:
+                yield domain
+    finally:
+        cursor.close()
 
 
 async def update_data(db_ip_data, domain: str, failed: bool = False):
@@ -51,7 +60,7 @@ async def update_data(db_ip_data, domain: str, failed: bool = False):
     try:
         res = await db_ip_data.dns.update_one(
             {"domain": domain},
-            {"$set": {field: datetime.utcnow()}},
+            {"$set": {field: datetime.now()}},
             upsert=False,
         )
         if res.modified_count > 0:
@@ -70,8 +79,9 @@ def _build_user_agent() -> str:
 
 
 async def add_urls(db_url_data, urls: Iterable[str]):
-    documents = [{"url": url.lower(), "created": datetime.utcnow()}
+    documents = [{"url": url.lower(), "created": datetime.now()}
                  for url in urls]
+    log.info("Inserting %d new URLs", documents)
     if not documents:
         return
 
@@ -162,6 +172,7 @@ async def process_domain(
 
     if links:
         await add_urls(db_url_data, links)
+        log.info("Captured %d links from %s", len(links), domain)
 
     await update_data(db_ip_data, domain, failed=False)
     return domain, True
@@ -175,7 +186,17 @@ async def _bounded_process(semaphore: asyncio.Semaphore, coro):
         semaphore.release()
 
 
-async def async_worker(host: str, skip: int, limit: int, concurrency: int):
+def build_domain_cursor(db_ip_data, skip: int, limit: int):
+    return db_ip_data.dns.find(
+        {"domain_crawled": {"$exists": False}},
+        {"domain": 1},
+        sort=[("$natural", 1)],
+        skip=skip,
+        limit=limit,
+    )
+
+
+async def async_worker_direct(host: str, skip: int, limit: int, concurrency: int):
     db_url_data, db_ip_data = connect_async(host)
     user_agent = _build_user_agent()
 
@@ -183,7 +204,6 @@ async def async_worker(host: str, skip: int, limit: int, concurrency: int):
 
     processed = 0
     successes = 0
-
     semaphore = asyncio.Semaphore(max(1, concurrency))
     tasks = []
     cursor_error = None
@@ -197,8 +217,9 @@ async def async_worker(host: str, skip: int, limit: int, concurrency: int):
                 task = asyncio.create_task(
                     _bounded_process(
                         semaphore,
-                        process_domain(db_url_data, db_ip_data,
-                                       client, user_agent, domain),
+                        process_domain(
+                            db_url_data, db_ip_data, client, user_agent, domain
+                        ),
                     )
                 )
                 tasks.append(task)
@@ -224,9 +245,129 @@ async def async_worker(host: str, skip: int, limit: int, concurrency: int):
     )
 
 
-def run_worker(task):
+def run_worker_direct(task):
     host, skip, limit, concurrency = task
-    return asyncio.run(async_worker(host, skip, limit, concurrency))
+    return asyncio.run(async_worker_direct(host, skip, limit, concurrency))
+
+
+async def enqueue_domains(
+    rabbitmq_url: str,
+    queue_name: str,
+    domains: Iterable[str],
+    worker_count: int,
+    purge_queue: bool,
+) -> int:
+    connection = await aio_pika.connect_robust(rabbitmq_url)
+    sent = 0
+
+    async with connection:
+        channel = await connection.channel()
+        queue = await channel.declare_queue(queue_name, durable=True)
+
+        if purge_queue:
+            await queue.purge()
+
+        for domain in domains:
+            message = Message(
+                body=domain.encode("utf-8"),
+                delivery_mode=DeliveryMode.PERSISTENT,
+            )
+            await channel.default_exchange.publish(message, routing_key=queue_name)
+            sent += 1
+
+        for _ in range(worker_count):
+            stop_message = Message(
+                body=b"__STOP__",
+                delivery_mode=DeliveryMode.PERSISTENT,
+            )
+            await channel.default_exchange.publish(
+                stop_message, routing_key=queue_name)
+
+    return sent
+
+
+async def queue_consumer(
+    host: str,
+    rabbitmq_url: str,
+    queue_name: str,
+    concurrency: int,
+    prefetch: int,
+):
+    db_url_data, db_ip_data = connect_async(host)
+    user_agent = _build_user_agent()
+    processed = 0
+    successes = 0
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    connection = await aio_pika.connect_robust(rabbitmq_url)
+
+    try:
+        channel = await connection.channel()
+        await channel.set_qos(prefetch_count=max(1, prefetch))
+        queue = await channel.declare_queue(queue_name, durable=True)
+
+        async with httpx.AsyncClient(timeout=5, follow_redirects=True) as client:
+            pending = set()
+
+            async with queue.iterator() as queue_iter:
+                async for message in queue_iter:
+                    domain = message.body.decode()
+
+                    if domain == "__STOP__":
+                        await message.ack()
+                        break
+
+                    async def handle(msg, domain_name):
+                        nonlocal processed, successes
+                        try:
+                            async with semaphore:
+                                result = await process_domain(
+                                    db_url_data,
+                                    db_ip_data,
+                                    client,
+                                    user_agent,
+                                    domain_name,
+                                )
+                        except Exception as exc:  # pragma: no cover - best effort logging
+                            log.warning(
+                                "Domain %s failed during crawl: %s",
+                                domain_name,
+                                exc,
+                            )
+                            await update_data(db_ip_data, domain_name, failed=True)
+                            processed += 1
+                            await msg.ack()
+                            return
+
+                        await msg.ack()
+                        processed += 1
+                        if result[1]:
+                            successes += 1
+
+                    task = asyncio.create_task(handle(message, domain))
+                    pending.add(task)
+                    task.add_done_callback(pending.discard)
+
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+    finally:
+        await connection.close()
+
+    summary = f"Worker done ({processed} domains, success={successes})"
+    log.info(summary)
+    return summary
+
+
+def run_worker(task):
+    host, rabbitmq_url, queue_name, concurrency, prefetch = task
+    try:
+        return asyncio.run(
+            queue_consumer(host, rabbitmq_url, queue_name, concurrency, prefetch)
+        )
+    except AMQPConnectionError as exc:
+        return (
+            f"[ERROR] Worker could not connect to RabbitMQ at {rabbitmq_url}: {exc}"
+        )
 
 
 # -----------------------------
@@ -247,36 +388,110 @@ def run_worker(task):
     show_default=True,
     help="Concurrent domains processed per worker"
 )
-def main(worker, host, concurrency):
-    logging.basicConfig(level=logging.INFO,
+@click.option(
+    "--rabbitmq-url", "-r",
+    type=str,
+    default=None,
+    help="RabbitMQ connection URL (e.g. amqp://guest:guest@localhost/). If omitted, the legacy multiprocessing mode is used."
+)
+@click.option(
+    "--queue-name", "-q",
+    type=str,
+    default="crawl_domains",
+    show_default=True,
+    help="Name of the RabbitMQ queue"
+)
+@click.option(
+    "--prefetch",
+    type=int,
+    default=100,
+    show_default=True,
+    help="RabbitMQ prefetch per worker"
+)
+@click.option(
+    "--purge-queue/--no-purge-queue",
+    default=True,
+    help="Clear the queue before publishing domains"
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Enable verbose debug logging"
+)
+def main(worker, host, concurrency, rabbitmq_url, queue_name, prefetch, purge_queue, verbose):
+    log_level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(level=log_level,
                         format="[%(levelname)s] %(message)s")
-
-    sync_client = MongoClient(f"mongodb://{host}:27017", tz_aware=True)
-    total_docs = sync_client.ip_data.dns.count_documents(
-        {"domain_crawled": {"$exists": False}}
-    )
-    sync_client.close()
-
-    click.echo(f"[INFO] total documents to process: {total_docs}")
 
     worker_count = max(1, worker)
     concurrency = max(1, concurrency)
-    chunk_size = math.ceil(total_docs / worker_count) if total_docs else 0
+    prefetch = max(1, prefetch)
 
-    tasks = []
-    start = 0
-    while start < total_docs:
-        tasks.append(
-            (host, start, min(chunk_size, total_docs - start), concurrency))
-        start += chunk_size or total_docs
+    sync_client = MongoClient(f"mongodb://{host}:27017", tz_aware=True)
+    pending_filter = {"domain_crawled": {"$exists": False}}
+    total_docs = sync_client.ip_data.dns.count_documents(pending_filter)
 
-    if not tasks:
+    click.echo(f"[INFO] total documents to process: {total_docs}")
+
+    if total_docs == 0:
+        sync_client.close()
         click.echo("[INFO] Nothing to crawl")
         return
 
-    with multiprocessing.Pool(processes=worker_count) as pool:
-        for result in pool.imap_unordered(run_worker, tasks):
-            click.echo(result)
+    if rabbitmq_url:
+        domains = iter_pending_domains(sync_client)
+        log.info("Publishing crawl jobs to RabbitMQ at %s", rabbitmq_url)
+        try:
+            published = asyncio.run(
+                enqueue_domains(
+                    rabbitmq_url=rabbitmq_url,
+                    queue_name=queue_name,
+                    domains=domains,
+                    worker_count=worker_count,
+                    purge_queue=purge_queue,
+                )
+            )
+        except AMQPConnectionError as exc:
+            sync_client.close()
+            raise click.ClickException(
+                f"Failed to connect to RabbitMQ at {rabbitmq_url}: {exc}. "
+                "Ensure the broker is running and reachable."
+            ) from exc
+
+        click.echo(
+            f"[INFO] queued {published} domains onto RabbitMQ queue '{queue_name}'"
+        )
+
+        sync_client.close()
+
+        worker_args = [
+            (host, rabbitmq_url, queue_name, concurrency, prefetch)
+            for _ in range(worker_count)
+        ]
+
+        with multiprocessing.Pool(processes=worker_count) as pool:
+            log.info("Spawned %d worker processes", worker_count)
+            for result in pool.imap_unordered(run_worker, worker_args):
+                click.echo(result)
+    else:
+        sync_client.close()
+        chunk_size = math.ceil(total_docs / worker_count) if total_docs else 0
+
+        tasks = []
+        start = 0
+        while start < total_docs:
+            tasks.append(
+                (host, start, min(chunk_size, total_docs - start), concurrency)
+            )
+            start += chunk_size or total_docs
+
+        if not tasks:
+            click.echo("[INFO] Nothing to crawl")
+            return
+
+        with multiprocessing.Pool(processes=worker_count) as pool:
+            for result in pool.imap_unordered(run_worker_direct, tasks):
+                click.echo(result)
 
 
 if __name__ == "__main__":

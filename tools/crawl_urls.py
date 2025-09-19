@@ -79,9 +79,11 @@ def _build_user_agent() -> str:
 
 
 async def add_urls(db_url_data, urls: Iterable[str]):
-    documents = [{"url": url.lower(), "created": datetime.now()}
-                 for url in urls]
-    log.info("Inserting %d new URLs", documents)
+    documents = [
+        {"url": url.lower(), "created": datetime.now()}
+        for url in urls
+    ]
+    log.info("Inserting %d new URLs", len(documents))
     if not documents:
         return
 

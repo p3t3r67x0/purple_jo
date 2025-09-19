@@ -1,53 +1,68 @@
 from motor.motor_asyncio import AsyncIOMotorClient
-from app.config import MONGO_URI, DB_NAME
+from pymongo import IndexModel, TEXT
+
+from app.config import DB_NAME, MONGO_URI
+
 
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client[DB_NAME]
 
 
-async def recreate_text_index():
-    try:
-        await db.dns.drop_index("domain_text_header.x-powered-by_text")
-    except Exception:
-        pass
+LEGACY_TEXT_INDEXES = ("domain_text_header.x-powered-by_text",)
 
-    await db.dns.create_index(
-        [
-            ("domain", "text"),
-            ("header.x-powered-by", "text"),
-            ("banner", "text"),
-            ("ports.port", "text"),
-            ("whois.asn", "text"),
-            ("whois.asn_description", "text"),
-            ("whois.asn_country_code", "text"),
-            ("whois.asn_registry", "text"),
-            ("whois.asn_cidr", "text"),
-            ("cname_record.target", "text"),
-            ("mx_record.exchange", "text"),
-            ("header.server", "text"),
-            ("header.status", "text"),
-            ("ns_record", "text"),
-            ("aaaa_record", "text"),
-            ("a_record", "text"),
-            ("geo.loc.coordinates", "text"),
-            ("geo.country_code", "text"),
-            ("geo.country", "text"),
-            ("geo.state", "text"),
-            ("geo.city", "text"),
-            ("ssl.ocsp", "text"),
-            ("ssl.not_after", "text"),
-            ("ssl.not_before", "text"),
-            ("ssl.ca_issuers", "text"),
-            ("ssl.issuer.common_name", "text"),
-            ("ssl.issuer.organization_name", "text"),
-            ("ssl.issuer.organizational_unit_name", "text"),
-            ("ssl.subject_alt_names", "text"),
-            ("ssl.subject.common_name", "text"),
-            ("ssl.subject.organizational_unit_name", "text"),
-            ("ssl.subject.organization_name", "text"),
-            ("ssl.crl_distribution_points", "text"),
-        ],
-        name="all_fields_text_index",
-        default_language="english",
-        background=True,
-    )
+TEXT_INDEX_FIELDS = (
+    ("domain", TEXT),
+    ("header.x-powered-by", TEXT),
+    ("banner", TEXT),
+    ("ports.port", TEXT),
+    ("whois.asn", TEXT),
+    ("whois.asn_description", TEXT),
+    ("whois.asn_country_code", TEXT),
+    ("whois.asn_registry", TEXT),
+    ("whois.asn_cidr", TEXT),
+    ("cname_record.target", TEXT),
+    ("mx_record.exchange", TEXT),
+    ("header.server", TEXT),
+    ("header.status", TEXT),
+    ("ns_record", TEXT),
+    ("aaaa_record", TEXT),
+    ("a_record", TEXT),
+    ("geo.loc.coordinates", TEXT),
+    ("geo.country_code", TEXT),
+    ("geo.country", TEXT),
+    ("geo.state", TEXT),
+    ("geo.city", TEXT),
+    ("ssl.ocsp", TEXT),
+    ("ssl.not_after", TEXT),
+    ("ssl.not_before", TEXT),
+    ("ssl.ca_issuers", TEXT),
+    ("ssl.issuer.common_name", TEXT),
+    ("ssl.issuer.organization_name", TEXT),
+    ("ssl.issuer.organizational_unit_name", TEXT),
+    ("ssl.subject_alt_names", TEXT),
+    ("ssl.subject.common_name", TEXT),
+    ("ssl.subject.organizational_unit_name", TEXT),
+    ("ssl.subject.organization_name", TEXT),
+    ("ssl.crl_distribution_points", TEXT),
+)
+
+TEXT_INDEX_NAME = "all_fields_text_index"
+
+TEXT_INDEX_DEFINITION = IndexModel(
+    TEXT_INDEX_FIELDS,
+    name=TEXT_INDEX_NAME,
+    default_language="english",
+    background=True,
+)
+
+
+async def recreate_text_index() -> None:
+    """Re-create the full text index with the current field definition."""
+    for index_name in (*LEGACY_TEXT_INDEXES, TEXT_INDEX_NAME):
+        try:
+            await db.dns.drop_index(index_name)
+        except Exception:
+            # Index did not exist or could not be dropped; continue regardless.
+            pass
+
+    await db.dns.create_indexes([TEXT_INDEX_DEFINITION])

@@ -59,7 +59,7 @@ async def worker_loop(mongo_host):
                     "header": {"$exists": False},
                     "header_scan_failed": {"$exists": False},
                     "ports.port": {"$in": [80, 443]},
-                    "claimed": {"$exists": False},
+                    "claimed_header_scan": {"$exists": False},
                 },
                 {"domain": 1},
                 limit=BATCH_SIZE,
@@ -69,7 +69,7 @@ async def worker_loop(mongo_host):
                 break
 
             ids = [d["_id"] for d in docs]
-            await db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed": True}})
+            await db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed_header_scan": True}})
 
             async def bounded_process(doc):
                 async with sem:

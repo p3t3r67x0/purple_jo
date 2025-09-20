@@ -155,7 +155,7 @@ async def worker_loop(mongo_host):
                         "proto": "tcp",
                     }
                 },
-                "claimed": {"$exists": False},
+                "claimed_cert_scan": {"$exists": False},
             },
             {"domain": 1},
             limit=BATCH_SIZE,
@@ -165,7 +165,7 @@ async def worker_loop(mongo_host):
             break
 
         ids = [d["_id"] for d in docs]
-        await db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed": True}})
+        await db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed_cert_scan": True}})
         await handle_batch(db, docs)
 
     client.close()

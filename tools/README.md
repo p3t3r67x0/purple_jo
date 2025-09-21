@@ -91,13 +91,17 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 ## Crawling, Discovery & Reporting
 
 ### crawl_urls.py
-- **Purpose:** Fetch `http://<domain>` for domains missing `domain_crawled` and store absolute links in `url_data.url`.
-- **CLI:** `python tools/crawl_urls.py --worker 4 --host mongodb.internal --concurrency 25`
+- **Purpose:** Crawl pending domains, following redirects where necessary, persist discovered links, and log crawl outcomes (including the final URL) to MongoDB and the console.
+- **CLI:**
+  - Queue RabbitMQ jobs from MongoDB: `python tools/crawl_urls.py --host mongodb.internal --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name crawl_domains --purge-queue`
+  - Run long-lived workers: `python tools/crawl_urls.py --host mongodb.internal --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 250 --log-urls`
+  - Direct/batch mode (no RabbitMQ): `python tools/crawl_urls.py --host mongodb.internal --worker 4 --concurrency 250`
 - **Details:**
-  - Counts pending domains, splits them evenly across worker processes, and within each process runs `asyncio` tasks.
-  - Extracts `<a href="…">` values via `lxml`, normalises relative URLs, and records them (ignoring duplicates).
-  - Marks each domain with `domain_crawled` or `crawl_failed` depending on the outcome.
-- **Tips:** Only plain HTTP is attempted; extend the script if HTTPS-only targets are expected. Watch the console for `[WARN]` messages.
+  - Publishes `STOP` sentinels after queueing so multiple service instances can exit cleanly once work is drained.
+  - Workers share an async HTTP client per process, honour redirects via `httpx`, and record `final_url` in their crawl summary logs.
+  - Extracts `<a href="…">` values with `lxml`, normalises relative paths with `urljoin`, and bulk-inserts unique URLs into `url_data.url`.
+  - Marks domains with `domain_crawled` or `crawl_failed`; insert retries and MongoDB writes are resilient to transient errors.
+  - `--log-urls` promotes discovered links to info-level log entries for easier auditing across distributed workers.
 
 ### extract_certstream.py
 - **Purpose:** Listen to the public Certstream feed and add observed hostnames to MongoDB.

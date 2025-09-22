@@ -5,7 +5,7 @@ import re
 import time
 import math
 import multiprocessing
-import argparse
+import click
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -85,25 +85,24 @@ def worker(task):
     return f"Worker {skip}:{skip+limit} done"
 
 
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', type=int, required=True,
-                        help='number of workers')
-    parser.add_argument('--host', type=str, required=True, help='MongoDB host')
-    return parser.parse_args()
 
-
-if __name__ == '__main__':
-    args = argparser()
-    client = connect(args.host)
+@click.command()
+@click.option('--workers', required=True, type=int, help='number of workers')
+@click.option('--host', required=True, type=str, help='MongoDB host')
+def main(workers, host):
+    client = connect(host)
     total_docs = client.url_data.url.count_documents(
         {'domain_extracted': {'$exists': False}})
     client.close()
 
-    chunk_size = math.ceil(total_docs / args.worker)
-    tasks = [(args.host, i * chunk_size, chunk_size)
-             for i in range(args.worker)]
+    chunk_size = math.ceil(total_docs / workers)
+    tasks = [(host, i * chunk_size, chunk_size)
+             for i in range(workers)]
 
-    with multiprocessing.Pool(processes=args.worker) as pool:
+    with multiprocessing.Pool(processes=workers) as pool:
         for result in pool.imap_unordered(worker, tasks):
             print(result)
+
+
+if __name__ == '__main__':
+    main()

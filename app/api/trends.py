@@ -6,6 +6,8 @@ producing concise, trend friendly datasets that can be consumed by the API
 layer.
 """
 
+import asyncio
+
 from datetime import datetime, timedelta
 from typing import Dict, Literal, Optional, Tuple
 
@@ -96,61 +98,47 @@ async def fetch_request_trends(
             timeline_pipeline.append({"$skip": skip})
         timeline_pipeline.extend([{"$limit": limit}, {"$sort": {"_id": 1}}])
 
-        timeline_cursor = mongo.stats_data.aggregate(timeline_pipeline)
-        timeline_docs = [doc async for doc in timeline_cursor]
+        async def load_timeline():
+            cursor = mongo.stats_data.aggregate(timeline_pipeline)
+            return [doc async for doc in cursor]
 
-        timeline = []
-        for doc in timeline_docs:
-            bucket_start = datetime.strptime(doc["_id"], _PARSE_FORMAT)
-            timeline.append(
-                {
-                    "window_start": bucket_start.isoformat(),
-                    "window_end": (bucket_start + bucket_delta).isoformat(),
-                    "count": doc["count"],
-                }
-            )
-
-        count_cursor = mongo.stats_data.aggregate(
-            [
-                {"$match": match_stage},
-                {
-                    "$group": {
-                        "_id": {
-                            "$dateToString": {
-                                "format": format_str,
-                                "date": "$created",
+        async def load_bucket_count() -> int:
+            count_cursor = mongo.stats_data.aggregate(
+                [
+                    {"$match": match_stage},
+                    {
+                        "$group": {
+                            "_id": {
+                                "$dateToString": {
+                                    "format": format_str,
+                                    "date": "$created",
+                                }
                             }
                         }
-                    }
-                },
-                {"$count": "count"},
-            ]
-        )
-        count_docs = await count_cursor.to_list(length=1)
-        total_buckets = count_docs[0]["count"] if count_docs else 0
-        total_buckets = min(total_buckets, buckets)
+                    },
+                    {"$count": "count"},
+                ]
+            )
+            count_docs = await count_cursor.to_list(length=1)
+            total = count_docs[0]["count"] if count_docs else 0
+            return min(total, buckets)
 
-        timeline_page = paginate(
-            page=page,
-            page_size=page_size,
-            total=total_buckets,
-            results=timeline,
-        )
-
-        top_paths_data = []
-        if top_paths > 0:
-            top_paths_pipeline = [
+        async def load_top_paths():
+            if top_paths <= 0:
+                return []
+            pipeline = [
                 {"$match": match_stage},
                 {"$group": {"_id": "$path", "count": {"$sum": 1}}},
                 {"$sort": {"count": -1}},
                 {"$limit": top_paths},
                 {"$project": {"_id": 0, "path": "$_id", "count": 1}},
             ]
-            top_cursor = mongo.stats_data.aggregate(top_paths_pipeline)
-            top_paths_data = [doc async for doc in top_cursor]
+            cursor = mongo.stats_data.aggregate(pipeline)
+            return [doc async for doc in cursor]
 
-        recent_requests = []
-        if recent_limit > 0:
+        async def load_recent():
+            if recent_limit <= 0:
+                return []
             recent_cursor = (
                 mongo.stats_data.find(
                     match_stage,
@@ -166,9 +154,10 @@ async def fetch_request_trends(
                 .sort("created", -1)
                 .limit(recent_limit)
             )
+            items = []
             async for doc in recent_cursor:
                 created = doc.get("created")
-                recent_requests.append(
+                items.append(
                     {
                         "path": doc.get("path"),
                         "request_method": doc.get("request_method"),
@@ -177,8 +166,36 @@ async def fetch_request_trends(
                         "created": created.isoformat() if created else None,
                     }
                 )
+            return items
 
-        total_requests = await mongo.stats_data.count_documents(match_stage)
+        async def load_total_requests() -> int:
+            return await mongo.stats_data.count_documents(match_stage)
+
+        (timeline_docs, total_buckets, top_paths_data, recent_requests, total_requests) = await asyncio.gather(
+            load_timeline(),
+            load_bucket_count(),
+            load_top_paths(),
+            load_recent(),
+            load_total_requests(),
+        )
+
+        timeline = []
+        for doc in timeline_docs:
+            bucket_start = datetime.strptime(doc["_id"], _PARSE_FORMAT)
+            timeline.append(
+                {
+                    "window_start": bucket_start.isoformat(),
+                    "window_end": (bucket_start + bucket_delta).isoformat(),
+                    "count": doc["count"],
+                }
+            )
+
+        timeline_page = paginate(
+            page=page,
+            page_size=page_size,
+            total=total_buckets,
+            results=timeline,
+        )
 
         return {
             "interval": interval,

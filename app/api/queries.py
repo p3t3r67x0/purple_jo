@@ -81,8 +81,7 @@ async def fetch_all_prefix(mongo, prefix: str, page: int = 1, page_size: int = 2
 async def fetch_latest_dns(mongo, page: int = 1, page_size: int = 10):
     """Return recently updated DNS documents with pagination."""
 
-    date = datetime.now() - timedelta(days=1)
-    query = {"updated": {"$gte": date}}
+    query = {"a_record": {"$exists": True, "$ne": []}}
     skip, limit = _pagination_bounds(page, page_size)
 
     async def loader():

@@ -54,12 +54,21 @@ DOMAIN_UNIQUE_INDEX = IndexModel(
     unique=True,
 )
 
+A_RECORD_SPARSE_INDEX = IndexModel(
+    [("a_record", 1)],
+    name="a_record_sparse_index",
+    sparse=True,
+    background=True,
+)
+
 TEXT_INDEX_DEFINITION = IndexModel(
     TEXT_INDEX_FIELDS,
     name=TEXT_INDEX_NAME,
     default_language="english",
     background=True,
 )
+
+INDEXES = [DOMAIN_UNIQUE_INDEX, TEXT_INDEX_DEFINITION, A_RECORD_SPARSE_INDEX]
 
 
 async def recreate_text_index() -> None:
@@ -71,4 +80,4 @@ async def recreate_text_index() -> None:
             # Index did not exist or could not be dropped; continue regardless.
             pass
 
-    await db.dns.create_indexes([DOMAIN_UNIQUE_INDEX, TEXT_INDEX_DEFINITION])
+    await db.dns.create_indexes(INDEXES)

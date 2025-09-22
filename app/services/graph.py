@@ -32,6 +32,7 @@ async def retrieve_entries(db, domain):
         {"$project": {
             "main.domain": "$domain",
             "main.a_record": "$a_record",
+            "main.subject_alt_names": "$ssl.subject_alt_names",
             "zzz": {
                 "$setUnion": [
                     "$certificates",
@@ -50,6 +51,7 @@ async def retrieve_entries(db, domain):
         {"$project": {
             "all.domain": 1,
             "all.a_record": 1,
+            "all.ssl.subject_alt_names": 1,
             "main": 1,
             "_id": 0
         }}
@@ -58,61 +60,112 @@ async def retrieve_entries(db, domain):
 
 
 def update_summary(summary, data):
-    if 'a_record' in data:
-        summary.add((data['domain'], ','.join(data['a_record'])))
-    else:
-        summary.add((data['domain'], ''))
+    domain = data.get('domain')
+    if not domain:
+        return summary
+
+    entry = summary.get(domain)
+    if entry is None:
+        entry = {
+            "a_records": set(),
+            "subject_alt_names": set(),
+            "alias_only": True,
+        }
+        summary[domain] = entry
+
+    entry["alias_only"] = False
+
+    a_records = data.get('a_record') or []
+    if isinstance(a_records, str):
+        a_records = [a_records]
+    entry["a_records"].update(a_records)
+
+    alt_names = data.get('subject_alt_names')
+    if alt_names is None:
+        alt_names = data.get('ssl', {}).get('subject_alt_names', [])
+    if isinstance(alt_names, str):
+        alt_names = [alt_names]
+
+    cleaned_alt_names = [alt for alt in alt_names if alt]
+    entry["subject_alt_names"].update(cleaned_alt_names)
+
+    for alt in cleaned_alt_names:
+        alt_entry = summary.get(alt)
+        if alt_entry is None:
+            summary[alt] = {
+                "a_records": set(),
+                "subject_alt_names": set(),
+                "alias_only": True,
+            }
+
     return summary
 
 
 async def extract_graph(db, domain):
     results = await retrieve_entries(db, domain)
-    summary_s = set()
-    edges_s = set()
-    main_s = set()
-    groups = set()
-    groups_d = {}
+    if not results:
+        return {}
+
+    summary = {}
+    main_domains = set()
+
+    for item in results[0].get('main', []):
+        main_domains.add(item.get('domain'))
+        update_summary(summary, item)
+
+    for item in results[0].get('all', []):
+        update_summary(summary, item)
+
+    if not summary:
+        return {}
+
+    groups = sorted({ip for info in summary.values() for ip in info["a_records"]})
+    groups_d = {ip: idx for idx, ip in enumerate(groups)}
+
     nodes = []
-    edges = []
+    node_ids = {}
 
-    if results:
-        for i in results[0]['main']:
-            other = update_summary(summary_s, i)
-            summary_s |= other
-            if 'a_record' in i:
-                groups.update(i['a_record'])
+    for idx, label in enumerate(sorted(summary)):
+        info = summary[label]
+        node_ids[label] = idx
 
-        for i in results[0]['all']:
-            other = update_summary(summary_s, i)
-            summary_s |= other
-            if 'a_record' in i:
-                groups.update(i['a_record'])
+        node = {"id": idx, "label": label}
 
-        for idx, v in enumerate(groups):
-            groups_d[v] = idx
+        if info["a_records"]:
+            first_ip = sorted(info["a_records"])[0]
+            node["group"] = str(groups_d[first_ip])
 
-        for idx, v in enumerate(summary_s):
-            node = {"id": idx, "label": v[0]}
-            e = {"from": idx}
-            if v[0] == domain:
-                main_s.add(idx)
+        if info["subject_alt_names"]:
+            node["subject_alt_names"] = sorted(info["subject_alt_names"])
 
-            for j in v[1].split(','):
-                if j in groups:
-                    e["to"] = groups_d[j]
-                    if e["from"] != e["to"] and (e["to"], e["from"]) not in edges_s:
-                        edges_s.add((e["from"], e["to"]))
-                        node["group"] = str(groups_d[j])
-            nodes.append(node)
+        if info.get("alias_only"):
+            node["alias_only"] = True
 
-    for v in nodes:
-        for j in main_s:
-            e = {"from": j, "to": v["id"]}
-            if e["from"] != e["to"] and (e["to"], e["from"]) not in edges_s:
-                edges_s.add((e["from"], e["to"]))
+        nodes.append(node)
 
-    for i in edges_s:
-        edges.append({"from": i[0], "to": i[1]})
+    edges_s = set()
+
+    for label, info in summary.items():
+        from_id = node_ids[label]
+        for alt in info["subject_alt_names"]:
+            if alt not in node_ids:
+                continue
+            to_id = node_ids[alt]
+            if from_id == to_id:
+                continue
+            if (to_id, from_id) not in edges_s:
+                edges_s.add((from_id, to_id))
+
+    main_ids = {node_ids[d] for d in main_domains if d in node_ids}
+
+    for node in nodes:
+        for main_id in main_ids:
+            if node["id"] == main_id:
+                continue
+            if (node["id"], main_id) not in edges_s:
+                edges_s.add((main_id, node["id"]))
+
+    edges = [{"from": src, "to": dst} for src, dst in sorted(edges_s)]
 
     if nodes and edges:
         return {"nodes": nodes, "edges": edges}

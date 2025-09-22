@@ -17,6 +17,7 @@ from app.routes import (
     graph,
     ip,
     trends,
+    live,
 )
 
 
@@ -46,3 +47,4 @@ app.include_router(asn.router)
 app.include_router(graph.router)
 app.include_router(ip.router)
 app.include_router(trends.router)
+app.include_router(live.router)

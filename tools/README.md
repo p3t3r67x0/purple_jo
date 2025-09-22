@@ -28,7 +28,7 @@ Some scripts also depend on external binaries or services (for example `masscan`
 | `extract_geoip.py`          | Enrichment    | Populate GeoIP fields by looking up A records in a MaxMind database.             |
 | `extract_graph.py`          | Analysis      | Build a relationship graph between domains via DNS/SSL edges.                    |
 | `extract_header.py`         | Enrichment    | Issue HTTP `HEAD` requests and store response headers.                           |
-| `utils/extract_records.py`  | Enrichment    | Resolve common DNS record types for domains lacking data.                        |
+| `extract_records.py`        | Enrichment    | Resolve common DNS record types for domains lacking data.                        |
 | `extract_whois.py`          | Enrichment    | Fetch WHOIS/ASN details for `dns` or `ipv4` records.                             |
 | `generate_qrcode.py`        | Reporting     | Generate base64 PNG QR codes for HTTPS URLs.                                     |
 | `generate_sitemap.py`       | Reporting     | Merge Selenium-discovered URLs with an existing sitemap.                         |
@@ -141,12 +141,16 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 
 ## Enrichment Pipelines
 
-### utils/extract_records.py
-- **Purpose:** Resolve a standard set of DNS records (`A`, `AAAA`, `MX`, `NS`, `SOA`, `CNAME`) for domains lacking an `updated` timestamp.
-- **CLI:** `python tools/utils/extract_records.py --worker 8 --host mongodb.internal`
+### extract_records.py
+- **Purpose:** Resolve standard DNS records (`A`, `AAAA`, `MX`, `NS`, `SOA`, `CNAME`) for domains missing an `updated` timestamp.
+- **CLI:**
+  - Queue jobs to RabbitMQ: `python tools/extract_records.py --host mongodb.internal --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name dns_records --purge-queue`
+  - Run distributed workers: `python tools/extract_records.py --host mongodb.internal --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 200 --log-records`
+  - Direct mode: `python tools/extract_records.py --host mongodb.internal --worker 4 --concurrency 200`
 - **Details:**
-  - Splits the domain list across worker processes, performs synchronous `dns.resolver` lookups (1 second timeout), and stores results with `$addToSet` semantics.
-  - Marks domains with `update_failed` timestamps when no records are found.
+  - Uses RabbitMQ to distribute domains across async workers; workers resolve DNS in parallel via `asyncio.to_thread` and write results through Motor.
+  - Stores answers with `$addToSet`, clears stale claim markers, and logs per-domain summaries (with optional detailed record logging).
+  - Emits STOP messages so service instances shut down cleanly once the queue is drained.
 
 ### banner_grabber.py
 - **Purpose:** Fetch SSH banners from IPs referenced by domain A records.
@@ -156,11 +160,15 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
   - Claims batches by setting `in_progress`, attempts a socket connect/read, and stores the banner or a failure timestamp.
 
 ### extract_header.py
-- **Purpose:** Collect HTTP response headers via async `HEAD` requests.
-- **CLI:** `python tools/extract_header.py --host mongodb.internal --workers 4`
+- **Purpose:** Collect HTTP response headers with redirect awareness and persist the final URL and redirect chain.
+- **CLI:**
+  - Queue jobs to RabbitMQ: `python tools/extract_header.py --host mongodb.internal --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name header_scans --purge-queue`
+  - Run distributed workers: `python tools/extract_header.py --host mongodb.internal --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 200 --log-headers`
+  - Direct mode: `python tools/extract_header.py --host mongodb.internal --worker 4 --concurrency 200`
 - **Details:**
-  - Each process grabs pending domains (with open ports 80/443) and fires up to `CONCURRENCY` concurrent requests using `httpx` + `fake_useragent`.
-  - Persists headers, HTTP status/version, and `updated` timestamp; failures get `header_scan_failed`.
+  - Uses RabbitMQ to distribute header scan jobs; workers share an async HTTP client with redirect following and configurable timeouts.
+  - Stores headers, HTTP status/version, final URL, and optional redirect chain, clearing stale `header_scan_failed` markers on success.
+  - `--log-headers` dumps the captured header map for observability; STOP sentinel messages let service instances exit once queues are drained.
 
 ### extract_geoip.py
 - **Purpose:** Enrich A-record domains with GeoIP data from a local MaxMind database.
@@ -178,11 +186,15 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
   - For the `ipv4` collection, WHOIS results are written to `ip_data.lookup` and the `subnet` flag is cleared.
 
 ### ssl_cert_scanner.py
-- **Purpose:** Perform TLS handshakes against port 443, archive certificate metadata, and record which TLS protocol versions are accepted.
-- **CLI:** `python tools/ssl_cert_scanner.py --host mongodb.internal --workers 4`
+- **Purpose:** Perform TLS handshakes, capture certificate metadata, and test supported protocol versions.
+- **CLI:**
+  - Queue jobs to RabbitMQ: `python tools/ssl_cert_scanner.py --host mongodb.internal --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name ssl_scans --purge-queue`
+  - Run distributed workers: `python tools/ssl_cert_scanner.py --host mongodb.internal --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 100 --log-tls`
+  - Direct mode: `python tools/ssl_cert_scanner.py --host mongodb.internal --worker 4 --concurrency 100`
 - **Details:**
-  - Each process claims pending domains (must list port 443), extracts issuer/subject/SAN fields, handshake details, and tests TLS 1.0–1.3 individually.
-  - Successful runs populate `ssl`, failed handshakes write `ssl_scan_failed`.
+  - Uses RabbitMQ to distribute scan jobs; workers reuse async TLS clients and restrict concurrency via semaphores.
+  - Extracts issuer/subject/SAN data, OCSP/CRL endpoints, handshake metadata, and per-protocol acceptance (TLS 1.0–1.3) for each successful scan.
+  - Stores results under `ssl`, clears failure markers, and logs summary lines (with optional verbose certificate dumps).
 
 ### masscan_scanner.py
 - **Purpose:** Run the `masscan` binary against batches of claimed IPs and save any open ports.
@@ -206,7 +218,7 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 
 1. **Seed data:** Run `import_domains.py`, `import_ip.py`, and `insert_asn.py` as needed to populate MongoDB.
 2. **Derive domains:** Execute `extract_domains.py` to turn stored URLs into registrable domains.
-3. **Resolve DNS:** Use `utils/extract_records.py` (and optionally `import_records.py`) to enrich each domain with DNS answers.
+3. **Resolve DNS:** Use `extract_records.py` (and optionally `import_records.py`) to enrich each domain with DNS answers.
 4. **Network enrichment:** Launch `extract_geoip.py`, `extract_header.py`, `ssl_cert_scanner.py`, `extract_whois.py`, `banner_grabber.py`, and `masscan_scanner.py` to gather network metadata.
 5. **Crawling & reporting:** Run `crawl_urls.py`, `generate_qrcode.py`, `screenshot_scraper.py`, and `generate_sitemap.py` for additional context and presentation outputs.
 6. **Continuous discovery:** Keep `extract_certstream.py` (and optional security checks like `cve_2019_19781_scanner.py`) running to ingest newly observed assets.

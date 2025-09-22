@@ -2,7 +2,9 @@
 import sys
 import json
 import argparse
+import contextlib
 import multiprocessing
+import os
 import subprocess
 import tempfile
 import time
@@ -30,7 +32,7 @@ def claim_ips(db, batch_size):
     """Atomically claim a batch of IPs for scanning."""
     docs = list(
         db.dns.find(
-            {"ports": {"$exists": False}, "claimed": {"$ne": True}},  # exclude already claimed
+            {"ports": {"$exists": False}, "claimed_port": {"$ne": True}},  # exclude already claimed_port
             {"a_record": 1}
         ).limit(batch_size)
     )
@@ -38,7 +40,7 @@ def claim_ips(db, batch_size):
         return []
 
     ids = [d["_id"] for d in docs]
-    db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed": True}})
+    db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed_port": True}})
     ips = []
     for doc in docs:
         ips.extend(doc.get("a_record", []))
@@ -72,10 +74,44 @@ def run_masscan(ips, ports, rate=1000):
 
     try:
         with open(out_file, "r") as f:
-            return json.load(f)
+            content = f.read()
     except Exception as e:
-        print(f"[-] Failed to parse masscan JSON: {e}")
+        print(f"[-] Failed to read masscan output: {e}")
         return []
+    finally:
+        with contextlib.suppress(Exception):
+            os.remove(out_file)
+
+    if not content.strip():
+        return []
+
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        # Fallback to line-by-line JSON (masscan sometimes emits NDJSON style)
+        results = []
+        for raw in content.splitlines():
+            line = raw.strip().rstrip(",")
+            if not line or line in {"[", "]"}:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as e:
+                preview = line[:80] + ("..." if len(line) > 80 else "")
+                print(f"[-] Failed to parse masscan JSON line: {e} -> {preview}")
+                continue
+
+            if "ip" in payload and payload.get("ports"):
+                results.append(payload)
+            elif "results" in payload:
+                results.extend(payload.get("results", []))
+        return results
+
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict) and "results" in parsed:
+        return parsed.get("results", [])
+    return []
 
 
 def update_data(db, scan_results, now):

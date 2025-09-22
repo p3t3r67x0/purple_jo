@@ -1,194 +1,666 @@
 #!/usr/bin/env python3
+"""Distributed TLS certificate scanner backed by RabbitMQ and MongoDB."""
+
+from __future__ import annotations
 
 import asyncio
-import ssl
-import re
-import argparse
+import contextlib
+import logging
+import math
 import multiprocessing
+import os
+import re
+import ssl
+from dataclasses import dataclass
 from datetime import datetime
+from typing import AsyncIterator, Dict, List, Optional, Set, Tuple
 
+import aio_pika
+from aio_pika import DeliveryMode, Message
+from aiormq.exceptions import AMQPConnectionError
+import click
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import UpdateOne
+from pymongo import MongoClient
 
 
-BATCH_SIZE = 50      # how many domains each process pulls from DB at once
-CONCURRENCY = 100    # concurrent TLS handshakes per process
-TIMEOUT = 3          # socket/TLS timeout
-TLS_PORTS = [443]    # ports to probe for TLS certificates
+STOP_SENTINEL = b"__STOP__"
+DEFAULT_PREFETCH = 400
+DEFAULT_CONCURRENCY = 100
+DEFAULT_TIMEOUT = 5.0
+DEFAULT_PORTS: Tuple[int, ...] = (443,)
+TLS_VERSION_MAP = {
+    "TLSv1.0": ssl.TLSVersion.TLSv1,
+    "TLSv1.1": ssl.TLSVersion.TLSv1_1,
+    "TLSv1.2": ssl.TLSVersion.TLSv1_2,
+    "TLSv1.3": ssl.TLSVersion.TLSv1_3,
+}
 
 
-async def test_tls_version(domain: str, port: int = 443):
-    """Try connecting with specific TLS versions and report which succeed."""
-    results = {}
+log = logging.getLogger("ssl_cert_scanner")
 
-    # Map SSL module constants to human-readable labels
-    tls_versions = {
-        "TLSv1.0": ssl.TLSVersion.TLSv1,
-        "TLSv1.1": ssl.TLSVersion.TLSv1_1,
-        "TLSv1.2": ssl.TLSVersion.TLSv1_2,
-        "TLSv1.3": ssl.TLSVersion.TLSv1_3,
-    }
 
-    for label, version in tls_versions.items():
+def configure_logging(level: int) -> None:
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        root_logger.addHandler(handler)
+    root_logger.setLevel(level)
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    log.setLevel(level)
+
+
+@dataclass
+class WorkerSettings:
+    mongo_host: str
+    rabbitmq_url: Optional[str]
+    queue_name: str
+    prefetch: int
+    concurrency: int
+    timeout: float
+    ports: Tuple[int, ...]
+    log_level: int
+    verbose_tls: bool = False
+
+
+@dataclass
+class DirectWorkerSettings(WorkerSettings):
+    skip: int = 0
+    limit: int = 0
+
+
+@dataclass
+class SSLJob:
+    domain: str
+    message: aio_pika.IncomingMessage
+    stop: bool = False
+
+
+@dataclass
+class ScanStats:
+    processed: int = 0
+    succeeded: int = 0
+    failed: int = 0
+
+    def record(self, success: bool) -> None:
+        self.processed += 1
+        if success:
+            self.succeeded += 1
+        else:
+            self.failed += 1
+
+    def summary(self) -> str:
+        return (
+            f"processed={self.processed} succeeded={self.succeeded} "
+            f"failed={self.failed}"
+        )
+
+
+class MongoAsync:
+    def __init__(self, host: str) -> None:
+        self._client = AsyncIOMotorClient(f"mongodb://{host}:27017", tz_aware=True)
+        self.db = self._client.ip_data
+
+    def close(self) -> None:
+        self._client.close()
+
+
+class SSLRuntime:
+    def __init__(self, settings: WorkerSettings) -> None:
+        self.settings = settings
+        self.mongo = MongoAsync(settings.mongo_host)
+        self.stats = ScanStats()
+
+    async def close(self) -> None:
+        self.mongo.close()
+
+    async def process_domain(self, domain: str) -> bool:
+        domain = domain.strip().lower()
+        if not domain:
+            return False
+
+        cert_data = await self._extract_certificate(domain)
+        timestamp = datetime.now()
+
+        if cert_data:
+            await self._store_success(domain, cert_data, timestamp)
+            self.stats.record(True)
+            self._log_success(domain, cert_data)
+            return True
+
+        await self._mark_failed(domain, timestamp)
+        self.stats.record(False)
+        log.warning("TLS scan failed for %s", domain)
+        return False
+
+    async def _extract_certificate(self, domain: str) -> Optional[Dict[str, object]]:
+        for port in self.settings.ports:
+            result = await self._scan_port(domain, port)
+            if result:
+                return result
+        return None
+
+    async def _scan_port(self, domain: str, port: int) -> Optional[Dict[str, object]]:
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
         try:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ctx.minimum_version = version
-            ctx.maximum_version = version
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(
-                    domain, port, ssl=ctx, server_hostname=domain),
-                timeout=TIMEOUT,
+                    domain,
+                    port,
+                    ssl=ssl_ctx,
+                    server_hostname=domain,
+                ),
+                timeout=self.settings.timeout,
             )
+        except Exception as exc:
+            log.debug("Handshake failed for %s:%d (%s)", domain, port, exc)
+            return None
+
+        try:
+            cert = writer.get_extra_info("peercert")
             ssl_obj = writer.get_extra_info("ssl_object")
-            results[label] = {
-                "accepted": True,
-                "cipher": ssl_obj.cipher() if ssl_obj else None,
-                "version": ssl_obj.version() if ssl_obj else None,
-            }
+        finally:
             writer.close()
-            await writer.wait_closed()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+        if not cert:
+            return None
+
+        certificate = self._normalise_certificate(cert, ssl_obj)
+        certificate["port"] = port
+        certificate["tls_versions"] = await self._test_tls_versions(domain, port)
+        return certificate
+
+    def _normalise_certificate(self, cert: Dict[str, object], ssl_obj: Optional[ssl.SSLObject]) -> Dict[str, object]:
+        issuer: Dict[str, object] = {}
+        subject: Dict[str, object] = {}
+        alt_names: List[str] = []
+
+        for item in cert.get("subject", []):
+            key = "_".join(re.findall(".[^A-Z]*", item[0][0])).lower()
+            subject[key] = item[0][1]
+
+        for item in cert.get("issuer", []):
+            key = "_".join(re.findall(".[^A-Z]*", item[0][0])).lower()
+            issuer[key] = item[0][1]
+
+        for item in cert.get("subjectAltName", []):
+            alt_names.append(item[1])
+
+        data: Dict[str, object] = {
+            "issuer": issuer,
+            "subject": subject,
+            "subject_alt_names": alt_names,
+            "serial": cert.get("serialNumber"),
+            "not_before": self._parse_dt(cert.get("notBefore")),
+            "not_after": self._parse_dt(cert.get("notAfter")),
+            "version": cert.get("version"),
+            "handshake_version": ssl_obj.version() if ssl_obj else None,
+            "handshake_cipher": ssl_obj.cipher() if ssl_obj else None,
+        }
+
+        if cert.get("OCSP"):
+            data["ocsp"] = cert["OCSP"][0].strip("/")
+        if cert.get("caIssuers"):
+            data["ca_issuers"] = cert["caIssuers"][0].strip("/")
+        if cert.get("crlDistributionPoints"):
+            data["crl_distribution_points"] = cert["crlDistributionPoints"][0].strip("/")
+
+        return data
+
+    @staticmethod
+    def _parse_dt(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value, "%b %d %H:%M:%S %Y %Z")
+        except ValueError:
+            return None
+
+    async def _test_tls_versions(self, domain: str, port: int) -> Dict[str, Dict[str, object]]:
+        results: Dict[str, Dict[str, object]] = {}
+        for label, version in TLS_VERSION_MAP.items():
+            res = await self._try_tls_version(domain, port, version)
+            results[label] = res
+        return results
+
+    async def _try_tls_version(
+        self,
+        domain: str,
+        port: int,
+        version: ssl.TLSVersion,
+    ) -> Dict[str, object]:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = version
+        context.maximum_version = version
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    domain,
+                    port,
+                    ssl=context,
+                    server_hostname=domain,
+                ),
+                timeout=self.settings.timeout,
+            )
+            try:
+                ssl_obj = writer.get_extra_info("ssl_object")
+                cipher = ssl_obj.cipher() if ssl_obj else None
+                proto = ssl_obj.version() if ssl_obj else None
+            finally:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            return {"accepted": True, "cipher": cipher, "version": proto}
         except Exception:
-            results[label] = {"accepted": False}
+            return {"accepted": False}
 
-    return results
-
-
-async def extract_certificate(domain: str):
-    """Connect via TLS, extract cert fields + test protocol versions."""
-    ssl_context = ssl.create_default_context()
-    ssl_context.set_ciphers("ECDHE+AESGCM:!ECDSA")
-
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(
-                domain, 443, ssl=ssl_context, server_hostname=domain),
-            timeout=TIMEOUT,
+    async def _store_success(
+        self,
+        domain: str,
+        certificate: Dict[str, object],
+        timestamp: datetime,
+    ) -> None:
+        await self.mongo.db.dns.update_one(
+            {"domain": domain},
+            {
+                "$set": {"ssl": certificate, "updated": timestamp},
+                "$unset": {"ssl_scan_failed": "", "cert_scan_failed": ""},
+            },
+            upsert=True,
         )
-        cert = writer.get_extra_info("peercert")
-        ssl_obj = writer.get_extra_info("ssl_object")
-        writer.close()
-        await writer.wait_closed()
-    except Exception:
-        return None
 
-    if not cert:
-        return None
+    async def _mark_failed(self, domain: str, timestamp: datetime) -> None:
+        await self.mongo.db.dns.update_one(
+            {"domain": domain},
+            {
+                "$set": {"ssl_scan_failed": timestamp},
+                "$setOnInsert": {"created": timestamp, "domain": domain},
+            },
+            upsert=True,
+        )
 
-    issuer = {}
-    subject = {}
-    alt_names = []
-
-    for item in cert.get("subject", []):
-        subject["_".join(re.findall(".[^A-Z]*", item[0][0])
-                         ).lower()] = item[0][1]
-
-    for item in cert.get("issuer", []):
-        issuer["_".join(re.findall(".[^A-Z]*", item[0][0])
-                        ).lower()] = item[0][1]
-
-    for item in cert.get("subjectAltName", []):
-        alt_names.append(item[1])
-
-    post = {
-        "issuer": issuer,
-        "subject": subject,
-        "subject_alt_names": alt_names,
-        "serial": cert.get("serialNumber"),
-        "not_before": datetime.strptime(cert["notBefore"], "%b %d %H:%M:%S %Y %Z"),
-        "not_after": datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z"),
-        "version": cert.get("version"),
-        "handshake_version": ssl_obj.version() if ssl_obj else None,
-        "handshake_cipher": ssl_obj.cipher() if ssl_obj else None,
-    }
-
-    if "OCSP" in cert and cert["OCSP"]:
-        post["ocsp"] = cert["OCSP"][0].strip("/")
-
-    if "caIssuers" in cert and cert["caIssuers"]:
-        post["ca_issuers"] = cert["caIssuers"][0].strip("/")
-
-    if "crlDistributionPoints" in cert and cert["crlDistributionPoints"]:
-        post["crl_distribution_points"] = cert["crlDistributionPoints"][0].strip(
-            "/")
-
-    post["tls_versions"] = await test_tls_version(domain)
-
-    return post
+    def _log_success(self, domain: str, certificate: Dict[str, object]) -> None:
+        log.info(
+            "TLS scan success %s (port=%d, not_after=%s)",
+            domain,
+            certificate.get("port"),
+            certificate.get("not_after"),
+        )
+        if self.settings.verbose_tls:
+            log.info("Certificate for %s: %s", domain, certificate)
 
 
-async def handle_batch(db, docs):
-    sem = asyncio.Semaphore(CONCURRENCY)
-    now = datetime.now()
+class SSLConsumer:
+    def __init__(self, settings: WorkerSettings, runtime: SSLRuntime) -> None:
+        self.settings = settings
+        self.runtime = runtime
+        self._semaphore = asyncio.Semaphore(max(1, settings.concurrency))
+        self._pending: Set[asyncio.Task[None]] = set()
+        self._stopped = asyncio.Event()
 
-    async def bounded_task(domain):
-        async with sem:
-            cert = await extract_certificate(domain)
-            print(cert)
-            if cert:
-                return UpdateOne({"domain": domain}, {"$set": {"ssl": cert, "updated": now}})
-            else:
-                return UpdateOne({"domain": domain}, {"$set": {"ssl_scan_failed": now}})
+    async def consume(self) -> None:
+        log.info(
+            "Worker %s consuming queue '%s' with prefetch=%d",
+            os.getpid(),
+            self.settings.queue_name,
+            self.settings.prefetch,
+        )
 
-    tasks = [bounded_task(doc["domain"]) for doc in docs]
-    ops = [op for op in await asyncio.gather(*tasks) if op]
+        async for job in get_domains(self.settings):
+            if self._stopped.is_set():
+                with contextlib.suppress(Exception):
+                    await job.message.reject(requeue=True)
+                continue
 
-    if ops:
-        await db.dns.bulk_write(ops, ordered=False)
+            if job.stop:
+                with contextlib.suppress(Exception):
+                    await job.message.ack()
+                self._stopped.set()
+                log.debug("Worker %s received STOP", os.getpid())
+                break
+
+            task = asyncio.create_task(self._handle_job(job))
+            self._pending.add(task)
+            task.add_done_callback(self._pending.discard)
+
+        if self._pending:
+            await asyncio.gather(*self._pending, return_exceptions=True)
+
+    async def _handle_job(self, job: SSLJob) -> None:
+        try:
+            async with self._semaphore:
+                await self.runtime.process_domain(job.domain)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception("Unhandled error while scanning %s: %s", job.domain, exc)
+        finally:
+            with contextlib.suppress(Exception):
+                await job.message.ack()
 
 
-async def worker_loop(mongo_host):
-    client = AsyncIOMotorClient(f"mongodb://{mongo_host}:27017")
-    db = client.ip_data
+async def get_domains(settings: WorkerSettings) -> AsyncIterator[SSLJob]:
+    if not settings.rabbitmq_url:
+        raise ValueError("RabbitMQ URL is required to consume TLS jobs")
 
-    while True:
-        docs = await db.dns.find(
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    try:
+        channel = await connection.channel()
+        await channel.set_qos(prefetch_count=max(1, settings.prefetch))
+        queue = await channel.declare_queue(settings.queue_name, durable=True)
+
+        async with queue.iterator() as iterator:
+            async for message in iterator:
+                if message.body == STOP_SENTINEL:
+                    yield SSLJob(domain="", message=message, stop=True)
+                    break
+
+                domain = message.body.decode().strip()
+                if not domain:
+                    await message.ack()
+                    continue
+
+                yield SSLJob(domain=domain, message=message)
+    finally:
+        await connection.close()
+
+
+async def enqueue_domains(
+    rabbitmq_url: str,
+    queue_name: str,
+    domains: AsyncIterator[str],
+    worker_count: int,
+    purge_queue: bool,
+) -> int:
+    connection = await aio_pika.connect_robust(rabbitmq_url)
+    sent = 0
+    async with connection:
+        channel = await connection.channel()
+        queue = await channel.declare_queue(queue_name, durable=True)
+        if purge_queue:
+            await queue.purge()
+        exchange = channel.default_exchange
+        async for domain in domains:
+            domain = domain.strip()
+            if not domain:
+                continue
+            message = Message(domain.encode("utf-8"), delivery_mode=DeliveryMode.PERSISTENT)
+            await exchange.publish(message, routing_key=queue_name)
+            sent += 1
+            if sent and sent % 1000 == 0:
+                log.info("Queued %d domains so far", sent)
+
+        stop_message = Message(STOP_SENTINEL, delivery_mode=DeliveryMode.PERSISTENT)
+        for _ in range(worker_count):
+            await exchange.publish(stop_message, routing_key=queue_name)
+    return sent
+
+
+async def iter_pending_domains(
+    sync_client: MongoClient,
+    ports: Tuple[int, ...],
+    batch_size: int = 10_000,
+) -> AsyncIterator[str]:
+    loop = asyncio.get_running_loop()
+
+    def _iterator() -> List[str]:
+        results: List[str] = []
+        cursor = sync_client.ip_data.dns.find(
             {
                 "ssl": {"$exists": False},
+                "ssl_scan_failed": {"$exists": False},
                 "cert_scan_failed": {"$exists": False},
                 "ports": {
                     "$elemMatch": {
-                        "port": {"$in": TLS_PORTS},
+                        "port": {"$in": list(ports)},
                         "status": "open",
                         "proto": "tcp",
                     }
                 },
-                "claimed_cert_scan": {"$exists": False},
             },
             {"domain": 1},
-            limit=BATCH_SIZE,
-        ).to_list(length=BATCH_SIZE)
+            sort=[("$natural", 1)],
+            batch_size=batch_size,
+        )
+        try:
+            for doc in cursor:
+                domain = doc.get("domain")
+                if domain:
+                    results.append(domain)
+        finally:
+            cursor.close()
+        return results
 
-        if not docs:
-            break
-
-        ids = [d["_id"] for d in docs]
-        await db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed_cert_scan": True}})
-        await handle_batch(db, docs)
-
-    client.close()
+    domains = await loop.run_in_executor(None, _iterator)
+    for domain in domains:
+        yield domain
 
 
-def start_process(mongo_host):
-    asyncio.run(worker_loop(mongo_host))
+async def direct_worker(settings: DirectWorkerSettings) -> str:
+    runtime = SSLRuntime(settings)
+    try:
+        cursor = runtime.mongo.db.dns.find(
+            {
+                "ssl": {"$exists": False},
+                "ssl_scan_failed": {"$exists": False},
+                "cert_scan_failed": {"$exists": False},
+                "ports": {
+                    "$elemMatch": {
+                        "port": {"$in": settings.ports},
+                        "status": "open",
+                        "proto": "tcp",
+                    }
+                },
+            },
+            {"domain": 1},
+            sort=[("$natural", 1)],
+            skip=settings.skip,
+            limit=settings.limit,
+        )
+
+        pending: Set[asyncio.Task[None]] = set()
+        semaphore = asyncio.Semaphore(max(1, settings.concurrency))
+
+        async for doc in cursor:
+            domain = doc.get("domain")
+            if not domain:
+                continue
+
+            async def _process(target: str) -> None:
+                async with semaphore:
+                    await runtime.process_domain(target)
+
+            task = asyncio.create_task(_process(domain))
+            pending.add(task)
+            task.add_done_callback(pending.discard)
+
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        return runtime.stats.summary()
+    finally:
+        await runtime.close()
 
 
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, required=True, help="MongoDB host")
-    parser.add_argument("--workers", type=int, default=4,
-                        help="Number of processes")
-    return parser.parse_args()
+async def service_worker(settings: WorkerSettings) -> str:
+    runtime = SSLRuntime(settings)
+    try:
+        consumer = SSLConsumer(settings, runtime)
+        await consumer.consume()
+        return runtime.stats.summary()
+    finally:
+        await runtime.close()
+
+
+def run_worker(settings: WorkerSettings) -> str:
+    configure_logging(settings.log_level)
+    log.info(
+        "Worker process %s starting (mode=rabbit, concurrency=%d)",
+        os.getpid(),
+        settings.concurrency,
+    )
+    try:
+        summary = asyncio.run(service_worker(settings))
+        log.info("Worker %s finished: %s", os.getpid(), summary)
+        return f"Worker {os.getpid()} done ({summary})"
+    except AMQPConnectionError as exc:
+        log.error("RabbitMQ connection failed: %s", exc)
+        return f"[ERROR] Worker could not connect to RabbitMQ: {exc}"
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("Worker process %s crashed", os.getpid())
+        return f"[ERROR] Worker crashed: {exc}"
+
+
+def run_worker_direct(settings: DirectWorkerSettings) -> str:
+    configure_logging(settings.log_level)
+    log.info(
+        "Worker process %s starting (mode=direct, slice=%d:%d, concurrency=%d)",
+        os.getpid(),
+        settings.skip,
+        settings.skip + settings.limit,
+        settings.concurrency,
+    )
+    try:
+        summary = asyncio.run(direct_worker(settings))
+        log.info("Worker %s finished: %s", os.getpid(), summary)
+        return f"Worker {os.getpid()} done ({summary})"
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("Worker process %s crashed", os.getpid())
+        return f"[ERROR] Worker crashed: {exc}"
+
+
+@click.command()
+@click.option("--worker", "-w", type=int, default=4, show_default=True, help="Worker processes")
+@click.option("--host", "-h", type=str, required=True, help="MongoDB host")
+@click.option("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY, show_default=True,
+              help="Concurrent TLS scans per worker")
+@click.option("--timeout", type=float, default=DEFAULT_TIMEOUT, show_default=True,
+              help="TLS handshake timeout in seconds")
+@click.option("--ports", type=str, default="443", show_default=True,
+              help="Comma-separated list of ports to scan")
+@click.option("--rabbitmq-url", "-r", type=str, default=None,
+              help="RabbitMQ URL (enables distributed mode)")
+@click.option("--queue-name", "-q", type=str, default="ssl_scans", show_default=True,
+              help="RabbitMQ queue name")
+@click.option("--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
+              help="RabbitMQ prefetch per worker")
+@click.option("--purge-queue/--no-purge-queue", default=True,
+              help="Purge the queue before enqueuing new domains")
+@click.option("--service", is_flag=True,
+              help="Run as a RabbitMQ-consuming TLS scan service")
+@click.option("--log-tls", is_flag=True,
+              help="Log full certificate payloads after each successful scan")
+@click.option("--verbose", is_flag=True, help="Enable verbose debug logging")
+def main(
+    worker: int,
+    host: str,
+    concurrency: int,
+    timeout: float,
+    ports: str,
+    rabbitmq_url: Optional[str],
+    queue_name: str,
+    prefetch: int,
+    purge_queue: bool,
+    service: bool,
+    log_tls: bool,
+    verbose: bool,
+) -> None:
+    log_level = logging.DEBUG if verbose else logging.INFO
+    configure_logging(log_level)
+
+    worker = max(1, worker)
+    concurrency = max(1, concurrency)
+    prefetch = max(1, prefetch)
+    port_tuple = tuple(sorted({int(p.strip()) for p in ports.split(",") if p.strip()})) or DEFAULT_PORTS
+
+    base_settings = WorkerSettings(
+        mongo_host=host,
+        rabbitmq_url=rabbitmq_url,
+        queue_name=queue_name,
+        prefetch=prefetch,
+        concurrency=concurrency,
+        timeout=timeout,
+        ports=port_tuple,
+        log_level=log_level,
+        verbose_tls=log_tls,
+    )
+
+    if service:
+        if not rabbitmq_url:
+            raise click.BadParameter("RabbitMQ URL is required when --service is set")
+
+        worker_args = [WorkerSettings(**base_settings.__dict__) for _ in range(worker)]
+        if worker == 1:
+            click.echo(run_worker(worker_args[0]))
+        else:
+            with multiprocessing.Pool(processes=worker) as pool:
+                log.info("Spawned %d worker processes (service mode)", worker)
+                for result in pool.imap_unordered(run_worker, worker_args):
+                    click.echo(result)
+        return
+
+    sync_client = MongoClient(f"mongodb://{host}:27017", tz_aware=True)
+    pending_filter = {
+        "ssl": {"$exists": False},
+        "ssl_scan_failed": {"$exists": False},
+        "cert_scan_failed": {"$exists": False},
+        "ports": {
+            "$elemMatch": {
+                "port": {"$in": list(port_tuple)},
+                "status": "open",
+                "proto": "tcp",
+            }
+        },
+    }
+    total_docs = sync_client.ip_data.dns.count_documents(pending_filter)
+    click.echo(f"[INFO] total domains to scan: {total_docs}")
+
+    if total_docs == 0:
+        sync_client.close()
+        click.echo("[INFO] Nothing to scan")
+        return
+
+    if rabbitmq_url:
+        domains = iter_pending_domains(sync_client, port_tuple)
+        log.info("Publishing TLS scan jobs to RabbitMQ at %s", rabbitmq_url)
+        published = asyncio.run(
+            enqueue_domains(
+                rabbitmq_url=rabbitmq_url,
+                queue_name=queue_name,
+                domains=domains,
+                worker_count=worker,
+                purge_queue=purge_queue,
+            )
+        )
+        log.info("Queued %d domains onto RabbitMQ queue '%s'", published, queue_name)
+        sync_client.close()
+        click.echo("[INFO] Published TLS scan jobs to RabbitMQ. Start workers with --service")
+    else:
+        sync_client.close()
+        chunk_size = math.ceil(total_docs / worker)
+        tasks = []
+        start = 0
+        while start < total_docs:
+            limit = min(chunk_size, total_docs - start)
+            settings = DirectWorkerSettings(
+                **base_settings.__dict__,
+                skip=start,
+                limit=limit,
+            )
+            tasks.append(settings)
+            start += limit
+
+        with multiprocessing.Pool(processes=worker) as pool:
+            log.info("Spawned %d direct worker processes", worker)
+            for result in pool.imap_unordered(run_worker_direct, tasks):
+                click.echo(result)
 
 
 if __name__ == "__main__":
-    args = argparser()
-    print(
-        f"[INFO] Starting {args.workers} processes, {CONCURRENCY} concurrent TLS scans each")
-
-    with multiprocessing.Pool(processes=args.workers) as pool:
-        pool.map(start_process, [args.host] * args.workers)
-
-    print("[INFO] All workers finished")
+    main()

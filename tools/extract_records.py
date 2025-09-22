@@ -1,242 +1,583 @@
 #!/usr/bin/env python3
+"""Distributed DNS record extractor backed by RabbitMQ and MongoDB.
 
+This refactor moves the legacy threaded worker into a service architecture. The
+script can enqueue pending domains onto a RabbitMQ queue and spin up multiple
+horizontal workers which resolve DNS records concurrently. Each worker keeps a
+shared async MongoDB client and executes DNS lookups in parallel using
+`asyncio.to_thread`, minimising per-domain latency while keeping resource usage
+predictable.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
 import logging
+import math
 import multiprocessing
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from dns import resolver
-from dns.name import EmptyLabel
-from dns.name import LabelTooLong
-from dns.resolver import NoAnswer
-from dns.resolver import NXDOMAIN
-from dns.resolver import NoNameservers
-from dns.exception import Timeout
-
+import os
+from dataclasses import dataclass
 from datetime import datetime
+from typing import AsyncIterator, Dict, List, Optional, Set, Tuple
 
-from pymongo import MongoClient, ReturnDocument
-
+import aio_pika
+from aio_pika import DeliveryMode, Message
+from aiormq.exceptions import AMQPConnectionError
 import click
+from dns import resolver
+from dns.exception import DNSException, Timeout
+from dns.name import EmptyLabel, LabelTooLong
+from dns.resolver import NoAnswer, NoNameservers, NXDOMAIN
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import MongoClient
 
 
-def connect(host):
-    return MongoClient('mongodb://{}:27017'.format(host))
+STOP_SENTINEL = b"__STOP__"
+DEFAULT_PREFETCH = 400
+DEFAULT_CONCURRENCY = 200
+DEFAULT_TIMEOUT = 1.5
 
-
-DNS_RECORD_TYPES = (
-    ('A', 'a_record'),
-    ('AAAA', 'aaaa_record'),
-    ('NS', 'ns_record'),
-    ('MX', 'mx_record'),
-    ('SOA', 'soa_record'),
-    ('CNAME', 'cname_record'),
+DNS_RECORD_TYPES: Tuple[Tuple[str, str], ...] = (
+    ("A", "a_record"),
+    ("AAAA", "aaaa_record"),
+    ("NS", "ns_record"),
+    ("MX", "mx_record"),
+    ("SOA", "soa_record"),
+    ("CNAME", "cname_record"),
 )
 
 
-DEFAULT_CLAIM_BATCH_SIZE = 100
+log = logging.getLogger("extract_records")
 
 
-logger = logging.getLogger("extract_records")
+def configure_logging(level: int) -> None:
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        root_logger.addHandler(handler)
+    root_logger.setLevel(level)
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    log.setLevel(level)
 
 
-def configure_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="[%(levelname)s] %(processName)s %(message)s",
-    )
+@dataclass
+class WorkerSettings:
+    mongo_host: str
+    rabbitmq_url: Optional[str]
+    queue_name: str
+    prefetch: int
+    concurrency: int
+    dns_timeout: float
+    log_level: int
+    verbose_records: bool = False
 
 
-def claim_domains(db, batch_size: int):
-    """Atomically claim a batch of unprocessed domains for this worker."""
-    claimed = []
+@dataclass
+class DirectWorkerSettings(WorkerSettings):
+    skip: int = 0
+    limit: int = 0
 
-    for _ in range(batch_size):
-        doc = db.dns.find_one_and_update(
-            {
-                'updated': {'$exists': False},
-                'claimed': {'$ne': True},
-            },
-            {
-                '$set': {'claimed': True},
-            },
-            sort=[('_id', 1)],
-            return_document=ReturnDocument.AFTER,
+
+@dataclass
+class DNSJob:
+    domain: str
+    message: aio_pika.IncomingMessage
+    stop: bool = False
+
+
+@dataclass
+class DNSStats:
+    processed: int = 0
+    succeeded: int = 0
+    failed: int = 0
+
+    def record(self, success: bool) -> None:
+        self.processed += 1
+        if success:
+            self.succeeded += 1
+        else:
+            self.failed += 1
+
+    def summary(self) -> str:
+        return (
+            f"processed={self.processed} succeeded={self.succeeded} "
+            f"failed={self.failed}"
         )
 
-        if not doc:
-            break
 
-        claimed.append(doc)
+class MongoAsync:
+    def __init__(self, host: str) -> None:
+        self._client = AsyncIOMotorClient(f"mongodb://{host}:27017", tz_aware=True)
+        self.db = self._client.ip_data
 
-    if claimed:
-        logger.debug("claimed %s domains", len(claimed))
-
-    return claimed
-
-
-def retrieve_records(domain, record):
-    records = []
-
-    try:
-        res = resolver.Resolver()
-        res.timeout = 1
-        res.lifetime = 1
-        items = res.resolve(domain, record)
-
-        for item in items:
-            if record not in ['MX', 'NS', 'SOA', 'CNAME']:
-                records.append(item.address)
-            elif record == 'NS':
-                records.append(item.target.to_unicode().strip('.').lower())
-            elif record == 'SOA':
-                if len(records) > 0:
-                    records[0] = item.to_text().replace('\\', '').lower()
-                else:
-                    records.append(item.to_text().replace('\\', '').lower())
-            elif record == 'CNAME':
-                post = {'target': item.target.to_unicode().strip('.').lower()}
-                records.append(post)
-            else:
-                post = {
-                    'preference': item.preference,
-                    'exchange': item.exchange.to_unicode().lower().strip('.')
-                }
-                records.append(post)
-
-        return records
-    except (Timeout, LabelTooLong, NoNameservers, EmptyLabel, NoAnswer, NXDOMAIN):
-        return
+    def close(self) -> None:
+        self._client.close()
 
 
-def handle_records(db, domain, date, executor):
-    normalized_domain = domain.lower()
+class DNSRuntime:
+    def __init__(self, settings: WorkerSettings) -> None:
+        self.settings = settings
+        self.mongo = MongoAsync(settings.mongo_host)
+        self.stats = DNSStats()
 
-    record_results = {}
+    async def close(self) -> None:
+        self.mongo.close()
 
-    futures = {
-        executor.submit(retrieve_records, domain, record_type): field_name
-        for record_type, field_name in DNS_RECORD_TYPES
-    }
+    async def process_domain(self, domain: str) -> bool:
+        domain = domain.strip().lower()
+        if not domain:
+            return False
 
-    for future in as_completed(futures):
-        field_name = futures[future]
-        records = future.result()
+        records = await self._resolve_all(domain)
+        now = datetime.now()
+
         if records:
-            record_results[field_name] = records
-            logger.debug("retrieved %s records for %s", field_name, domain)
+            await self._store_records(domain, records, now)
+            self._log_records(domain, records)
+            self.stats.record(True)
+            return True
 
-    if record_results:
+        await self._mark_failed(domain, now)
+        self.stats.record(False)
+        log.warning("DNS lookup failed for %s", domain)
+        return False
+
+    async def _resolve_all(self, domain: str) -> Dict[str, List[object]]:
+        tasks = {
+            field_name: asyncio.create_task(self._resolve_record(domain, record_type))
+            for record_type, field_name in DNS_RECORD_TYPES
+        }
+
+        results: Dict[str, List[object]] = {}
+        for field_name, task in tasks.items():
+            try:
+                values = await task
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("%s lookup crashed for %s: %s", field_name, domain, exc)
+                continue
+
+            if values:
+                results[field_name] = values
+
+        return results
+
+    async def _resolve_record(self, domain: str, record_type: str) -> List[object]:
+        timeout = self.settings.dns_timeout
+
+        def _lookup() -> List[object]:
+            result: List[object] = []
+            res = resolver.Resolver()
+            res.timeout = timeout
+            res.lifetime = timeout
+            try:
+                items = res.resolve(domain, record_type)
+            except (Timeout, LabelTooLong, NoNameservers, EmptyLabel, NoAnswer, NXDOMAIN):
+                return result
+            except DNSException:
+                return result
+
+            for item in items:
+                if record_type not in {"MX", "NS", "SOA", "CNAME"}:
+                    result.append(getattr(item, "address", item.to_text()).lower())
+                    continue
+
+                if record_type == "NS":
+                    result.append(item.target.to_unicode().strip(".").lower())
+                elif record_type == "SOA":
+                    text = item.to_text().replace("\\", "").lower()
+                    if result:
+                        result[0] = text
+                    else:
+                        result.append(text)
+                elif record_type == "CNAME":
+                    result.append({"target": item.target.to_unicode().strip(".").lower()})
+                else:  # MX
+                    result.append(
+                        {
+                            "preference": item.preference,
+                            "exchange": item.exchange.to_unicode().lower().strip("."),
+                        }
+                    )
+
+            return result
+
+        values = await asyncio.to_thread(_lookup)
+        if values:
+            log.debug("resolved %s for %s: %s", record_type, domain, values)
+        return values
+
+    async def _store_records(
+        self,
+        domain: str,
+        records: Dict[str, List[object]],
+        timestamp: datetime,
+    ) -> None:
         update_doc = {
-            '$set': {'updated': date},
-            '$setOnInsert': {'created': date, 'domain': normalized_domain},
-            '$unset': {'claimed': ''},
+            "$set": {"updated": timestamp},
+            "$setOnInsert": {"created": timestamp, "domain": domain},
+            "$unset": {"claimed": "", "dns_lookup_failed": ""},
         }
 
         add_to_set = {
-            field: {'$each': values}
-            for field, values in record_results.items()
+            field: {"$each": values}
+            for field, values in records.items()
+            if values
         }
-
         if add_to_set:
-            update_doc['$addToSet'] = add_to_set
+            update_doc["$addToSet"] = add_to_set
 
-        db.dns.update_one({'domain': normalized_domain}, update_doc, upsert=True)
-        logger.info("updated DNS records for %s", domain)
-    else:
-        db.dns.update_one(
-            {'domain': normalized_domain},
+        await self.mongo.db.dns.update_one({"domain": domain}, update_doc, upsert=True)
+
+    async def _mark_failed(self, domain: str, timestamp: datetime) -> None:
+        await self.mongo.db.dns.update_one(
+            {"domain": domain},
             {
-                '$set': {
-                    'updated': date,
-                    'dns_lookup_failed': date,
-                },
-                '$setOnInsert': {'created': date, 'domain': normalized_domain},
-                '$unset': {'claimed': ''},
+                "$set": {"updated": timestamp, "dns_lookup_failed": timestamp},
+                "$setOnInsert": {"created": timestamp, "domain": domain},
+                "$unset": {"claimed": ""},
             },
             upsert=True,
         )
-        logger.warning("no DNS records found for %s", domain)
+
+    def _log_records(self, domain: str, records: Dict[str, List[object]]) -> None:
+        total = sum(len(values) for values in records.values())
+        log.info("updated DNS records for %s (total=%d)", domain, total)
+        if self.settings.verbose_records:
+            for field, values in sorted(records.items()):
+                log.info("%s records for %s: %s", field, domain, values)
 
 
-def worker(host: str, claim_batch_size: int, dns_threads: int, verbose: bool):
-    configure_logging(verbose)
-    logger.info("worker starting")
-    client = connect(host)
-    db = client.ip_data
+class DNSConsumer:
+    def __init__(self, settings: WorkerSettings, runtime: DNSRuntime) -> None:
+        self.settings = settings
+        self.runtime = runtime
+        self._semaphore = asyncio.Semaphore(max(1, settings.concurrency))
+        self._pending: Set[asyncio.Task[None]] = set()
+        self._stopped = asyncio.Event()
 
-    max_workers = dns_threads or len(DNS_RECORD_TYPES)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        while True:
-            domains = claim_domains(db, claim_batch_size)
-            if not domains:
-                logger.debug("no more domains to claim")
+    async def consume(self) -> None:
+        log.info(
+            "Worker %s consuming queue '%s' with prefetch=%d",
+            os.getpid(),
+            self.settings.queue_name,
+            self.settings.prefetch,
+        )
+
+        async for job in get_domains(self.settings):
+            if self._stopped.is_set():
+                with contextlib.suppress(Exception):
+                    await job.message.reject(requeue=True)
+                continue
+
+            if job.stop:
+                with contextlib.suppress(Exception):
+                    await job.message.ack()
+                self._stopped.set()
+                log.debug("Worker %s received STOP", os.getpid())
                 break
 
-            for domain in domains:
-                domain_name = domain.get('domain')
-                if not domain_name:
-                    db.dns.update_one(
-                        {'_id': domain['_id']},
-                        {
-                            '$set': {'updated': datetime.now()},
-                            '$unset': {'claimed': ''},
-                        },
-                        upsert=False,
-                    )
+            task = asyncio.create_task(self._handle_job(job))
+            self._pending.add(task)
+            task.add_done_callback(self._pending.discard)
+
+        if self._pending:
+            await asyncio.gather(*self._pending, return_exceptions=True)
+
+    async def _handle_job(self, job: DNSJob) -> None:
+        try:
+            async with self._semaphore:
+                await self.runtime.process_domain(job.domain)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception("Unhandled error while resolving %s: %s", job.domain, exc)
+        finally:
+            with contextlib.suppress(Exception):
+                await job.message.ack()
+
+
+async def get_domains(settings: WorkerSettings) -> AsyncIterator[DNSJob]:
+    if not settings.rabbitmq_url:
+        raise ValueError("RabbitMQ URL is required to consume DNS jobs")
+
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    try:
+        channel = await connection.channel()
+        await channel.set_qos(prefetch_count=max(1, settings.prefetch))
+        queue = await channel.declare_queue(settings.queue_name, durable=True)
+
+        async with queue.iterator() as iterator:
+            async for message in iterator:
+                if message.body == STOP_SENTINEL:
+                    yield DNSJob(domain="", message=message, stop=True)
+                    break
+
+                domain = message.body.decode().strip()
+                if not domain:
+                    await message.ack()
                     continue
 
-                claimed_at = datetime.now()
-                logger.info("processing %s", domain_name)
-                handle_records(db, domain_name, claimed_at, executor)
+                yield DNSJob(domain=domain, message=message)
+    finally:
+        await connection.close()
 
-    client.close()
-    logger.info("worker finished")
-    return
+
+async def enqueue_domains(
+    rabbitmq_url: str,
+    queue_name: str,
+    domains: AsyncIterator[str],
+    worker_count: int,
+    purge_queue: bool,
+) -> int:
+    connection = await aio_pika.connect_robust(rabbitmq_url)
+    sent = 0
+    async with connection:
+        channel = await connection.channel()
+        queue = await channel.declare_queue(queue_name, durable=True)
+        if purge_queue:
+            await queue.purge()
+        exchange = channel.default_exchange
+        async for domain in domains:
+            domain = domain.strip()
+            if not domain:
+                continue
+            message = Message(domain.encode("utf-8"), delivery_mode=DeliveryMode.PERSISTENT)
+            await exchange.publish(message, routing_key=queue_name)
+            sent += 1
+            if sent and sent % 1000 == 0:
+                log.info("Queued %d domains so far", sent)
+
+        stop_message = Message(STOP_SENTINEL, delivery_mode=DeliveryMode.PERSISTENT)
+        for _ in range(worker_count):
+            await exchange.publish(stop_message, routing_key=queue_name)
+    return sent
+
+
+async def iter_pending_domains(
+    sync_client: MongoClient,
+    batch_size: int = 10_000,
+) -> AsyncIterator[str]:
+    loop = asyncio.get_running_loop()
+
+    def _iterator() -> List[str]:
+        results: List[str] = []
+        cursor = sync_client.ip_data.dns.find(
+            {"updated": {"$exists": False}},
+            {"domain": 1},
+            sort=[("$natural", 1)],
+            batch_size=batch_size,
+        )
+        try:
+            for doc in cursor:
+                domain = doc.get("domain")
+                if domain:
+                    results.append(domain)
+        finally:
+            cursor.close()
+        return results
+
+    domains = await loop.run_in_executor(None, _iterator)
+    for domain in domains:
+        yield domain
+
+
+async def direct_worker(settings: DirectWorkerSettings) -> str:
+    runtime = DNSRuntime(settings)
+    try:
+        cursor = runtime.mongo.db.dns.find(
+            {"updated": {"$exists": False}},
+            {"domain": 1},
+            sort=[("$natural", 1)],
+            skip=settings.skip,
+            limit=settings.limit,
+        )
+
+        pending: Set[asyncio.Task[None]] = set()
+        semaphore = asyncio.Semaphore(max(1, settings.concurrency))
+
+        async for doc in cursor:
+            domain = doc.get("domain")
+            if not domain:
+                continue
+
+            async def _process(target: str) -> None:
+                async with semaphore:
+                    await runtime.process_domain(target)
+
+            task = asyncio.create_task(_process(domain))
+            pending.add(task)
+            task.add_done_callback(pending.discard)
+
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        return runtime.stats.summary()
+    finally:
+        await runtime.close()
+
+
+async def service_worker(settings: WorkerSettings) -> str:
+    runtime = DNSRuntime(settings)
+    try:
+        consumer = DNSConsumer(settings, runtime)
+        await consumer.consume()
+        return runtime.stats.summary()
+    finally:
+        await runtime.close()
+
+
+def run_worker(settings: WorkerSettings) -> str:
+    configure_logging(settings.log_level)
+    log.info(
+        "Worker process %s starting (mode=rabbit, concurrency=%d)",
+        os.getpid(),
+        settings.concurrency,
+    )
+    try:
+        summary = asyncio.run(service_worker(settings))
+        log.info("Worker %s finished: %s", os.getpid(), summary)
+        return f"Worker {os.getpid()} done ({summary})"
+    except AMQPConnectionError as exc:
+        log.error("RabbitMQ connection failed: %s", exc)
+        return f"[ERROR] Worker could not connect to RabbitMQ: {exc}"
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("Worker process %s crashed", os.getpid())
+        return f"[ERROR] Worker crashed: {exc}"
+
+
+def run_worker_direct(settings: DirectWorkerSettings) -> str:
+    configure_logging(settings.log_level)
+    log.info(
+        "Worker process %s starting (mode=direct, slice=%d:%d, concurrency=%d)",
+        os.getpid(),
+        settings.skip,
+        settings.skip + settings.limit,
+        settings.concurrency,
+    )
+    try:
+        summary = asyncio.run(direct_worker(settings))
+        log.info("Worker %s finished: %s", os.getpid(), summary)
+        return f"Worker {os.getpid()} done ({summary})"
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("Worker process %s crashed", os.getpid())
+        return f"[ERROR] Worker crashed: {exc}"
 
 
 @click.command()
-@click.option('--host', '-h', type=str, required=True, help='MongoDB host to connect to')
-@click.option('--workers', '-w', type=int, default=4, show_default=True, help='Number of worker processes')
-@click.option('--claim-batch-size', '--batch', type=int, default=DEFAULT_CLAIM_BATCH_SIZE, show_default=True, help='Number of domains each worker claims per iteration')
-@click.option('--dns-threads', type=int, default=0, show_default=True, help='Thread count for concurrent DNS lookups (0 = auto)')
-@click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
-def main(host: str, workers: int, claim_batch_size: int, dns_threads: int, verbose: bool) -> None:
-    """Extract DNS records for domains stored in MongoDB."""
+@click.option("--worker", "-w", type=int, default=4, show_default=True, help="Worker processes")
+@click.option("--host", "-h", type=str, required=True, help="MongoDB host")
+@click.option("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY, show_default=True,
+              help="Concurrent DNS lookups per worker")
+@click.option("--dns-timeout", type=float, default=DEFAULT_TIMEOUT, show_default=True,
+              help="DNS resolver timeout in seconds")
+@click.option("--rabbitmq-url", "-r", type=str, default=None,
+              help="RabbitMQ URL (enables distributed mode)")
+@click.option("--queue-name", "-q", type=str, default="dns_records", show_default=True,
+              help="RabbitMQ queue name")
+@click.option("--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
+              help="RabbitMQ prefetch per worker")
+@click.option("--purge-queue/--no-purge-queue", default=True,
+              help="Purge the queue before enqueuing new domains")
+@click.option("--service", is_flag=True,
+              help="Run as a RabbitMQ-consuming DNS resolution service")
+@click.option("--log-records", is_flag=True,
+              help="Log extracted records at info level")
+@click.option("--verbose", is_flag=True, help="Enable verbose debug logging")
+def main(
+    worker: int,
+    host: str,
+    concurrency: int,
+    dns_timeout: float,
+    rabbitmq_url: Optional[str],
+    queue_name: str,
+    prefetch: int,
+    purge_queue: bool,
+    service: bool,
+    log_records: bool,
+    verbose: bool,
+) -> None:
+    log_level = logging.DEBUG if verbose else logging.INFO
+    configure_logging(log_level)
 
-    configure_logging(verbose)
-    logger.info(
-        "starting extractor with %s workers, claim batch %s, dns threads %s",
-        workers,
-        claim_batch_size,
-        dns_threads or len(DNS_RECORD_TYPES),
+    worker = max(1, worker)
+    concurrency = max(1, concurrency)
+    prefetch = max(1, prefetch)
+
+    base_settings = WorkerSettings(
+        mongo_host=host,
+        rabbitmq_url=rabbitmq_url,
+        queue_name=queue_name,
+        prefetch=prefetch,
+        concurrency=concurrency,
+        dns_timeout=dns_timeout,
+        log_level=log_level,
+        verbose_records=log_records,
     )
 
-    client = connect(host)
-    db = client.ip_data
+    if service:
+        if not rabbitmq_url:
+            raise click.BadParameter("RabbitMQ URL is required when --service is set")
 
-    pending_filter = {'updated': {'$exists': False}, 'claimed': {'$ne': True}}
-    pending_total = db.dns.count_documents(pending_filter)
-    logger.info("pending domains to process: %s", pending_total)
+        worker_args = [WorkerSettings(**base_settings.__dict__) for _ in range(worker)]
+        if worker == 1:
+            click.echo(run_worker(worker_args[0]))
+        else:
+            with multiprocessing.Pool(processes=worker) as pool:
+                log.info("Spawned %d worker processes (service mode)", worker)
+                for result in pool.imap_unordered(run_worker, worker_args):
+                    click.echo(result)
+        return
 
-    processes = []
-    for idx in range(workers):
-        process = multiprocessing.Process(
-            target=worker,
-            name=f"worker-{idx + 1}",
-            args=(host, claim_batch_size, dns_threads, verbose),
+    sync_client = MongoClient(f"mongodb://{host}:27017", tz_aware=True)
+    pending_filter = {"updated": {"$exists": False}}
+    total_docs = sync_client.ip_data.dns.count_documents(pending_filter)
+    click.echo(f"[INFO] total domains to resolve: {total_docs}")
+
+    if total_docs == 0:
+        sync_client.close()
+        click.echo("[INFO] Nothing to resolve")
+        return
+
+    if rabbitmq_url:
+        domains = iter_pending_domains(sync_client)
+        log.info("Publishing DNS jobs to RabbitMQ at %s", rabbitmq_url)
+        published = asyncio.run(
+            enqueue_domains(
+                rabbitmq_url=rabbitmq_url,
+                queue_name=queue_name,
+                domains=domains,
+                worker_count=worker,
+                purge_queue=purge_queue,
+            )
         )
-        process.start()
-        processes.append(process)
-        logger.debug("started %s (pid=%s)", process.name, process.pid)
+        log.info("Queued %d domains onto RabbitMQ queue '%s'", published, queue_name)
+        sync_client.close()
 
-    for process in processes:
-        process.join()
-        logger.info("%s exited with code %s", process.name, process.exitcode)
+        worker_args = [WorkerSettings(**base_settings.__dict__) for _ in range(worker)]
+        with multiprocessing.Pool(processes=worker) as pool:
+            log.info("Spawned %d worker processes", worker)
+            for result in pool.imap_unordered(run_worker, worker_args):
+                click.echo(result)
+    else:
+        sync_client.close()
+        chunk_size = math.ceil(total_docs / worker)
+        tasks = []
+        start = 0
+        while start < total_docs:
+            limit = min(chunk_size, total_docs - start)
+            settings = DirectWorkerSettings(
+                **base_settings.__dict__,
+                skip=start,
+                limit=limit,
+            )
+            tasks.append(settings)
+            start += limit
 
-    client.close()
-    logger.info("extractor finished")
+        with multiprocessing.Pool(processes=worker) as pool:
+            log.info("Spawned %d direct worker processes", worker)
+            for result in pool.imap_unordered(run_worker_direct, tasks):
+                click.echo(result)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

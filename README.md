@@ -61,6 +61,11 @@ pip install -r requirements.txt
 # Configure environment (copy and edit as needed)
 cp config.cfg.example config.cfg
 # Or create .env file with your configuration
+
+# Download GeoLite2-City.mmdb from MaxMind (free account required)
+# Create data folder and save GeoLite2-City.mmdb there: data/GeoLite2-City.mmdb
+mkdir -p data
+# Visit https://www.maxmind.com/en/geolite2/signup to download the database
 ```
 
 ## 🚦 Running the API

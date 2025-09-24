@@ -23,7 +23,7 @@ from app.routes import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await recreate_text_index()
+    # await recreate_text_index()
     print("INFO: Recreated text index")
     yield
 

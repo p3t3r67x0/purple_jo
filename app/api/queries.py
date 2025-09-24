@@ -1,7 +1,7 @@
 import logging
 import re
 import socket
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Tuple
 
 from asyncio.log import logger
@@ -21,8 +21,13 @@ def _pagination_bounds(page: int, page_size: int) -> Tuple[int, int]:
     return skip, safe_page_size
 
 
-async def fetch_query_domain(mongo, domain: str, page: int = 1, page_size: int = 25):
-    """Full text search across the DNS collection with caching and pagination."""
+async def fetch_query_domain(
+    mongo, domain: str, page: int = 1, page_size: int = 25
+):
+    """Full text search across the DNS collection.
+
+    Includes caching and pagination.
+    """
 
     sub_query = domain.lower()
     query = {"$text": {"$search": domain}}
@@ -51,7 +56,9 @@ async def fetch_query_domain(mongo, domain: str, page: int = 1, page_size: int =
     )
 
 
-async def fetch_all_prefix(mongo, prefix: str, page: int = 1, page_size: int = 25):
+async def fetch_all_prefix(
+    mongo, prefix: str, page: int = 1, page_size: int = 25
+):
     """Lookup CIDR prefixes from the cached subnet collection."""
 
     query = {"cidr": {"$in": [prefix]}}
@@ -178,7 +185,10 @@ async def fetch_latest_asn(
     page_size: int = 50,
     country_code: Optional[str] = None,
 ):
-    """Return the most recently seen ASNs, optionally filtered by country code."""
+    """Return the most recently seen ASNs.
+
+    Can be optionally filtered by country code.
+    """
 
     query = {"whois.asn": {"$exists": True}}
     if country_code:
@@ -233,7 +243,11 @@ async def _build_ip_fallback(mongo, ip: str) -> dict:
     }
 
     try:
-        await mongo.lookup.update_one({"ip": ip}, {"$set": record}, upsert=True)
+        await mongo.lookup.update_one(
+            {"ip": ip},
+            {"$set": record},
+            upsert=True,
+        )
     except Exception:  # noqa: BLE001 - cache insert best effort
         pass
 
@@ -273,79 +287,121 @@ async def fetch_one_ip(mongo, ip: str, page: int = 1, page_size: int = 1):
     )
 
 
-async def extract_graph(db, domain: str, page: int = 1, page_size: int = 50):
-    """Return a graph of related DNS entities for a given domain."""
+async def extract_graph(db, domain: str):
+    """Return a graph of related DNS entities for a given domain.
 
-    pipeline = [
-        {"$match": {"domain": domain}},
-        {
-            "$graphLookup": {
-                "from": "dns",
-                "startWith": "$ssl.subject_alt_names",
-                "connectFromField": "domain",
-                "connectToField": "ssl.subject_alt_names",
-                "as": "certificates",
-            }
-        },
-        {
-            "$graphLookup": {
-                "from": "dns",
-                "startWith": "$cname_record.target",
-                "connectFromField": "domain",
-                "connectToField": "cname_record.target",
-                "as": "cname_records",
-            }
-        },
-        {
-            "$graphLookup": {
-                "from": "dns",
-                "startWith": "$mx_record.exchange",
-                "connectFromField": "mx_record.exchange",
-                "connectToField": "domain",
-                "as": "mx_records",
-            }
-        },
-        {
-            "$graphLookup": {
-                "from": "dns",
-                "startWith": "$ns_record",
-                "connectFromField": "ns_record",
-                "connectToField": "domain",
-                "as": "ns_records",
-            }
-        },
-        {
-            "$project": {
-                "main.domain": "$domain",
-                "main.a_record": "$a_record",
-                "zzz": {
-                    "$setUnion": ["$certificates", "$cname_records", "$mx_records", "$ns_records"]
-                },
-            }
-        },
-        {"$unwind": "$zzz"},
-        {"$group": {"_id": "$_id", "main": {"$addToSet": "$main"}, "all": {"$addToSet": "$zzz"}}},
-        {"$project": {"all.domain": 1, "all.a_record": 1, "main": 1, "_id": 0}},
-    ]
+    Includes relationships for A, AAAA, NS, MX, CNAME, and SSL SANs.
+    Safely handles None and scalar values by normalizing to lists.
+    """
 
-    skip, limit = _pagination_bounds(page, page_size)
+    from app.services.graph import retrieve_entries
 
-    async def loader():
-        cursor = db.dns.aggregate(pipeline)
-        docs = [doc async for doc in cursor]
-        total = len(docs)
-        start = min(skip, total)
-        end = min(start + limit, total)
-        return docs[start:end], total
+    # Helper: ensure a value is a list (None -> [], str/dict -> [val])
+    def ensure_list(val):
+        if val is None:
+            return []
+        if isinstance(val, list):
+            return val
+        return [val]
 
-    key = f"graph:{cache_key(domain.lower())}:{page}:{page_size}"
-    return await cached_paginated_fetch(
-        key,
-        loader,
-        page=page,
-        page_size=page_size,
-        ttl=DEFAULT_CACHE_TTL,
-    )
+    # Helper: classify node type using ipaddress when possible
+    def classify(entity: str) -> str:
+        try:
+            from ipaddress import ip_address
+            ip_obj = ip_address(entity)
+            return "ipv6" if ip_obj.version == 6 else "ipv4"
+        except Exception:
+            return "domain"
+
+    # Use the enhanced retrieve_entries function (now async)
+    results = await retrieve_entries(db, domain)
+
+    if not results:
+        return {"nodes": [], "edges": []}
+
+    # Build nodes and edges
+    all_entities = set()
+    edge_set = set()  # to dedupe (source, target, type, priority)
+
+    for result in results:
+        domain_name = result.get("domain")
+        if not domain_name:
+            continue
+
+        all_entities.add(domain_name)
+
+        # A (IPv4)
+        for ip in ensure_list(result.get("a_record")):
+            if not ip:
+                continue
+            all_entities.add(ip)
+            edge_set.add((domain_name, ip, "a_record", None))
+
+        # AAAA (IPv6)
+        for ipv6 in ensure_list(result.get("aaaa_record")):
+            if not ipv6:
+                continue
+            all_entities.add(ipv6)
+            edge_set.add((domain_name, ipv6, "aaaa_record", None))
+
+        # NS
+        for ns in ensure_list(result.get("ns_record")):
+            if not ns:
+                continue
+            all_entities.add(ns)
+            edge_set.add((domain_name, ns, "ns_record", None))
+
+        # MX
+        for mx in ensure_list(result.get("mx_record")):
+            if not mx:
+                continue
+            if isinstance(mx, dict):
+                exch = mx.get("exchange")
+                prio = mx.get("priority")
+            else:
+                exch, prio = mx, None
+            if exch:
+                all_entities.add(exch)
+                edge_set.add((domain_name, exch, "mx_record", prio))
+
+        # CNAME
+        for cname in ensure_list(result.get("cname_record")):
+            if not cname:
+                continue
+            if isinstance(cname, dict):
+                target = cname.get("target")
+            else:
+                target = cname
+            if target:
+                all_entities.add(target)
+                edge_set.add((domain_name, target, "cname_record", None))
+
+        # SSL SANs
+        ssl_info = result.get("ssl") or {}
+        for alt in ensure_list(ssl_info.get("subject_alt_names")):
+            if not alt:
+                continue
+            all_entities.add(alt)
+            edge_set.add((domain_name, alt, "ssl_alt_name", None))
+
+    # Materialize nodes
+    nodes = []
+    for entity in sorted(all_entities):
+        nodes.append({
+            "id": entity,
+            "type": classify(entity),
+            "label": entity,
+        })
+
+    # Materialize edges
+    edges = []
+    for src, tgt, etype, prio in sorted(edge_set):
+        edge = {"source": src, "target": tgt, "type": etype}
+        if prio is not None:
+            edge["priority"] = prio
+        edges.append(edge)
+
+    return {"nodes": nodes, "edges": edges}
 
 
 async def fetch_match_condition(
@@ -373,7 +429,10 @@ async def fetch_match_condition(
             return {
                 "geo.loc": {
                     "$nearSphere": {
-                        "$geometry": {"type": "Point", "coordinates": [lat, lon]},
+                        "$geometry": {
+                            "type": "Point",
+                            "coordinates": [lat, lon],
+                        },
                         "$maxDistance": 50000,
                     }
                 }
@@ -391,8 +450,16 @@ async def fetch_match_condition(
                 {"ssl.subject_alt_names": {"$in": [q]}},
             ]
         },
-        "before": lambda q: {"ssl.not_before": {"$gte": datetime.strptime(q, "%Y-%m-%d %H:%M:%S")}},
-        "after": lambda q: {"ssl.not_after": {"$lte": datetime.strptime(q, "%Y-%m-%d %H:%M:%S")}},
+        "before": lambda q: {
+            "ssl.not_before": {
+                "$gte": datetime.strptime(q, "%Y-%m-%d %H:%M:%S")
+            }
+        },
+        "after": lambda q: {
+            "ssl.not_after": {
+                "$lte": datetime.strptime(q, "%Y-%m-%d %H:%M:%S")
+            }
+        },
         "ca": lambda q: {"ssl.ca_issuers": q},
         "issuer": lambda q: {
             "$or": [
@@ -423,7 +490,12 @@ async def fetch_match_condition(
         "ocsp": lambda q: {"ssl.ocsp": q},
         "crl": lambda q: {"ssl.crl_distribution_points": q},
         "service": lambda q: {"header.x-powered-by": q},
-        "country": lambda q: {"$or": [{"geo.country_code": q}, {"whois.asn_country_code": q}]},
+        "country": lambda q: {
+            "$or": [
+                {"geo.country_code": q},
+                {"whois.asn_country_code": q},
+            ]
+        },
         "state": lambda q: {
             "$expr": {
                 "$regexMatch": {
@@ -463,7 +535,9 @@ async def fetch_match_condition(
                 {
                     "$expr": {
                         "$regexMatch": {
-                            "input": {"$toLower": "$ssl.subject.organization_name"},
+                            "input": {
+                                "$toLower": "$ssl.subject.organization_name"
+                            },
                             "regex": q.lower(),
                         }
                     }
@@ -511,12 +585,20 @@ async def fetch_match_condition(
             for doc in results
         )
 
-        if (not results or not only_domains) and condition in {"site", "domain"} and page == 1:
+        if (
+            (not results or not only_domains)
+            and condition in {"site", "domain"}
+            and page == 1
+        ):
             logger.info("Running live scan fallback for %s", query)
             results = [await perform_live_scan(mongo, query)]
             total = 1
 
-        logger.info("Returning %s results for condition %s", len(results), condition)
+        logger.info(
+            "Returning %s results for condition %s",
+            len(results),
+            condition,
+        )
         return results, total
 
     key = f"match:{condition}:{cache_key(sub_query)}:{page}:{page_size}"

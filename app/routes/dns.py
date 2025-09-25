@@ -9,12 +9,19 @@ from app.deps import get_mongo
 router = APIRouter()
 
 
-@router.get("/dns")
+@router.get(
+    "/dns",
+    tags=["Data Feeds"],
+    summary="Retrieve the latest DNS observations",
+    responses={404: {"description": "No DNS records available for the requested page"}},
+)
 async def latest_dns(
     page: int = Query(1, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     mongo: AsyncIOMotorDatabase = Depends(get_mongo)
 ):
+    """Return a paginated feed of the most recent DNS records processed by NetScanner."""
+
     items = await fetch_latest_dns(mongo, page=page, page_size=page_size)
     if items.get("results"):
         return items

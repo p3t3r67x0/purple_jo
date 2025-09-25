@@ -33,7 +33,9 @@ def _create_cache() -> Cache:
             serializer=PickleSerializer(),
         )
     except InvalidCacheType:
-        logger.warning("Redis backend unavailable, falling back to in-memory cache")
+        logger.warning(
+            "Redis backend unavailable, falling back to in-memory cache"
+        )
         return Cache(Cache.MEMORY, serializer=PickleSerializer())
 
 
@@ -54,11 +56,12 @@ async def fetch_from_cache(
     key:
         Cache key to look up.
     fetch_func:
-        Zero-argument coroutine that computes the value when there is a cache miss.
+    Zero-argument coroutine that computes the value when there is a
+    cache miss.
     ttl:
         Time-to-live for the cached value in seconds.
     refresh:
-        When ``True`` the value is recomputed and the cache is updated regardless
+    When ``True`` the value is recomputed and the cache is updated
         of an existing entry.
     """
 

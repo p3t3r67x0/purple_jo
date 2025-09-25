@@ -25,15 +25,30 @@ A comprehensive network intelligence and domain analysis API built with **FastAP
 ### Database Setup (MongoDB)
 
 ```bash
+### Install MongoDB 7.0 on Ubuntu (Jammy)
+
+```bash
+# Install gnupg if not already present
 sudo apt-get install gnupg
-wget --quiet -O - https://www.mongodb.org/static/pgp/server-6.0.asc | gpg --dearmor > mongodb-keyring.gpg
+
+# Download and add MongoDB 7.0 public key
+wget --quiet -O - https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor > mongodb-keyring.gpg
+
+# Move the key to the trusted.gpg.d directory
 sudo mv mongodb-keyring.gpg /etc/apt/trusted.gpg.d/
 sudo chown root:root /etc/apt/trusted.gpg.d/mongodb-keyring.gpg
 sudo chmod ugo+r /etc/apt/trusted.gpg.d/mongodb-keyring.gpg
 sudo chmod go-w /etc/apt/trusted.gpg.d/mongodb-keyring.gpg
-echo "deb [arch=amd64,arm64 signed-by=/etc/apt/trusted.gpg.d/mongodb-keyring.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
+
+# Add the MongoDB 7.0 repository
+echo "deb [arch=amd64,arm64 signed-by=/etc/apt/trusted.gpg.d/mongodb-keyring.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+# Update package index
 sudo apt update
-sudo apt install mongodb-org
+
+# Install MongoDB 7.0
+sudo apt install -y mongodb-org
+
 
 # Start MongoDB
 sudo systemctl start mongod
@@ -94,14 +109,16 @@ Once running, interactive documentation is available at:
 
 ### Core Endpoints
 
-| Endpoint          | Method | Description                     | Parameters                          |
-| ----------------- | ------ | ------------------------------- | ----------------------------------- |
-| `/query/{domain}` | GET    | Query domain information        | `domain`, `page`, `page_size`       |
-| `/dns`            | GET    | Latest DNS records              | `page`, `page_size`                 |
-| `/ip/{ipv4}`      | GET    | IPv4 address lookup             | `ipv4`, `page`, `page_size`         |
-| `/asn`            | GET    | ASN information                 | `page`, `page_size`, `country_code` |
-| `/match/{query}`  | GET    | Advanced search with conditions | `query`, `page`, `page_size`        |
-| `/graph/{site}`   | GET    | Network relationship graph      | `site`, `page`, `page_size`         |
+| Endpoint          | Method | Description                     | Parameters                            |
+| ----------------- | ------ | ------------------------------- | ------------------------------------- |
+| `/query/{domain}` | GET    | Query domain information        | `domain`, `page`, `page_size`         |
+| `/dns`            | GET    | Latest DNS records              | `page`, `page_size`                   |
+| `/ip/{ipv4}`      | GET    | IPv4 address lookup             | `ipv4`, `page`, `page_size`           |
+| `/asn`            | GET    | ASN information                 | `page`, `page_size`, `country_code`   |
+| `/match/{query}`  | GET    | Advanced search with conditions | `query`, `page`, `page_size`          |
+| `/graph/{site}`   | GET    | Network relationship graph      | `site`, `page`, `page_size`           |
+| `/contact`        | POST   | Submit contact form (email)     | `name`, `email`, `subject`, `message`, `token?` |
+| `/admin/contact/messages` | GET | (Admin) Recent contact submissions | `limit`, `since_minutes` (auth required) |
 
 ### Real-time Features
 
@@ -110,6 +127,128 @@ Once running, interactive documentation is available at:
 | `/live/scan/{domain}` | WebSocket | Live domain scanning with progress | `domain`   |
 
 ### Analytics
+### Contact Submission
+
+Submit a contact message that will be delivered via SMTP to the configured
+recipient (default: `hello@netscanner.io`). The endpoint now includes:
+
+- Optional shared-secret token validation (simple fallback mode)
+- hCaptcha or reCAPTCHA validation (if secrets configured)
+- Per-IP rate limiting (configurable window & count)
+- IP denylist & CIDR blocking (`CONTACT_IP_DENYLIST`)
+- MongoDB persistence of submissions (`contact_messages` collection)
+- Async email sending using `aiosmtplib` with synchronous fallback
+
+Endpoint: `POST /contact`
+
+JSON body:
+
+```json
+{
+    "name": "Jane Doe",
+    "email": "jane@example.com",
+    "subject": "Inquiry",
+    "message": "Please send more information.",
+    "token": "OPTIONAL_SECRET"
+}
+```
+
+Successful response:
+
+```json
+{ "status": "accepted" }
+```
+
+Rate limit exceeded response (HTTP 429):
+
+```json
+{ "detail": "Rate limit exceeded. Please try again later." }
+```
+
+Invalid token response (HTTP 401):
+
+```json
+{ "detail": "Invalid token" }
+```
+
+Environment variables controlling the contact subsystem:
+
+| Variable                | Default                  | Description                                    |
+| ----------------------- | ------------------------ | ---------------------------------------------- |
+| `SMTP_HOST`             | `localhost`              | SMTP server host                               |
+| `SMTP_PORT`             | `25`                     | SMTP server port                               |
+| `SMTP_USER`             | (unset)                  | Username (if authentication needed)            |
+| `SMTP_PASSWORD`         | (unset)                  | Password (if authentication needed)            |
+| `SMTP_STARTTLS`         | `false`                  | Enable STARTTLS (`true/false`)                 |
+| `CONTACT_TO`            | `hello@netscanner.io`    | Destination email address                      |
+| `CONTACT_FROM`          | (falls back to user)     | Envelope/Sender address                        |
+| `CONTACT_RATE_LIMIT`    | `5`                      | Max submissions per window per IP              |
+| `CONTACT_RATE_WINDOW`   | `3600`                   | Window length in seconds                       |
+| `CONTACT_TOKEN`         | (unset)                  | Shared secret token (used only if no captcha)  |
+| `HCAPTCHA_SECRET`       | (unset)                  | hCaptcha secret (enables hCaptcha)             |
+| `RECAPTCHA_SECRET`      | (unset)                  | reCAPTCHA secret (enables reCAPTCHA)           |
+| `CONTACT_IP_DENYLIST`   | (unset)                  | Comma list of IPs / CIDRs to block             |
+
+Admin OAuth flow:
+
+```bash
+# 1) Create an admin account (run once)
+curl -X POST http://localhost:8000/admin/signup \
+    -H 'Content-Type: application/json' \
+    -d '{
+        "email": "admin@example.com",
+        "password": "changeme123",
+        "full_name": "Operations"
+    }'
+
+# 2) Exchange credentials for an access token
+curl -X POST http://localhost:8000/admin/token \
+    -H 'Content-Type: application/x-www-form-urlencoded' \
+    -d 'username=admin@example.com&password=changeme123'
+
+# 3) Call protected endpoints with the bearer token
+curl -H "Authorization: Bearer <access_token>" \
+    'http://localhost:8000/admin/contact/messages?limit=10&since_minutes=60'
+```
+
+Example captcha (hCaptcha) variables:
+
+```bash
+export HCAPTCHA_SECRET=0x0000000000000000000000000000000000000000
+```
+
+Example IP denylist (single and CIDR):
+
+```bash
+export CONTACT_IP_DENYLIST="192.0.2.10,203.0.113.0/24,2001:db8::/32"
+```
+
+
+Example `curl` (with token):
+
+```bash
+curl -X POST http://localhost:8000/contact \
+    -H 'Content-Type: application/json' \
+    -d '{
+        "name": "Jane Doe",
+        "email": "jane@example.com",
+        "subject": "Test",
+        "message": "Hello from API",
+        "token": "supersecret"
+    }'
+```
+
+Set environment variables before starting the server:
+
+```bash
+export CONTACT_TOKEN=supersecret
+export CONTACT_RATE_LIMIT=10
+export CONTACT_RATE_WINDOW=1800
+export CONTACT_TO=hello@netscanner.io
+```
+
+If email sending fails, the endpoint returns HTTP 500 with an error message.
+
 
 | Endpoint           | Method | Description                     | Parameters                                                                     |
 | ------------------ | ------ | ------------------------------- | ------------------------------------------------------------------------------ |

@@ -1,15 +1,13 @@
+from typing import Any, Mapping
+
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import IndexModel, TEXT
+from pymongo import GEOSPHERE, IndexModel, TEXT
 
 from app.config import DB_NAME, MONGO_URI
 
 
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client[DB_NAME]
-
-
-LEGACY_TEXT_INDEXES = ("domain_text_header.x-powered-by_text",)
-
 TEXT_INDEX_FIELDS = (
     ("domain", TEXT),
     ("header.x-powered-by", TEXT),
@@ -27,7 +25,6 @@ TEXT_INDEX_FIELDS = (
     ("ns_record", TEXT),
     ("aaaa_record", TEXT),
     ("a_record", TEXT),
-    ("geo.loc.coordinates", TEXT),
     ("geo.country_code", TEXT),
     ("geo.country", TEXT),
     ("geo.state", TEXT),
@@ -68,16 +65,91 @@ TEXT_INDEX_DEFINITION = IndexModel(
     background=True,
 )
 
-INDEXES = [DOMAIN_UNIQUE_INDEX, TEXT_INDEX_DEFINITION, A_RECORD_SPARSE_INDEX]
+GEO_LOC_INDEX = IndexModel(
+    [("geo.loc", GEOSPHERE)],
+    name="geo_loc_2dsphere_index",
+    background=True,
+    partialFilterExpression={
+        "geo.loc.type": "Point",
+        "geo.loc.coordinates.0": {"$type": "number"},
+        "geo.loc.coordinates.1": {"$type": "number"},
+    },
+)
+
+INDEXES = [
+    DOMAIN_UNIQUE_INDEX,
+    TEXT_INDEX_DEFINITION,
+    A_RECORD_SPARSE_INDEX,
+    GEO_LOC_INDEX,
+]
+
+
+def _normalize_index_key(key: Any) -> tuple:
+    if isinstance(key, list):
+        normalized = []
+        for item in key:
+            if isinstance(item, (list, tuple)):
+                normalized.append(tuple(item))
+            elif isinstance(item, Mapping):
+                normalized.append(tuple(item.items())[0])
+            else:
+                normalized.append((item,))
+        return tuple(normalized)
+    if isinstance(key, Mapping):
+        return tuple(key.items())
+    return (key,)
+
+
+def _normalize_weights(weights: Any) -> Any:
+    if isinstance(weights, Mapping):
+        return tuple(sorted(weights.items()))
+    return weights
+
+
+def _normalize_index_document(doc: Mapping[str, Any]) -> dict[str, Any]:
+    ignored = {"ns", "v", "background", "textIndexVersion", "2dsphereIndexVersion"}
+    normalized: dict[str, Any] = {}
+    for key, value in doc.items():
+        if key in ignored:
+            continue
+        if key == "key":
+            normalized[key] = _normalize_index_key(value)
+        elif key == "weights":
+            normalized[key] = _normalize_weights(value)
+        else:
+            normalized[key] = value
+    return normalized
+
+
+def _index_matches(existing: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    return _normalize_index_document(existing) == _normalize_index_document(expected)
 
 
 async def recreate_text_index() -> None:
     """Re-create the full text index with the current field definition."""
-    for index_name in (*LEGACY_TEXT_INDEXES, TEXT_INDEX_NAME):
-        try:
-            await db.dns.drop_index(index_name)
-        except Exception:
-            # Index did not exist or could not be dropped; continue regardless.
-            pass
+    dns_collection = db.dns
+    existing_indexes = {
+        index["name"]: index
+        for index in await dns_collection.list_indexes().to_list(length=None)
+    }
 
-    await db.dns.create_indexes(INDEXES)
+    indexes_to_create = []
+
+    for index_model in INDEXES:
+        spec = index_model.document
+        name = spec.get("name")
+        existing = existing_indexes.get(name)
+
+        if existing and _index_matches(existing, spec):
+            continue
+
+        if existing:
+            try:
+                await dns_collection.drop_index(name)
+            except Exception:
+                pass
+
+        indexes_to_create.append(index_model)
+
+    if indexes_to_create:
+        await dns_collection.create_indexes(indexes_to_create)

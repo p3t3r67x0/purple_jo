@@ -9,13 +9,20 @@ from app.deps import get_mongo
 router = APIRouter()
 
 
-@router.get("/match/{query:path}")
+@router.get(
+    "/match/{query:path}",
+    tags=["Search"],
+    summary="Run an advanced certificate match query",
+    responses={404: {"description": "No certificates found for the match criteria"}},
+)
 async def match(
     query: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     mongo: AsyncIOMotorDatabase = Depends(get_mongo),
 ):
+    """Execute flexible match conditions like issuer, organization, or time filters."""
+
     ql = query.split(":")
     condition = ql[0].lower()
 

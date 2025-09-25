@@ -11,7 +11,11 @@ from app.deps import get_mongo
 router = APIRouter()
 
 
-@router.get("/trends/requests")
+@router.get(
+    "/trends/requests",
+    tags=["Trends"],
+    summary="Analyze recent API request trends",
+)
 async def request_trends(
     interval: Literal["minute", "hour", "day"] = Query("minute"),
     lookback_minutes: int = Query(60, gt=0, le=7 * 24 * 60),
@@ -23,7 +27,7 @@ async def request_trends(
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     mongo: AsyncIOMotorDatabase = Depends(get_mongo),
 ):
-    """Return aggregated request trends for the API."""
+    """Return aggregated request metrics including histograms, top paths, and recent entries."""
 
     return await fetch_request_trends(
         mongo,

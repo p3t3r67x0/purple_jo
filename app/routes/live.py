@@ -9,7 +9,7 @@ from starlette.websockets import WebSocketState
 from app.services import perform_live_scan
 
 
-router = APIRouter(prefix="/live", tags=["live"])
+router = APIRouter(prefix="/live", tags=["Live Scans"])
 
 
 @router.websocket("/scan/{domain}")

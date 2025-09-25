@@ -423,22 +423,63 @@ async def fetch_match_condition(
     if condition == "country":
         sub_query = query.upper()
 
-    def _build_geo_query(q: str):
+    GEO_WITHIN_RADIUS_METERS = 50_000
+    EARTH_RADIUS_METERS = 6_378_137
+
+    def _parse_geo_coordinates(raw: str):
         try:
-            lat, lon = map(float, q.split(","))
-            return {
-                "geo.loc": {
-                    "$nearSphere": {
-                        "$geometry": {
-                            "type": "Point",
-                            "coordinates": [lat, lon],
-                        },
-                        "$maxDistance": 50000,
-                    }
-                }
-            }
+            first, second = map(float, raw.split(","))
         except ValueError:
+            return None
+
+        def _within_lat(val: float) -> bool:
+            return -90.0 <= val <= 90.0
+
+        def _within_lon(val: float) -> bool:
+            return -180.0 <= val <= 180.0
+
+        lat: Optional[float] = None
+        lon: Optional[float] = None
+
+        if _within_lat(first) and _within_lon(second):
+            lat, lon = first, second
+        elif _within_lat(second) and _within_lon(first):
+            lat, lon = second, first
+        else:
+            return None
+
+        canonical = [lon, lat]  # Stored as [longitude, latitude]
+        swapped = [lat, lon]
+        return {
+            "lat": lat,
+            "lon": lon,
+            "canonical": canonical,
+            "swapped": swapped,
+        }
+
+    def _build_geo_query(q: str):
+        parsed = _parse_geo_coordinates(q)
+        if not parsed:
             return {}
+
+        coordinates = parsed["canonical"]
+        return {
+            "$and": [
+                {"geo.loc.type": "Point"},
+                {"geo.loc.coordinates.0": {"$type": "number"}},
+                {"geo.loc.coordinates.1": {"$type": "number"}},
+                {
+                    "geo.loc": {
+                        "$geoWithin": {
+                            "$centerSphere": [
+                                coordinates,
+                                GEO_WITHIN_RADIUS_METERS / EARTH_RADIUS_METERS,
+                            ]
+                        }
+                    }
+                },
+            ]
+        }
 
     condition_map = {
         "registry": lambda q: {"whois.asn_registry": q},
@@ -579,6 +620,26 @@ async def fetch_match_condition(
         cursor = cursor.limit(limit)
         results = await cursor.to_list(length=limit)
         total = await mongo.dns.count_documents(mongo_query)
+
+        if condition == "loc" and not results:
+            parsed_coords = _parse_geo_coordinates(sub_query)
+            if parsed_coords:
+                fallback_query = {
+                    "$or": [
+                        {"geo.loc.coordinates": parsed_coords["canonical"]},
+                        {"geo.loc.coordinates": parsed_coords["swapped"]},
+                    ]
+                }
+                fallback_cursor = mongo.dns.find(fallback_query, {"_id": 0}).sort(
+                    "updated", -1
+                )
+                if skip:
+                    fallback_cursor = fallback_cursor.skip(skip)
+                fallback_cursor = fallback_cursor.limit(limit)
+                fallback_results = await fallback_cursor.to_list(length=limit)
+                if fallback_results:
+                    results = fallback_results
+                    total = await mongo.dns.count_documents(fallback_query)
 
         only_domains = bool(results) and all(
             isinstance(doc.get("a_record"), list) and len(doc["a_record"]) >= 1

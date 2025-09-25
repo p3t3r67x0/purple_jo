@@ -8,7 +8,12 @@ from app.deps import get_mongo
 router = APIRouter()
 
 
-@router.get("/subnet/{sub}/{prefix}")
+@router.get(
+    "/subnet/{sub}/{prefix}",
+    tags=["Network Intelligence"],
+    summary="Inspect certificate activity for a subnet",
+    responses={404: {"description": "Subnet has no recorded certificates"}},
+)
 async def subnet(
     sub: str,
     prefix: str,
@@ -16,6 +21,8 @@ async def subnet(
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     mongo: AsyncIOMotorDatabase = Depends(get_mongo),
 ):
+    """Return certificates observed within the specified subnet and prefix."""
+
     items = await fetch_all_prefix(
         mongo,
         f"{sub}/{prefix}",

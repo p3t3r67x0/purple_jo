@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-
-import pyasn
-import multiprocessing
 import argparse
-
-from datetime import datetime
 from pymongo import MongoClient
 
 
@@ -48,7 +43,12 @@ def retrieve_entries(db, domain):
             'main.a_record': '$a_record',
             'main.subject_alt_names': '$ssl.subject_alt_names',
             'zzz': {
-                '$setUnion': ['$certificates', '$cname_records', '$mx_records', '$ns_records']
+                '$setUnion': [
+                    '$certificates',
+                    '$cname_records',
+                    '$mx_records',
+                    '$ns_records',
+                ]
             }
         }},
         {'$unwind': '$zzz'},
@@ -126,7 +126,11 @@ def extract_graph(db, domain):
     if not summary:
         return {}
 
-    groups = sorted({ip for info in summary.values() for ip in info['a_records']})
+    groups = sorted({
+        ip
+        for info in summary.values()
+        for ip in info['a_records']
+    })
     groups_d = {ip: idx for idx, ip in enumerate(groups)}
 
     nodes = []

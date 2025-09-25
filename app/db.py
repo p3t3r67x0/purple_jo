@@ -46,7 +46,7 @@ TEXT_INDEX_FIELDS = (
 TEXT_INDEX_NAME = "all_fields_text_index"
 
 DOMAIN_UNIQUE_INDEX = IndexModel(
-    [("domain", 1)],
+    [("domain", 1), ("updated", -1)],
     name="domain_unique_index",
     sparse=True,
     unique=True,
@@ -164,6 +164,20 @@ HEADER_POWERED_BY_INDEX = IndexModel(
     background=True,
 )
 
+BANNER_UPDATED_INDEX = IndexModel(
+    [("banner", 1), ("updated", -1)],
+    name="banner_updated_index",
+    sparse=True,
+    background=True,
+)
+
+HEADER_SERVER_INDEX = IndexModel(
+    [("header.server", 1), ("updated", -1)],
+    name="header_server_updated_index",
+    sparse=True,
+    background=True,
+)
+
 SSL_SUBJECT_CN_INDEX = IndexModel(
     [("ssl.subject.common_name", 1), ("updated", -1)],
     name="ssl_subject_common_name_index",
@@ -174,6 +188,13 @@ SSL_SUBJECT_CN_INDEX = IndexModel(
 SSL_SUBJECT_ALT_NAMES_INDEX = IndexModel(
     [("ssl.subject_alt_names", 1), ("updated", -1)],
     name="ssl_subject_alt_names_index",
+    sparse=True,
+    background=True,
+)
+
+SSL_SUBJECT_ORG_INDEX = IndexModel(
+    [("ssl.subject.organization_name", 1), ("updated", -1)],
+    name="ssl_subject_organization_name_index",
     sparse=True,
     background=True,
 )
@@ -228,15 +249,22 @@ SSL_CRL_INDEX = IndexModel(
 )
 
 SSL_NOT_BEFORE_INDEX = IndexModel(
-    [("ssl.not_before", -1)],
+    [("ssl.not_before", -1), ("updated", -1)],
     name="ssl_not_before_index",
     sparse=True,
     background=True,
 )
 
 SSL_NOT_AFTER_INDEX = IndexModel(
-    [("ssl.not_after", -1)],
+    [("ssl.not_after", -1), ("updated", -1)],
     name="ssl_not_after_index",
+    sparse=True,
+    background=True,
+)
+
+WHOIS_ASN_DESCRIPTION_INDEX = IndexModel(
+    [("whois.asn_description", 1), ("updated", -1)],
+    name="whois_asn_description_updated_index",
     sparse=True,
     background=True,
 )
@@ -267,6 +295,7 @@ INDEXES = [
     GEO_LOC_INDEX,
     UPDATED_DESC_INDEX,
     WHOIS_ASN_INDEX,
+    WHOIS_ASN_DESCRIPTION_INDEX,
     WHOIS_ASN_CIDR_INDEX,
     WHOIS_ASN_REGISTRY_INDEX,
     WHOIS_ASN_COUNTRY_INDEX,
@@ -279,7 +308,10 @@ INDEXES = [
     CNAME_TARGET_INDEX,
     HEADER_STATUS_INDEX,
     HEADER_POWERED_BY_INDEX,
+    HEADER_SERVER_INDEX,
+    BANNER_UPDATED_INDEX,
     SSL_SUBJECT_CN_INDEX,
+    SSL_SUBJECT_ORG_INDEX,
     SSL_SUBJECT_ALT_NAMES_INDEX,
     SSL_ISSUER_ORG_INDEX,
     SSL_ISSUER_CN_INDEX,

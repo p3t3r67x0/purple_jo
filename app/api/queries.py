@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import socket
@@ -88,7 +89,7 @@ async def fetch_all_prefix(
 async def fetch_latest_dns(mongo, page: int = 1, page_size: int = 10):
     """Return recently updated DNS documents with pagination."""
 
-    query = {"a_record": {"$exists": True, "$ne": []}}
+    query = {"a_record.0": {"$exists": True}}
     skip, limit = _pagination_bounds(page, page_size)
 
     async def loader():
@@ -143,30 +144,49 @@ async def fetch_latest_cidr(mongo, page: int = 1, page_size: int = 50):
 async def fetch_latest_ipv4(mongo, page: int = 1, page_size: int = 60):
     """Return recent IPv4 records with pagination."""
 
-    match_stage = {"a_record": {"$exists": True, "$ne": []}}
+    match_stage = {"a_record.0": {"$exists": True}}
     skip, limit = _pagination_bounds(page, page_size)
 
     async def loader():
-        pipeline = [
+        results_pipeline = [
             {"$match": match_stage},
-            {"$unwind": "$a_record"},
             {"$sort": {"updated": -1}},
+            {
+                "$project": {
+                    "_id": 0,
+                    "a_record": 1,
+                    "country_code": 1,
+                }
+            },
+            {"$unwind": "$a_record"},
             {"$skip": skip},
             {"$limit": limit},
-            {"$project": {"_id": 0, "a_record": 1, "country_code": 1}},
         ]
-        cursor = mongo.dns.aggregate(pipeline)
-        results = [doc async for doc in cursor]
 
-        count_cursor = mongo.dns.aggregate(
-            [
-                {"$match": match_stage},
-                {"$unwind": "$a_record"},
-                {"$count": "count"},
-            ]
+        total_pipeline = [
+            {"$match": match_stage},
+            {
+                "$project": {
+                    "count": {
+                        "$size": {
+                            "$ifNull": ["$a_record", []]
+                        }
+                    }
+                }
+            },
+            {"$group": {"_id": None, "count": {"$sum": "$count"}}},
+        ]
+
+        results_cursor = mongo.dns.aggregate(
+            results_pipeline, allowDiskUse=True)
+        total_cursor = mongo.dns.aggregate(total_pipeline)
+
+        results, total_docs = await asyncio.gather(
+            results_cursor.to_list(length=limit),
+            total_cursor.to_list(length=1),
         )
-        count_docs = await count_cursor.to_list(length=1)
-        total = count_docs[0]["count"] if count_docs else 0
+
+        total = total_docs[0]["count"] if total_docs else 0
         return results, total
 
     key = f"ipv4:latest:{page}:{page_size}"
@@ -191,8 +211,10 @@ async def fetch_latest_asn(
     """
 
     query = {"whois.asn": {"$exists": True}}
+    hint_name = "whois_asn_updated_index"
     if country_code:
         query["whois.asn_country_code"] = country_code.upper()
+        hint_name = "whois_asn_country_updated_index"
     projection = {
         "_id": 0,
         "whois.asn": 1,
@@ -204,12 +226,15 @@ async def fetch_latest_asn(
     async def loader():
         cursor = (
             mongo.dns.find(query, projection)
+            .hint(hint_name)
             .sort("updated", -1)
             .skip(skip)
             .limit(limit)
         )
-        results = await cursor.to_list(length=limit)
-        total = await mongo.dns.count_documents(query)
+        count_task = mongo.dns.count_documents(query, hint=hint_name)
+        results_task = cursor.to_list(length=limit)
+
+        results, total = await asyncio.gather(results_task, count_task)
         return results, total
 
     country_key = country_code.upper() if country_code else "all"

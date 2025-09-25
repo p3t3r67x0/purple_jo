@@ -5,7 +5,7 @@ from fastapi import FastAPI
 
 from app.responses import MongoJSONResponse
 from app.middleware import log_stats
-from app.db import db, recreate_text_index
+from app.db import db, recreate_text_index, TEXT_INDEX_NAME
 
 from app.routes import (
     query,
@@ -98,8 +98,12 @@ async def lifespan(app: FastAPI):
     active_mongo = getattr(app.state, "mongo", db)
     if active_mongo is db:
         try:
-            await recreate_text_index()
-            logger.info("Recreated text index")
+            existing = await db.dns.list_indexes().to_list(length=None)
+            if any(idx.get("name") == TEXT_INDEX_NAME for idx in existing):
+                logger.debug("Text index already present; skipping rebuild")
+            else:
+                await recreate_text_index()
+                logger.info("Created text index")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Skipping text index rebuild: %s", exc)
     else:

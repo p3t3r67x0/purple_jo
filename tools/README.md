@@ -172,10 +172,14 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 
 ### extract_geoip.py
 - **Purpose:** Enrich A-record domains with GeoIP data from a local MaxMind database.
-- **CLI:** `python tools/extract_geoip.py --input /path/GeoLite2-City.mmdb --host mongodb.internal --workers 6 --chunk-size 2000`
+- **CLI:**
+  - Queue jobs to RabbitMQ: `python tools/extract_geoip.py --host mongodb.internal --input /path/GeoLite2-City.mmdb --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name geoip_enrichment --purge-queue`
+  - Run distributed workers: `python tools/extract_geoip.py --host mongodb.internal --input /path/GeoLite2-City.mmdb --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 25`
+  - Direct mode: `python tools/extract_geoip.py --host mongodb.internal --input /path/GeoLite2-City.mmdb --worker 4 --concurrency 25`
 - **Details:**
-  - Counts domains lacking `country_code`, splits them across worker processes, and for each IP writes location fields under both legacy (`country`, `state`, etc.) and nested `geo` keys.
-  - Records failures via `geo_lookup_failed`.
+  - Uses RabbitMQ (optional) to distribute GeoIP enrichment jobs so workers can scale horizontally; direct mode keeps the same claim loop without a broker.
+  - Workers atomically claim documents via `geo_lookup_started`, write derived fields (`geo`, `country`, `state`, etc.), clear failure markers on success, and record misses under `geo_lookup_failed`.
+  - Supports configurable claim retry windows via `--claim-timeout` and honours the MaxMind City database path supplied via `--input`.
 - **Prerequisites:** A GeoIP2/City `.mmdb` file (GeoLite2 or commercial) accessible on disk.
 
 ### extract_whois.py

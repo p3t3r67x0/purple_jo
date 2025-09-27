@@ -17,9 +17,7 @@ def utcnow() -> datetime:
 class Domain(SQLModel, table=True):
     __tablename__ = "domains"
     __table_args__ = (
-        Index("ix_domains_name", "name", unique=True),
-        # Note: ix_domains_updated_at removed from here since it's handled
-        # by Alembic and Field(index=True) below creates it automatically
+        Index("ix_domains_name", "name", unique=True)
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -103,6 +101,17 @@ class CNAMERecord(SQLModel, table=True):
     domain_id: int = Field(foreign_key="domains.id", nullable=False)
     target: str = Field(
         sa_column=Column("target", String(255), nullable=False)
+    )
+    updated_at: datetime = Field(default_factory=utcnow, nullable=False)
+
+
+class TXTRecord(SQLModel, table=True):
+    __tablename__ = "txt_records"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    domain_id: int = Field(foreign_key="domains.id", nullable=False)
+    content: str = Field(
+        sa_column=Column("content", String(1000), nullable=False)
     )
     updated_at: datetime = Field(default_factory=utcnow, nullable=False)
 
@@ -328,6 +337,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing helpers
     Domain.soa_records: list[SoaRecord]
     Domain.mx_records: list[MXRecord]
     Domain.cname_records: list[CNAMERecord]
+    Domain.txt_records: list[TXTRecord]
     Domain.ports: list[PortService]
     Domain.whois: Optional[WhoisRecord]
     Domain.geo: Optional[GeoPoint]
@@ -341,6 +351,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing helpers
     SoaRecord.domain: Domain
     MXRecord.domain: Domain
     CNAMERecord.domain: Domain
+    TXTRecord.domain: Domain
     PortService.domain: Domain
     WhoisRecord.domain: Domain
     GeoPoint.domain: Domain
@@ -359,6 +370,7 @@ Domain.ns_records = relationship(NSRecord, back_populates="domain")
 Domain.soa_records = relationship(SoaRecord, back_populates="domain")
 Domain.mx_records = relationship(MXRecord, back_populates="domain")
 Domain.cname_records = relationship(CNAMERecord, back_populates="domain")
+Domain.txt_records = relationship(TXTRecord, back_populates="domain")
 Domain.ports = relationship(PortService, back_populates="domain")
 Domain.whois = relationship(
     WhoisRecord, back_populates="domain", uselist=False
@@ -377,6 +389,7 @@ NSRecord.domain = relationship(Domain, back_populates="ns_records")
 SoaRecord.domain = relationship(Domain, back_populates="soa_records")
 MXRecord.domain = relationship(Domain, back_populates="mx_records")
 CNAMERecord.domain = relationship(Domain, back_populates="cname_records")
+TXTRecord.domain = relationship(Domain, back_populates="txt_records")
 PortService.domain = relationship(Domain, back_populates="ports")
 WhoisRecord.domain = relationship(Domain, back_populates="whois")
 GeoPoint.domain = relationship(Domain, back_populates="geo")

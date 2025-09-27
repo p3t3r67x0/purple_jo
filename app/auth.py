@@ -4,11 +4,14 @@ import base64
 import hashlib
 import hmac
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
-from bson import ObjectId
-from motor.motor_asyncio import AsyncIOMotorDatabase
+from sqlalchemy.orm import selectinload
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.models.postgres import AdminToken, AdminUser
 
 PASSWORD_HASH_ITERATIONS = 120_000
 TOKEN_TTL_MINUTES = 60
@@ -48,39 +51,46 @@ def _hash_token(token: str) -> str:
 
 
 async def create_access_token(
-    mongo: AsyncIOMotorDatabase,
-    user_id: ObjectId,
+    session: AsyncSession,
+    user_id: int,
     ttl_minutes: int = TOKEN_TTL_MINUTES,
 ) -> Tuple[str, datetime]:
     token = secrets.token_urlsafe(TOKEN_BYTES)
     token_hash = _hash_token(token)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=ttl_minutes)
 
-    await mongo.admin_tokens.insert_one(
-        {
-            "user_id": user_id,
-            "token_hash": token_hash,
-            "created_at": now,
-            "expires_at": expires_at,
-        }
+    admin_token = AdminToken(
+        user_id=user_id,
+        token_hash=token_hash,
+        created_at=now,
+        expires_at=expires_at,
     )
+    session.add(admin_token)
+    await session.commit()
 
     return token, expires_at
 
 
 async def get_active_token(
-    mongo: AsyncIOMotorDatabase,
+    session: AsyncSession,
     token: str,
-) -> Optional[dict]:
+) -> Optional[AdminToken]:
     token_hash = _hash_token(token)
-    token_doc = await mongo.admin_tokens.find_one({"token_hash": token_hash})
-    if not token_doc:
+    stmt = (
+        select(AdminToken)
+        .options(selectinload(AdminToken.user))
+        .where(AdminToken.token_hash == token_hash)
+        .limit(1)
+    )
+    result = await session.exec(stmt)
+    admin_token = result.scalars().one_or_none()
+    if admin_token is None:
         return None
 
-    expires_at = token_doc.get("expires_at")
-    if expires_at and expires_at < datetime.utcnow():
-        await mongo.admin_tokens.delete_one({"_id": token_doc["_id"]})
+    if admin_token.expires_at and admin_token.expires_at < datetime.now(timezone.utc):
+        await session.delete(admin_token)
+        await session.commit()
         return None
 
-    return token_doc
+    return admin_token

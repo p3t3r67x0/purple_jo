@@ -10,49 +10,43 @@ A comprehensive network intelligence and domain analysis API built with **FastAP
 - **DNS Intelligence**: DNS record analysis and domain relationships
 - **Graph Analysis**: Network relationship mapping and visualization data
 - **Trend Analytics**: Request patterns and usage statistics
-- **High Performance**: Async FastAPI with MongoDB backend
+- **High Performance**: Async FastAPI with PostgreSQL backend
 - **Interactive Documentation**: Auto-generated OpenAPI/Swagger docs
 
 ## 📋 Prerequisites
 
 - **Python 3.10+**
-- **MongoDB 6.0+**
+- **PostgreSQL 14+**
 - **Redis** (for caching)
 - **Chromium/Chrome** (for web scraping features)
 
 ## 🛠️ Installation
 
-### Database Setup (MongoDB)
+### Database Setup (PostgreSQL)
 
 ```bash
-### Install MongoDB 7.0 on Ubuntu (Jammy)
-
-```bash
-# Install gnupg if not already present
-sudo apt-get install gnupg
-
-# Download and add MongoDB 7.0 public key
-wget --quiet -O - https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor > mongodb-keyring.gpg
-
-# Move the key to the trusted.gpg.d directory
-sudo mv mongodb-keyring.gpg /etc/apt/trusted.gpg.d/
-sudo chown root:root /etc/apt/trusted.gpg.d/mongodb-keyring.gpg
-sudo chmod ugo+r /etc/apt/trusted.gpg.d/mongodb-keyring.gpg
-sudo chmod go-w /etc/apt/trusted.gpg.d/mongodb-keyring.gpg
-
-# Add the MongoDB 7.0 repository
-echo "deb [arch=amd64,arm64 signed-by=/etc/apt/trusted.gpg.d/mongodb-keyring.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-
-# Update package index
+# Install PostgreSQL (Ubuntu example)
 sudo apt update
+sudo apt install postgresql postgresql-contrib
 
-# Install MongoDB 7.0
-sudo apt install -y mongodb-org
+# Create database and user
+sudo -u postgres psql -c "CREATE DATABASE purple_jo;"
+sudo -u postgres psql -c "CREATE USER purple_jo WITH PASSWORD 'change-me';"
+sudo -u postgres psql -c "GRANT CONNECT ON DATABASE purple_jo TO purple_jo;"
+sudo -u postgres psql -c "GRANT USAGE ON SCHEMA public TO purple_jo;"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE purple_jo TO purple_jo;"
+```
 
+Set the DSN in your `.env` (or shell):
 
-# Start MongoDB
-sudo systemctl start mongod
-sudo systemctl enable mongod
+```
+POSTGRES_DSN=postgresql+asyncpg://purple_jo:change-me@127.0.0.1/purple_jo
+```
+
+Apply migrations to prepare the schema:
+
+```bash
+alembic upgrade head
 ```
 
 ### Application Setup

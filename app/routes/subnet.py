@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from motor.motor_asyncio import AsyncIOMotorDatabase
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api import fetch_all_prefix
 from app.config import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
-from app.deps import get_mongo
+from app.deps import get_postgres_session
 
 router = APIRouter()
 
@@ -19,15 +19,15 @@ async def subnet(
     prefix: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
-    mongo: AsyncIOMotorDatabase = Depends(get_mongo),
+    session: AsyncSession = Depends(get_postgres_session),
 ):
     """Return certificates observed within the specified subnet and prefix."""
 
     items = await fetch_all_prefix(
-        mongo,
         f"{sub}/{prefix}",
         page=page,
         page_size=page_size,
+        session=session,
     )
     if items.get("results"):
         return items

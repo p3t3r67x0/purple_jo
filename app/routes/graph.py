@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
-from motor.motor_asyncio import AsyncIOMotorDatabase
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api import extract_graph
-from app.deps import get_mongo
+from app.deps import get_postgres_session
 
 
 router = APIRouter()
@@ -16,11 +16,11 @@ router = APIRouter()
 )
 async def graph(
     site: str,
-    mongo: AsyncIOMotorDatabase = Depends(get_mongo),
+    session: AsyncSession = Depends(get_postgres_session),
 ):
     """Generate a network graph showing entities connected to the requested site."""
 
-    items = await extract_graph(mongo, site)
+    items = await extract_graph(site, session=session)
     if items.get("nodes"):
         return items
     raise HTTPException(status_code=404, detail="No documents found")

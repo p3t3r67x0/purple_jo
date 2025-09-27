@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Distributed GeoIP enrichment backed by RabbitMQ and MongoDB.
+"""Distributed GeoIP enrichment backed by RabbitMQ and PostgreSQL.
 
-This refactor aligns the GeoIP enrichment workflow with other distributed
-scanners (e.g. ``ssl_cert_scanner.py``). Jobs can be enqueued onto RabbitMQ for
-horizontal workers, or processed directly without a message broker. Workers
-claim documents atomically via Mongo, set ``geo_lookup_started`` to avoid
-duplication, and clear failure markers on success.
+Jobs can be enqueued onto RabbitMQ for horizontal workers, or processed
+directly without a message broker. Workers claim domains atomically
+via PostgreSQL, set geo_lookup_started to avoid duplication, and clear
+failure markers on success.
 """
 
 from __future__ import annotations
@@ -16,21 +15,66 @@ import json
 import logging
 import multiprocessing
 import os
+import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, Optional, Sequence
 
 import aio_pika
 from aio_pika import DeliveryMode, Message
 from aiormq.exceptions import AMQPConnectionError
 import click
-from bson import ObjectId
 from geoip2 import database
 from geoip2.errors import AddressNotFoundError
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import MongoClient, ReturnDocument
-from pymongo.collection import Collection
+from sqlalchemy.ext.asyncio import (
+    async_sessionmaker, create_async_engine
+)
+from sqlmodel import select, delete
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+# Add the project root to the Python path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.models.postgres import Domain, GeoPoint, ARecord  # noqa: E402
+
+
+class PostgresAsync:
+    """Async PostgreSQL connection manager."""
+    
+    def __init__(self, dsn: str):
+        # Convert DSN to use asyncpg driver (consistent with other tools)
+        if dsn.startswith("postgresql://"):
+            dsn = dsn.replace("postgresql://", "postgresql+asyncpg://")
+        elif not dsn.startswith("postgresql+asyncpg://"):
+            # If no scheme, assume we need asyncpg
+            if "://" not in dsn:
+                dsn = f"postgresql+asyncpg://{dsn}"
+
+        self._engine = create_async_engine(
+            dsn,
+            echo=False,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+            future=True
+        )
+        self._session_factory = async_sessionmaker(
+            bind=self._engine,
+            expire_on_commit=False,
+            class_=AsyncSession
+        )
+    
+    def get_session(self):
+        """Get async database session."""
+        return self._session_factory()
+    
+    async def close(self):
+        """Close database engine."""
+        await self._engine.dispose()
+
 
 STOP_SENTINEL = b"__STOP__"
 DEFAULT_PREFETCH = 200
@@ -74,7 +118,7 @@ class GeoIPStats:
 
 @dataclass
 class WorkerSettings:
-    mongo_host: str
+    postgres_dsn: str
     rabbitmq_url: Optional[str]
     queue_name: str
     prefetch: int
@@ -91,46 +135,47 @@ class DirectWorkerSettings(WorkerSettings):
 
 @dataclass
 class GeoIPJob:
-    document_id: ObjectId
+    domain_id: int
     ips: Sequence[str]
     message: Optional[aio_pika.IncomingMessage] = None
     stop: bool = False
 
 
-def build_query() -> Dict[str, Any]:
-    """Return the base query for documents missing GeoIP data."""
+async def build_base_query():
+    """Return the base query for domains missing GeoIP data."""
+    return (
+        select(Domain)
+        .join(ARecord)
+        .where(Domain.country_code.is_(None))
+        .where(~Domain.id.in_(
+            select(GeoPoint.domain_id).where(GeoPoint.domain_id.is_not(None))
+        ))
+    )
 
-    return {
-        "a_record.0": {"$exists": True},
-        "country_code": {"$exists": False},
-        "geo_lookup_failed": {"$exists": False},
-    }
 
-
-def _sanitize_coordinates(lon: Optional[float], lat: Optional[float]) -> List[Optional[float]]:
+def _sanitize_coordinates(
+    lon: Optional[float], lat: Optional[float]
+) -> tuple[Optional[float], Optional[float]]:
     lon_val = round(lon, 5) if lon is not None else None
     lat_val = round(lat, 5) if lat is not None else None
-    return [lon_val, lat_val]
+    return (lon_val, lat_val)
 
 
 class GeoIPRuntime:
     def __init__(self, settings: WorkerSettings) -> None:
         self.settings = settings
-        self._client = AsyncIOMotorClient(
-            f"mongodb://{settings.mongo_host}:27017", tz_aware=True)
-        self.db = self._client.ip_data
-        self.collection = self.db.dns
+        self.postgres = PostgresAsync(settings.postgres_dsn)
         self.reader = database.Reader(str(settings.mmdb_path))
         self.stats = GeoIPStats()
 
     async def close(self) -> None:
         self.reader.close()
-        self._client.close()
+        await self.postgres.close()
 
     async def process_job(self, job: GeoIPJob) -> bool:
         ips = [ip for ip in job.ips if ip]
         if not ips:
-            await self._mark_geoip_failure_by_id(job.document_id)
+            await self._mark_geoip_failure_by_id(job.domain_id)
             self.stats.record(False)
             return False
 
@@ -145,88 +190,119 @@ class GeoIPRuntime:
                 log.warning("GeoIP lookup failed for %s: %s", ip, exc)
                 continue
 
-            post = {
+            longitude, latitude = _sanitize_coordinates(
+                response.location.longitude, response.location.latitude
+            )
+            
+            geo_data = {
                 "country_code": response.country.iso_code,
                 "country": response.country.name,
                 "state": response.subdivisions.most_specific.name,
                 "city": response.city.name,
-                "loc": {
-                    "type": "Point",
-                    "coordinates": _sanitize_coordinates(
-                        response.location.longitude, response.location.latitude
-                    ),
-                },
+                "longitude": longitude,
+                "latitude": latitude,
             }
 
-            await self._update_geo_fields(job.document_id, post)
+            await self._update_geo_fields(job.domain_id, geo_data)
             log.info("Updated GeoIP for %s -> %s",
-                     ip, post.get("country_code"))
+                     ip, geo_data.get("country_code"))
             success = True
 
         if success:
             self.stats.record(True)
             return True
 
-        await self._mark_geoip_failure_by_id(job.document_id)
+        await self._mark_geoip_failure_by_id(job.domain_id)
         self.stats.record(False)
         return False
 
-    async def _update_geo_fields(self, doc_id: ObjectId, post: Dict[str, Any]) -> None:
-        updated = datetime.now(timezone.utc)
-        set_fields: Dict[str, Any] = {
-            "geo": post,
-            "country_code": post.get("country_code"),
-            "country": post.get("country"),
-            "state": post.get("state"),
-            "city": post.get("city"),
-            "loc": post.get("loc"),
-            "updated": updated,
-        }
+    async def _update_geo_fields(
+        self, domain_id: int, geo_data: Dict[str, Any]
+    ) -> None:
+        updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        
+        async with self.postgres.get_session() as session:
+            # Update domain denormalized fields
+            domain_stmt = select(Domain).where(Domain.id == domain_id)
+            result = await session.exec(domain_stmt)
+            domain = result.one_or_none()
+            
+            if domain:
+                domain.country_code = geo_data.get("country_code")
+                domain.country = geo_data.get("country")
+                domain.state = geo_data.get("state")
+                domain.city = geo_data.get("city")
+                domain.updated_at = updated_at
+                session.add(domain)
+                
+                # Delete existing geo point if it exists
+                await session.exec(
+                    delete(GeoPoint).where(GeoPoint.domain_id == domain_id)
+                )
+                
+                # Create new geo point
+                geo_point = GeoPoint(
+                    domain_id=domain_id,
+                    latitude=geo_data.get("latitude"),
+                    longitude=geo_data.get("longitude"),
+                    country_code=geo_data.get("country_code"),
+                    country=geo_data.get("country"),
+                    state=geo_data.get("state"),
+                    city=geo_data.get("city"),
+                    updated_at=updated_at,
+                )
+                session.add(geo_point)
+                
+                await session.commit()
 
-        await self.collection.update_one(
-            {"_id": doc_id},
-            {
-                "$set": set_fields,
-                "$unset": {"geo_lookup_failed": "", "geo_lookup_started": ""},
-            },
-            upsert=False,
+    async def _mark_geoip_failure_by_id(self, domain_id: int) -> None:
+        updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        
+        async with self.postgres.get_session() as session:
+            # Just update the domain's updated_at to mark attempt
+            domain_stmt = select(Domain).where(Domain.id == domain_id)
+            result = await session.exec(domain_stmt)
+            domain = result.one_or_none()
+            
+            if domain:
+                domain.updated_at = updated_at
+                session.add(domain)
+                await session.commit()
+
+
+async def claim_next_domain(
+    postgres: PostgresAsync, claim_timeout: int
+) -> Optional[Dict[str, Any]]:
+    """Claim the next domain for GeoIP processing."""
+    async with postgres.get_session() as session:
+        # Find domains with A records but no GeoIP data
+        stmt = (
+            select(Domain, ARecord.ip_address)
+            .join(ARecord, Domain.id == ARecord.domain_id)
+            .where(Domain.country_code.is_(None))
+            .where(~Domain.id.in_(
+                select(GeoPoint.domain_id).where(
+                    GeoPoint.domain_id.is_not(None)
+                )
+            ))
+            .limit(1)
         )
-
-    async def _mark_geoip_failure_by_id(self, doc_id: ObjectId) -> None:
-        await self.collection.update_one(
-            {"_id": doc_id},
-            {
-                "$set": {"geo_lookup_failed": datetime.now(timezone.utc)},
-                "$unset": {"geo_lookup_started": ""},
-            },
-            upsert=False,
-        )
-
-
-async def claim_next_document(collection, claim_timeout: int) -> Optional[Dict[str, Any]]:
-    now = datetime.now(timezone.utc)
-    base_query = build_query()
-
-    if claim_timeout:
-        expire_before = now - timedelta(minutes=claim_timeout)
-        claim_clause: Dict[str, Any] = {
-            "$or": [
-                {"geo_lookup_started": {"$exists": False}},
-                {"geo_lookup_started": {"$lt": expire_before}},
-            ]
-        }
-    else:
-        claim_clause = {"geo_lookup_started": {"$exists": False}}
-
-    query = {"$and": [base_query, claim_clause]}
-
-    return await collection.find_one_and_update(
-        query,
-        {"$set": {"geo_lookup_started": now}},
-        sort=[("_id", 1)],
-        projection={"a_record": 1},
-        return_document=ReturnDocument.BEFORE,
-    )
+        
+        result = await session.exec(stmt)
+        row = result.first()
+        
+        if row:
+            domain, ip = row
+            # Get all A records for this domain
+            a_records_stmt = select(ARecord.ip_address).where(
+                ARecord.domain_id == domain.id
+            )
+            a_result = await session.exec(a_records_stmt)
+            ips = [record for record in a_result.all()]
+            
+            return {"id": domain.id, "ips": ips}
+        
+        return None
 
 
 async def get_jobs(settings: WorkerSettings) -> AsyncIterator[GeoIPJob]:
@@ -242,25 +318,29 @@ async def get_jobs(settings: WorkerSettings) -> AsyncIterator[GeoIPJob]:
         async with queue.iterator() as iterator:
             async for message in iterator:
                 if message.body == STOP_SENTINEL:
-                    yield GeoIPJob(document_id=ObjectId(), ips=[], message=message, stop=True)
+                    yield GeoIPJob(
+                        domain_id=0, ips=[], message=message, stop=True
+                    )
                     break
 
                 try:
                     payload = json.loads(message.body.decode("utf-8"))
-                    doc_id = ObjectId(payload["id"])
+                    domain_id = int(payload["id"])
                     ips = payload.get("ips", [])
                 except Exception as exc:  # pragma: no cover - defensive
                     log.error("Invalid GeoIP job payload: %s", exc)
                     await message.ack()
                     continue
 
-                yield GeoIPJob(document_id=doc_id, ips=ips, message=message)
+                yield GeoIPJob(domain_id=domain_id, ips=ips, message=message)
     finally:
         await connection.close()
 
 
 class GeoIPConsumer:
-    def __init__(self, settings: WorkerSettings, runtime: GeoIPRuntime) -> None:
+    def __init__(
+        self, settings: WorkerSettings, runtime: GeoIPRuntime
+    ) -> None:
         self.settings = settings
         self.runtime = runtime
         self._semaphore = asyncio.Semaphore(max(1, settings.concurrency))
@@ -287,7 +367,8 @@ class GeoIPConsumer:
                 await self.runtime.process_job(job)
             except Exception as exc:  # pragma: no cover - defensive
                 log.exception(
-                    "Unhandled error while processing GeoIP job: %s", exc)
+                    "Unhandled error while processing GeoIP job: %s", exc
+                )
             finally:
                 if job.message:
                     with contextlib.suppress(Exception):
@@ -299,7 +380,9 @@ async def direct_worker(settings: DirectWorkerSettings) -> str:
     try:
         idle_iterations = 0
         while True:
-            claimed = await claim_next_document(runtime.collection, settings.claim_timeout)
+            claimed = await claim_next_domain(
+                runtime.postgres, settings.claim_timeout
+            )
             if not claimed:
                 idle_iterations += 1
                 if idle_iterations >= 5:
@@ -308,12 +391,12 @@ async def direct_worker(settings: DirectWorkerSettings) -> str:
                 continue
 
             idle_iterations = 0
-            doc_id = claimed.get("_id")
-            ips = claimed.get("a_record") or []
-            if not doc_id:
+            domain_id = claimed.get("id")
+            ips = claimed.get("ips") or []
+            if not domain_id:
                 continue
 
-            job = GeoIPJob(document_id=doc_id, ips=ips)
+            job = GeoIPJob(domain_id=domain_id, ips=ips)
             await runtime.process_job(job)
 
         return runtime.stats.summary()
@@ -366,67 +449,38 @@ def run_worker_direct(settings: DirectWorkerSettings) -> str:
         return f"[ERROR] Worker crashed: {exc}"
 
 
-def claim_next_document_sync(collection: Collection, claim_timeout: int) -> Optional[Dict[str, Any]]:
-    now = datetime.now(timezone.utc)
-    base_query = build_query()
-
-    if claim_timeout:
-        expire_before = now - timedelta(minutes=claim_timeout)
-        claim_clause: Dict[str, Any] = {
-            "$or": [
-                {"geo_lookup_started": {"$exists": False}},
-                {"geo_lookup_started": {"$lt": expire_before}},
-            ]
-        }
-    else:
-        claim_clause = {"geo_lookup_started": {"$exists": False}}
-
-    query = {"$and": [base_query, claim_clause]}
-
-    return collection.find_one_and_update(
-        query,
-        {"$set": {"geo_lookup_started": now}},
-        sort=[("_id", 1)],
-        projection={"a_record": 1},
-        return_document=ReturnDocument.BEFORE,
-    )
+async def count_pending_domains(postgres: PostgresAsync) -> int:
+    """Count domains that need GeoIP enrichment."""
+    async with postgres.get_session() as session:
+        stmt = (
+            select(Domain.id)
+            .join(ARecord, Domain.id == ARecord.domain_id)
+            .where(Domain.country_code.is_(None))
+            .where(~Domain.id.in_(
+                select(GeoPoint.domain_id).where(
+                    GeoPoint.domain_id.is_not(None)
+                )
+            ))
+        )
+        result = await session.exec(stmt)
+        return len(result.all())
 
 
-def mark_geoip_failure_by_id_sync(collection: Collection, doc_id: Any) -> None:
-    collection.update_one(
-        {"_id": doc_id},
-        {
-            "$set": {"geo_lookup_failed": datetime.now(timezone.utc)},
-            "$unset": {"geo_lookup_started": ""},
-        },
-        upsert=False,
-    )
-
-
-def iter_pending_geoip_jobs(collection: Collection, claim_timeout: int) -> Iterable[Dict[str, Any]]:
+async def iter_pending_geoip_jobs(
+    postgres: PostgresAsync, claim_timeout: int
+) -> AsyncIterator[Dict[str, Any]]:
+    """Iterate over domains that need GeoIP processing."""
     while True:
-        claimed = claim_next_document_sync(collection, claim_timeout)
+        claimed = await claim_next_domain(postgres, claim_timeout)
         if not claimed:
             break
-
-        doc_id = claimed.get("_id")
-        ips = claimed.get("a_record") or []
-        if not doc_id or not ips:
-            if doc_id is not None:
-                mark_geoip_failure_by_id_sync(collection, doc_id)
-            continue
-
-        yield {"id": str(doc_id), "ips": [ip for ip in ips if ip]}
-
-
-def count_pending_documents(collection: Collection) -> int:
-    return collection.count_documents(build_query())
+        yield claimed
 
 
 async def enqueue_geoip_jobs(
     rabbitmq_url: str,
     queue_name: str,
-    jobs: Iterable[Dict[str, Any]],
+    jobs: AsyncIterator[Dict[str, Any]],
     worker_count: int,
     purge_queue: bool,
 ) -> int:
@@ -438,7 +492,7 @@ async def enqueue_geoip_jobs(
         if purge_queue:
             await queue.purge()
         exchange = channel.default_exchange
-        for job in jobs:
+        async for job in jobs:
             if not job.get("ips"):
                 continue
             message = Message(
@@ -451,32 +505,60 @@ async def enqueue_geoip_jobs(
                 log.info("Queued %d GeoIP jobs so far", sent)
 
         stop_message = Message(
-            STOP_SENTINEL, delivery_mode=DeliveryMode.PERSISTENT)
+            STOP_SENTINEL, delivery_mode=DeliveryMode.PERSISTENT
+        )
         for _ in range(worker_count):
             await exchange.publish(stop_message, routing_key=queue_name)
     return sent
 
 
 @click.command()
-@click.option("--worker", "-w", type=int, default=4, show_default=True, help="Worker processes")
-@click.option("--host", "-h", type=str, required=True, help="MongoDB host")
-@click.option("--input", "mmdb_path", type=Path, required=True, help="Path to GeoIP2/City mmdb")
-@click.option("--claim-timeout", type=int, default=30, show_default=True,
-              help="Minutes before an in-progress claim is retried")
-@click.option("--rabbitmq-url", "-r", type=str, default=None, help="RabbitMQ URL for distributed mode")
-@click.option("--queue-name", "-q", type=str, default=DEFAULT_QUEUE_NAME, show_default=True,
-              help="RabbitMQ queue name")
-@click.option("--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
-              help="RabbitMQ prefetch per worker")
-@click.option("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY, show_default=True,
-              help="Concurrent GeoIP jobs per worker")
-@click.option("--purge-queue/--no-purge-queue", default=True,
-              help="Purge queue before enqueuing new jobs")
-@click.option("--service", is_flag=True, help="Run as a RabbitMQ-consuming GeoIP service")
-@click.option("--verbose", is_flag=True, help="Enable verbose debug logging")
+@click.option(
+    "--worker", "-w", type=int, default=4, show_default=True,
+    help="Worker processes"
+)
+@click.option(
+    "--postgres-dsn", type=str, required=True,
+    help="PostgreSQL connection string"
+)
+@click.option(
+    "--input", "mmdb_path", type=Path, required=True,
+    help="Path to GeoIP2/City mmdb"
+)
+@click.option(
+    "--claim-timeout", type=int, default=30, show_default=True,
+    help="Minutes before an in-progress claim is retried"
+)
+@click.option(
+    "--rabbitmq-url", "-r", type=str, default=None,
+    help="RabbitMQ URL for distributed mode"
+)
+@click.option(
+    "--queue-name", "-q", type=str, default=DEFAULT_QUEUE_NAME,
+    show_default=True, help="RabbitMQ queue name"
+)
+@click.option(
+    "--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
+    help="RabbitMQ prefetch per worker"
+)
+@click.option(
+    "--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY,
+    show_default=True, help="Concurrent GeoIP jobs per worker"
+)
+@click.option(
+    "--purge-queue/--no-purge-queue", default=True,
+    help="Purge queue before enqueuing new jobs"
+)
+@click.option(
+    "--service", is_flag=True,
+    help="Run as a RabbitMQ-consuming GeoIP service"
+)
+@click.option(
+    "--verbose", is_flag=True, help="Enable verbose debug logging"
+)
 def main(
     worker: int,
-    host: str,
+    postgres_dsn: str,
     mmdb_path: Path,
     claim_timeout: int,
     rabbitmq_url: Optional[str],
@@ -498,7 +580,7 @@ def main(
     concurrency = max(1, concurrency)
 
     base_settings = WorkerSettings(
-        mongo_host=host,
+        postgres_dsn=postgres_dsn,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
@@ -524,45 +606,46 @@ def main(
                     click.echo(result)
         return
 
-    sync_client = MongoClient(f"mongodb://{host}:27017", tz_aware=True)
-    collection = sync_client.ip_data.dns
-    total = count_pending_documents(collection)
-    click.echo(f"[INFO] total documents pending GeoIP enrichment: {total}")
+    postgres = PostgresAsync(postgres_dsn)
+    try:
+        total = asyncio.run(count_pending_domains(postgres))
+        click.echo(f"[INFO] total domains pending GeoIP enrichment: {total}")
 
-    if total == 0:
-        sync_client.close()
-        click.echo("[INFO] Nothing to enrich")
-        return
+        if total == 0:
+            click.echo("[INFO] Nothing to enrich")
+            return
 
-    if rabbitmq_url:
-        jobs = iter_pending_geoip_jobs(collection, claim_timeout)
-        log.info("Publishing GeoIP jobs to RabbitMQ at %s", rabbitmq_url)
-        queued = asyncio.run(
-            enqueue_geoip_jobs(
-                rabbitmq_url=rabbitmq_url,
-                queue_name=queue_name,
-                jobs=jobs,
-                worker_count=worker,
-                purge_queue=purge_queue,
+        if rabbitmq_url:
+            log.info("Publishing GeoIP jobs to RabbitMQ at %s", rabbitmq_url)
+            jobs = iter_pending_geoip_jobs(postgres, claim_timeout)
+            queued = asyncio.run(
+                enqueue_geoip_jobs(
+                    rabbitmq_url=rabbitmq_url,
+                    queue_name=queue_name,
+                    jobs=jobs,
+                    worker_count=worker,
+                    purge_queue=purge_queue,
+                )
             )
-        )
-        log.info("Queued %d GeoIP jobs onto RabbitMQ queue '%s'",
-                 queued, queue_name)
-        sync_client.close()
-        click.echo("[INFO] Published GeoIP jobs. Start workers with --service")
-        return
+            log.info("Queued %d GeoIP jobs onto RabbitMQ queue '%s'",
+                     queued, queue_name)
+            click.echo(
+                "[INFO] Published GeoIP jobs. Start workers with --service"
+            )
+            return
 
-    sync_client.close()
-    worker_args = [DirectWorkerSettings(
-        **base_settings.__dict__) for _ in range(worker)]
-    if worker == 1:
-        click.echo(run_worker_direct(worker_args[0]))
-        return
+        worker_args = [DirectWorkerSettings(
+            **base_settings.__dict__) for _ in range(worker)]
+        if worker == 1:
+            click.echo(run_worker_direct(worker_args[0]))
+            return
 
-    with multiprocessing.Pool(processes=worker) as pool:
-        log.info("Spawned %d direct worker processes", worker)
-        for result in pool.imap_unordered(run_worker_direct, worker_args):
-            click.echo(result)
+        with multiprocessing.Pool(processes=worker) as pool:
+            log.info("Spawned %d direct worker processes", worker)
+            for result in pool.imap_unordered(run_worker_direct, worker_args):
+                click.echo(result)
+    finally:
+        asyncio.run(postgres.close())
 
 
 if __name__ == "__main__":

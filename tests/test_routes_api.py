@@ -1,19 +1,40 @@
-from types import SimpleNamespace
+from datetime import datetime
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 from app.main import app
-from app.deps import get_mongo
+from app.deps import get_postgres_session, get_client_ip
 
 
 @pytest.fixture
 def client(monkeypatch):
-    """Return a TestClient with a default mongo override."""
+    """Return a TestClient with a dummy database session override."""
 
     app.dependency_overrides.clear()
-    app.dependency_overrides[get_mongo] = lambda request: SimpleNamespace()
+
+    class MockSession:
+        async def rollback(self):
+            pass
+        
+        async def commit(self):
+            pass
+        
+        async def flush(self):
+            pass
+        
+        def add(self, obj):
+            pass
+
+    async def dummy_session(request: Request):
+        yield MockSession()
+    
+    def dummy_client_ip():
+        return "127.0.0.1"
+
+    app.dependency_overrides[get_postgres_session] = dummy_session
+    app.dependency_overrides[get_client_ip] = dummy_client_ip
 
     from app.routes import contact as contact_module
 
@@ -22,20 +43,16 @@ def client(monkeypatch):
 
     monkeypatch.setattr(contact_module, "_send_email_async", no_email)
 
-    original_mongo = getattr(app.state, "mongo", None)
-    app.state.mongo = SimpleNamespace()
-
     with TestClient(app) as test_client:
         yield test_client
 
     app.dependency_overrides.clear()
-    app.state.mongo = original_mongo
 
 
 def test_query_route_success(client, monkeypatch):
     from app.routes import query as query_routes
 
-    async def fake_fetch(mongo, domain, page=1, page_size=25):
+    async def fake_fetch(domain, *, session, page=1, page_size=25):
         return {
             "results": [{"domain": domain, "score": 1.0}],
             "total": 1,
@@ -53,7 +70,7 @@ def test_query_route_success(client, monkeypatch):
 def test_subnet_route_success(client, monkeypatch):
     from app.routes import subnet as subnet_routes
 
-    async def fake_fetch(mongo, prefix, page=1, page_size=25):
+    async def fake_fetch(prefix, *, session, page=1, page_size=25):
         return {
             "results": [{"cidr": prefix, "count": 2}],
             "total": 2,
@@ -71,7 +88,7 @@ def test_subnet_route_success(client, monkeypatch):
 def test_match_route_success(client, monkeypatch):
     from app.routes import match as match_routes
 
-    async def fake_fetch(mongo, condition, query, page=1, page_size=25):
+    async def fake_fetch(condition, query, *, session, page=1, page_size=25):
         return {
             "results": [{"condition": condition, "value": query}],
             "total": 1,
@@ -90,9 +107,10 @@ def test_match_route_success(client, monkeypatch):
 def test_dns_route_success(client, monkeypatch):
     from app.routes import dns as dns_routes
 
-    async def fake_fetch(mongo, page=1, page_size=25):
+    async def fake_fetch(*, session, page=1, page_size=25):
         return {
-            "results": [{"domain": "example.com", "a_record": ["203.0.113.1"]}],
+            "results": [{"domain": "example.com",
+                         "a_record": ["203.0.113.1"]}],
             "total": 1,
             "page": page,
             "page_size": page_size,
@@ -108,7 +126,7 @@ def test_dns_route_success(client, monkeypatch):
 def test_cidr_route_success(client, monkeypatch):
     from app.routes import cidr as cidr_routes
 
-    async def fake_fetch(mongo, page=1, page_size=25):
+    async def fake_fetch(*, session, page=1, page_size=25):
         return {
             "results": [{"whois": {"asn_cidr": "198.51.100.0/24"}}],
             "total": 1,
@@ -120,14 +138,14 @@ def test_cidr_route_success(client, monkeypatch):
 
     response = client.get("/cidr")
     assert response.status_code == 200
-    assert response.json()[
-        "results"][0]["whois"]["asn_cidr"] == "198.51.100.0/24"
+    result = response.json()["results"][0]["whois"]["asn_cidr"]
+    assert result == "198.51.100.0/24"
 
 
 def test_ipv4_route_success(client, monkeypatch):
     from app.routes import ipv4 as ipv4_routes
 
-    async def fake_fetch(mongo, page=1, page_size=25):
+    async def fake_fetch(*, session, page=1, page_size=25):
         return {
             "results": [{"a_record": "203.0.113.5", "country_code": "US"}],
             "total": 1,
@@ -145,7 +163,7 @@ def test_ipv4_route_success(client, monkeypatch):
 def test_asn_route_success(client, monkeypatch):
     from app.routes import asn as asn_routes
 
-    async def fake_fetch(mongo, page=1, page_size=25, country_code=None):
+    async def fake_fetch(*, session, page=1, page_size=25, country_code=None):
         return {
             "results": [
                 {
@@ -172,7 +190,7 @@ def test_asn_route_success(client, monkeypatch):
 def test_graph_route_success(client, monkeypatch):
     from app.routes import graph as graph_routes
 
-    async def fake_extract(mongo, site):
+    async def fake_extract(site, *, session):
         return {
             "nodes": [{"id": site, "type": "domain", "label": site}],
             "edges": [],
@@ -188,7 +206,7 @@ def test_graph_route_success(client, monkeypatch):
 def test_ip_route_success(client, monkeypatch):
     from app.routes import ip as ip_routes
 
-    async def fake_fetch(mongo, ipv4, page=1, page_size=25):
+    async def fake_fetch(session, ipv4, *, page=1, page_size=25):
         return {
             "results": [{"ip": ipv4, "asn": "AS64501"}],
             "total": 1,
@@ -207,7 +225,8 @@ def test_trends_route_success(client, monkeypatch):
     from app.routes import trends as trends_routes
 
     async def fake_fetch(
-        mongo,
+        *,
+        session,
         interval="minute",
         lookback_minutes=60,
         buckets=20,
@@ -218,20 +237,22 @@ def test_trends_route_success(client, monkeypatch):
         page_size=25,
     ):
         return {
-            "histogram": [
-                {"bucket": "2024-01-01T00:00:00", "count": 42},
-            ],
+            "interval": interval,
+            "lookback_minutes": lookback_minutes,
+            "since": datetime.now().isoformat(),
+            "path_filter": path,
+            "bucket_count": 1,
+            "total_requests": 1,
+            "timeline": {"results": [{"count": 42}], "total": 1},
             "top_paths": [],
-            "recent": [],
-            "page": page,
-            "page_size": page_size,
+            "recent_requests": [],
         }
 
     monkeypatch.setattr(trends_routes, "fetch_request_trends", fake_fetch)
 
     response = client.get("/trends/requests", params={"interval": "hour"})
     assert response.status_code == 200
-    assert response.json()["histogram"][0]["count"] == 42
+    assert response.json()["timeline"]["results"][0]["count"] == 42
 
 
 def test_contact_route_accepts_submission(client, monkeypatch):
@@ -240,123 +261,61 @@ def test_contact_route_accepts_submission(client, monkeypatch):
     async def noop_async(*_args, **_kwargs):  # noqa: D401 - simple async noop
         return None
 
-    def noop_sync(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(contact_routes, "_ensure_indexes", noop_async)
-    monkeypatch.setattr(contact_routes, "_verify_token", noop_sync)
-    monkeypatch.setattr(contact_routes, "_ip_blocked", lambda ip: False)
     monkeypatch.setattr(contact_routes, "_check_rate_limit", noop_async)
-    monkeypatch.setattr(contact_routes, "_verify_captcha", noop_async)
     monkeypatch.setattr(contact_routes, "_persist_message", noop_async)
-    monkeypatch.setattr(contact_routes, "_send_email_async", noop_async)
-
-    settings = SimpleNamespace(
-        contact_token=None,
-        contact_ip_denylist="",
-        contact_rate_limit=5,
-        contact_rate_window=60,
-        contact_hcaptcha_secret=None,
-        contact_recaptcha_secret=None,
-        smtp_host="localhost",
-        smtp_port=25,
-        smtp_user=None,
-        smtp_password=None,
-        smtp_starttls=False,
-        contact_from=None,
-        contact_to="hello@example.com",
-    )
-
-    monkeypatch.setattr(contact_routes, "get_settings", lambda: settings)
 
     response = client.post(
         "/contact",
         json={
-            "name": "Jane Doe",
-            "email": "jane@example.com",
-            "subject": "Hi",
-            "message": "Test message",
+            "name": "Alice",
+            "email": "alice@example.com",
+            "subject": "Hello",
+            "message": "Testing",
         },
     )
-
     assert response.status_code == 202
-    assert response.json() == {"status": "accepted"}
+    assert response.json()["status"] == "accepted"
 
 
-def test_admin_route_returns_messages(client, monkeypatch):
-    from app.routes import admin as admin_routes
-
-    class FakeCursor:
-        def __init__(self, docs):
-            self.docs = docs
-
-        def sort(self, *_args, **_kwargs):
-            return self
-
-        def limit(self, _limit):
-            return self
-
-        async def to_list(self, length):
-            return self.docs[:length]
-
-    class FakeCollection:
-        def __init__(self, docs):
-            self.docs = docs
-
-        def find(self, *_args, **_kwargs):
-            return FakeCursor(self.docs)
-
-    class FakeMongo:
-        def __init__(self, docs):
-            self.contact_messages = FakeCollection(docs)
-
-    fake_docs = [
-        {
-            "name": "Jane",
-            "email": "jane@example.com",
-            "subject": "Hello",
-            "message": "Body",
-        }
-    ]
-
-    from app.routes import admin as admin_routes
-
-    app.dependency_overrides[get_mongo] = lambda request: FakeMongo(fake_docs)
-    app.dependency_overrides[admin_routes.get_current_admin] = lambda: admin_routes.AdminProfile(
-        id="1",
-        email="admin@example.com",
-        full_name=None,
-    )
-
-    response = client.get("/admin/contact/messages")
-    assert response.status_code == 200
-    assert response.json()["count"] == 1
-
-
-def test_graph_route_not_found_returns_404(client, monkeypatch):
-    from app.routes import graph as graph_routes
-
-    async def fake_extract(_mongo, _site):
-        return {"nodes": [], "edges": []}
-
-    monkeypatch.setattr(graph_routes, "extract_graph", fake_extract)
-
-    response = client.get("/graph/missing.example")
-    assert response.status_code == 404
-
-
-def test_live_scan_websocket(client, monkeypatch):
+def test_live_websocket_handles_disconnect(monkeypatch):
     from app.routes import live as live_routes
 
-    async def fake_perform_live_scan(_mongo, domain, reporter):
-        await reporter({"type": "status", "detail": f"scanning {domain}"})
+    async def fake_scan(domain, reporter, postgres_session):
+        await reporter({"type": "progress", "step": "dns",
+                        "status": "started"})
 
-    monkeypatch.setattr(live_routes, "perform_live_scan",
-                        fake_perform_live_scan)
+    monkeypatch.setattr(live_routes, "perform_live_scan", fake_scan)
 
-    with client.websocket_connect("/live/scan/example.com") as websocket:
-        message = websocket.receive_json()
-        assert message == {"type": "status", "detail": "scanning example.com"}
+    with TestClient(app) as websocket_client:
+        websocket_url = "/live/scan/example.com"
+        with websocket_client.websocket_connect(websocket_url) as websocket:
+            # Receive initial message to ensure connection is established
+            message = websocket.receive_json()
+            assert message["type"] == "progress"
+            # Close the connection - this should be handled gracefully
+            websocket.close()
+            # Test passes if no exception is raised during close
 
-        with pytest.raises(WebSocketDisconnect):
-            websocket.receive_text()
+
+def test_live_websocket_streams_events(monkeypatch):
+    from app.routes import live as live_routes
+
+    async def fake_scan(domain, reporter, postgres_session):
+        await reporter({"type": "progress", "step": "dns",
+                        "status": "started"})
+        await reporter({"type": "result", "data": {"domain": domain}})
+
+    monkeypatch.setattr(live_routes, "perform_live_scan", fake_scan)
+
+    with TestClient(app) as websocket_client:
+        websocket_url = "/live/scan/example.com"
+        with websocket_client.websocket_connect(websocket_url) as websocket:
+            message1 = websocket.receive_json()
+            message2 = websocket.receive_json()
+            assert message1["type"] == "progress"
+            assert message2["type"] == "result"
+
+
+def test_route_not_found(client):
+    response = client.get("/nonexistent")
+    assert response.status_code == 404

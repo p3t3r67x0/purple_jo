@@ -1,33 +1,22 @@
-"""Helpers for aggregating request statistics.
+"""Helpers for aggregating request statistics stored in PostgreSQL."""
 
-This module exposes helpers that operate on the ``stats_data`` collection,
-which is populated by :func:`app.middleware.log_stats`.  The helpers focus on
-producing concise, trend friendly datasets that can be consumed by the API
-layer.
-"""
+from __future__ import annotations
 
-import asyncio
-
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Literal, Optional, Tuple
 
-from motor.motor_asyncio import AsyncIOMotorDatabase
+from sqlalchemy import func, select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.utils import paginate
 from app.cache import fetch_from_cache
+from app.models.postgres import RequestStat
 
-# Mapping of supported aggregation intervals to the MongoDB format string used
-# in ``$dateToString`` and the Python ``timedelta`` that represents the bucket
-# width.
-_DATE_FORMATS: Dict[
-    Literal["minute", "hour", "day"], Tuple[str, timedelta]
-] = {
-    "minute": ("%Y-%m-%dT%H:%M:00", timedelta(minutes=1)),
-    "hour": ("%Y-%m-%dT%H:00:00", timedelta(hours=1)),
-    "day": ("%Y-%m-%dT00:00:00", timedelta(days=1)),
+_DATE_BUCKETS: Dict[Literal["minute", "hour", "day"], timedelta] = {
+    "minute": timedelta(minutes=1),
+    "hour": timedelta(hours=1),
+    "day": timedelta(days=1),
 }
-
-_PARSE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 
 def _pagination_bounds(page: int, page_size: int) -> Tuple[int, int]:
@@ -37,8 +26,8 @@ def _pagination_bounds(page: int, page_size: int) -> Tuple[int, int]:
 
 
 async def fetch_request_trends(
-    mongo: AsyncIOMotorDatabase,
     *,
+    session: AsyncSession,
     interval: Literal["minute", "hour", "day"],
     lookback_minutes: int,
     buckets: int,
@@ -48,145 +37,39 @@ async def fetch_request_trends(
     page: int = 1,
     page_size: int = 25,
 ) -> dict:
-    """Aggregate request statistics for the trend endpoint.
+    """Aggregate request statistics for the trend endpoint."""
 
-    Parameters
-    ----------
-    mongo:
-        The MongoDB database instance.
-    interval:
-        Aggregation granularity (minute, hour or day).
-    lookback_minutes:
-        Time window, in minutes, that the aggregation should cover.
-    buckets:
-        Maximum number of time buckets to return.
-    top_paths:
-        Number of most requested paths to include in the summary.
-    recent_limit:
-        Number of raw request documents to return for quick inspection.
-    path:
-        Optional path filter to scope the results to a specific endpoint.
-    """
-
-    since = datetime.now() - timedelta(minutes=lookback_minutes)
-    match_stage: Dict[str, object] = {"created": {"$gte": since}}
+    bucket_delta = _DATE_BUCKETS[interval]
+    since = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+    filters = [RequestStat.created_at >= since]
     if path:
-        match_stage["path"] = path
-
-    format_str, bucket_delta = _DATE_FORMATS[interval]
-
-    skip, limit = _pagination_bounds(page, page_size)
+        filters.append(RequestStat.path == path)
 
     async def loader() -> dict:
-        timeline_pipeline = [
-            {"$match": match_stage},
-            {
-                "$group": {
-                    "_id": {
-                        "$dateToString": {
-                            "format": format_str,
-                            "date": "$created",
-                        }
-                    },
-                    "count": {"$sum": 1},
-                }
-            },
-            {"$sort": {"_id": -1}},
-            {"$limit": buckets},
-        ]
-        if skip:
-            timeline_pipeline.append({"$skip": skip})
-        timeline_pipeline.extend([{"$limit": limit}, {"$sort": {"_id": 1}}])
-
-        async def load_timeline():
-            cursor = mongo.stats_data.aggregate(timeline_pipeline)
-            return [doc async for doc in cursor]
-
-        async def load_bucket_count() -> int:
-            count_cursor = mongo.stats_data.aggregate(
-                [
-                    {"$match": match_stage},
-                    {
-                        "$group": {
-                            "_id": {
-                                "$dateToString": {
-                                    "format": format_str,
-                                    "date": "$created",
-                                }
-                            }
-                        }
-                    },
-                    {"$count": "count"},
-                ]
-            )
-            count_docs = await count_cursor.to_list(length=1)
-            total = count_docs[0]["count"] if count_docs else 0
-            return min(total, buckets)
-
-        async def load_top_paths():
-            if top_paths <= 0:
-                return []
-            pipeline = [
-                {"$match": match_stage},
-                {"$group": {"_id": "$path", "count": {"$sum": 1}}},
-                {"$sort": {"count": -1}},
-                {"$limit": top_paths},
-                {"$project": {"_id": 0, "path": "$_id", "count": 1}},
-            ]
-            cursor = mongo.stats_data.aggregate(pipeline)
-            return [doc async for doc in cursor]
-
-        async def load_recent():
-            if recent_limit <= 0:
-                return []
-            recent_cursor = (
-                mongo.stats_data.find(
-                    match_stage,
-                    {
-                        "_id": 0,
-                        "path": 1,
-                        "request_method": 1,
-                        "status_code": 1,
-                        "remote_address": 1,
-                        "created": 1,
-                    },
-                )
-                .sort("created", -1)
-                .limit(recent_limit)
-            )
-            items = []
-            async for doc in recent_cursor:
-                created = doc.get("created")
-                items.append(
-                    {
-                        "path": doc.get("path"),
-                        "request_method": doc.get("request_method"),
-                        "status_code": doc.get("status_code"),
-                        "remote_address": doc.get("remote_address"),
-                        "created": created.isoformat() if created else None,
-                    }
-                )
-            return items
-
-        async def load_total_requests() -> int:
-            return await mongo.stats_data.count_documents(match_stage)
-
-        (timeline_docs, total_buckets, top_paths_data, recent_requests, total_requests) = await asyncio.gather(
-            load_timeline(),
-            load_bucket_count(),
-            load_top_paths(),
-            load_recent(),
-            load_total_requests(),
+        bucket_column = func.date_trunc(interval, RequestStat.created_at)
+        timeline_stmt = (
+            select(bucket_column.label("bucket"), func.count().label("count"))
+            .where(*filters)
+            .group_by("bucket")
+            .order_by("bucket")
         )
+        timeline_result = await session.exec(timeline_stmt)
+        timeline_rows = timeline_result.all()
+        if buckets > 0:
+            timeline_rows = timeline_rows[-buckets:]
+
+        total_buckets = len(timeline_rows)
+        skip, limit = _pagination_bounds(page, page_size)
+        page_rows = timeline_rows[skip: skip + limit]
 
         timeline = []
-        for doc in timeline_docs:
-            bucket_start = datetime.strptime(doc["_id"], _PARSE_FORMAT)
+        for bucket_value, count in page_rows:
+            bucket_start = bucket_value.replace(tzinfo=timezone.utc)
             timeline.append(
                 {
                     "window_start": bucket_start.isoformat(),
                     "window_end": (bucket_start + bucket_delta).isoformat(),
-                    "count": doc["count"],
+                    "count": count,
                 }
             )
 
@@ -197,19 +80,58 @@ async def fetch_request_trends(
             results=timeline,
         )
 
+        top_paths_data = []
+        if top_paths > 0:
+            top_stmt = (
+                select(RequestStat.path, func.count().label("count"))
+                .where(*filters)
+                .group_by(RequestStat.path)
+                .order_by(func.count().desc())
+                .limit(top_paths)
+            )
+            top_result = await session.exec(top_stmt)
+            for path_value, count in top_result.all():
+                top_paths_data.append({"path": path_value, "count": count})
+
+        recent_requests = []
+        if recent_limit > 0:
+            recent_stmt = (
+                select(RequestStat)
+                .where(*filters)
+                .order_by(RequestStat.created_at.desc())
+                .limit(recent_limit)
+            )
+            recent_result = await session.exec(recent_stmt)
+            for stat in recent_result.all():
+                recent_requests.append(
+                    {
+                        "path": stat.path,
+                        "request_method": stat.request_method,
+                        "status_code": stat.status_code,
+                        "remote_address": stat.remote_address,
+                        "created": stat.created_at.replace(tzinfo=timezone.utc).isoformat()
+                        if stat.created_at
+                        else None,
+                    }
+                )
+
+        total_requests_stmt = select(func.count()).where(*filters)
+        total_requests = await session.scalar(total_requests_stmt) or 0
+
         return {
             "interval": interval,
             "lookback_minutes": lookback_minutes,
             "since": since.isoformat(),
             "path_filter": path,
             "bucket_count": timeline_page["total"],
-            "total_requests": total_requests,
+            "total_requests": int(total_requests),
             "timeline": timeline_page,
             "top_paths": top_paths_data,
             "recent_requests": recent_requests,
         }
 
-    cache_key = \
+    cache_key = (
         f"trends:{interval}:{lookback_minutes}:{buckets}:{top_paths}:{recent_limit}:{path}:{page}:{page_size}"
+    )
 
     return await fetch_from_cache(cache_key, loader, ttl=60)

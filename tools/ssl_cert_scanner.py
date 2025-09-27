@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Distributed TLS certificate scanner backed by RabbitMQ and MongoDB."""
+"""Distributed TLS certificate scanner backed by RabbitMQ and PostgreSQL."""
 
 from __future__ import annotations
 
@@ -11,16 +11,24 @@ import multiprocessing
 import os
 import re
 import ssl
+import sys
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncIterator, Dict, List, Optional, Set, Tuple
 
 import aio_pika
 from aio_pika import DeliveryMode, Message
 from aiormq.exceptions import AMQPConnectionError
 import click
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import MongoClient
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.models.postgres import Domain, PortService, SSLData, SSLSubjectAltName
 
 
 STOP_SENTINEL = b"__STOP__"
@@ -39,6 +47,43 @@ TLS_VERSION_MAP = {
 log = logging.getLogger("ssl_cert_scanner")
 
 
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+
+
+def _parse_env_file(path: Path) -> dict:
+    """Parse a .env file and return key-value pairs."""
+    env_vars = {}
+    if not path.exists():
+        return env_vars
+
+    with open(path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                env_vars[key.strip()] = value.strip().strip('"\'')
+    return env_vars
+
+
+def resolve_dsn() -> str:
+    """Resolve PostgreSQL DSN from environment or .env file."""
+    # First try environment variables
+    if "POSTGRES_DSN" in os.environ:
+        dsn = os.environ["POSTGRES_DSN"]
+    else:
+        # Try to load from .env file
+        env_vars = _parse_env_file(ENV_PATH)
+        dsn = env_vars.get("POSTGRES_DSN")
+
+        if not dsn:
+            raise ValueError(
+                "POSTGRES_DSN not found in environment or .env file"
+            )
+
+    # Return the DSN as-is since we're using SQLModel/SQLAlchemy
+    return dsn
+
+
 def configure_logging(level: int) -> None:
     root_logger = logging.getLogger()
     if not root_logger.handlers:
@@ -53,7 +98,7 @@ def configure_logging(level: int) -> None:
 
 @dataclass
 class WorkerSettings:
-    mongo_host: str
+    postgres_dsn: str
     rabbitmq_url: Optional[str]
     queue_name: str
     prefetch: int
@@ -97,23 +142,36 @@ class ScanStats:
         )
 
 
-class MongoAsync:
-    def __init__(self, host: str) -> None:
-        self._client = AsyncIOMotorClient(f"mongodb://{host}:27017", tz_aware=True)
-        self.db = self._client.ip_data
+class PostgresAsync:
+    def __init__(self, postgres_dsn: str) -> None:
+        self.postgres_dsn = postgres_dsn
+        self.engine = create_async_engine(postgres_dsn)
+        self.session_factory = async_sessionmaker(
+            bind=self.engine,
+            class_=AsyncSession,
+            expire_on_commit=False
+        )
 
-    def close(self) -> None:
-        self._client.close()
+    async def get_session(self) -> AsyncSession:
+        """Get a database session."""
+        return self.session_factory()
+
+    async def close(self) -> None:
+        """Close database connections."""
+        try:
+            await self.engine.dispose()
+        except Exception:
+            pass
 
 
 class SSLRuntime:
     def __init__(self, settings: WorkerSettings) -> None:
         self.settings = settings
-        self.mongo = MongoAsync(settings.mongo_host)
+        self.postgres = PostgresAsync(settings.postgres_dsn)
         self.stats = ScanStats()
 
     async def close(self) -> None:
-        self.mongo.close()
+        await self.postgres.close()
 
     async def process_domain(self, domain: str) -> bool:
         domain = domain.strip().lower()
@@ -144,7 +202,7 @@ class SSLRuntime:
     async def _scan_port(self, domain: str, port: int) -> Optional[Dict[str, object]]:
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
+        ssl_ctx.verify_mode = ssl.CERT_OPTIONAL  # Get cert info
 
         try:
             reader, writer = await asyncio.wait_for(
@@ -161,14 +219,22 @@ class SSLRuntime:
             return None
 
         try:
-            cert = writer.get_extra_info("peercert")
             ssl_obj = writer.get_extra_info("ssl_object")
+            # Get certificate from SSL object instead of peercert extra info
+            if ssl_obj is None:
+                log.warning(
+                    "SSL object missing after successful connection to %s:%d. This may indicate a connection or handshake issue.",
+                    domain,
+                    port,
+                )
+                return {"error": f"SSL object missing after successful connection to {domain}:{port}"}
+            cert = ssl_obj.getpeercert()
         finally:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
-        if not cert:
+        if not cert or not isinstance(cert, dict) or len(cert) == 0:
             return None
 
         certificate = self._normalise_certificate(cert, ssl_obj)
@@ -269,24 +335,108 @@ class SSLRuntime:
         certificate: Dict[str, object],
         timestamp: datetime,
     ) -> None:
-        await self.mongo.db.dns.update_one(
-            {"domain": domain},
-            {
-                "$set": {"ssl": certificate, "updated": timestamp},
-                "$unset": {"ssl_scan_failed": "", "cert_scan_failed": ""},
-            },
-            upsert=True,
-        )
+        """Store successful SSL certificate scan in PostgreSQL."""
+        async with await self.postgres.get_session() as session:
+            try:
+                # Find or create domain
+                stmt = select(Domain).where(Domain.name == domain)
+                result = await session.exec(stmt)
+                domain_record = result.first()
+                
+                if not domain_record:
+                    domain_record = Domain(
+                        name=domain,
+                        created_at=timestamp,
+                        updated_at=timestamp
+                    )
+                    session.add(domain_record)
+                    await session.flush()  # Get the domain ID
+
+                # Remove existing SSL data to replace it
+                if domain_record.id:
+                    stmt = select(SSLData).where(SSLData.domain_id == domain_record.id)
+                    result = await session.exec(stmt)
+                    existing_ssl = result.first()
+                    if existing_ssl:
+                        # Delete existing alt names
+                        stmt = select(SSLSubjectAltName).where(SSLSubjectAltName.ssl_id == existing_ssl.id)
+                        result = await session.exec(stmt)
+                        for alt_name in result:
+                            await session.delete(alt_name)
+                        # Delete existing SSL data
+                        await session.delete(existing_ssl)
+
+                # Create new SSL data
+                issuer = certificate.get("issuer", {})
+                subject = certificate.get("subject", {})
+                
+                ssl_data = SSLData(
+                    domain_id=domain_record.id,
+                    issuer_common_name=issuer.get("common_name"),
+                    issuer_organizational_unit=issuer.get("organizational_unit_name"),
+                    issuer_organization=issuer.get("organization_name"),
+                    subject_common_name=subject.get("common_name"),
+                    subject_organizational_unit=subject.get("organizational_unit_name"),
+                    subject_organization=subject.get("organization_name"),
+                    serial_number=str(certificate.get("serial")) if certificate.get("serial") else None,
+                    ocsp=certificate.get("ocsp"),
+                    ca_issuers=certificate.get("ca_issuers"),
+                    crl_distribution_points=certificate.get("crl_distribution_points"),
+                    not_before=certificate.get("not_before"),
+                    not_after=certificate.get("not_after"),
+                    updated_at=timestamp,
+                )
+                session.add(ssl_data)
+                await session.flush()  # Get the SSL ID
+
+                # Add subject alternative names
+                alt_names = certificate.get("subject_alt_names", [])
+                for alt_name in alt_names:
+                    if alt_name:
+                        ssl_alt_name = SSLSubjectAltName(
+                            ssl_id=ssl_data.id,
+                            value=str(alt_name)
+                        )
+                        session.add(ssl_alt_name)
+
+                # Update domain timestamp and clear any failure flags
+                domain_record.updated_at = timestamp
+                
+                await session.commit()
+                
+            except Exception as exc:
+                await session.rollback()
+                log.error("Failed to store SSL data for %s: %s", domain, exc)
+                raise
 
     async def _mark_failed(self, domain: str, timestamp: datetime) -> None:
-        await self.mongo.db.dns.update_one(
-            {"domain": domain},
-            {
-                "$set": {"ssl_scan_failed": timestamp},
-                "$setOnInsert": {"created": timestamp, "domain": domain},
-            },
-            upsert=True,
-        )
+        """Mark SSL scan as failed for a domain."""
+        async with await self.postgres.get_session() as session:
+            try:
+                # Find or create domain
+                stmt = select(Domain).where(Domain.name == domain)
+                result = await session.exec(stmt)
+                domain_record = result.first()
+                
+                if not domain_record:
+                    domain_record = Domain(
+                        name=domain,
+                        created_at=timestamp,
+                        updated_at=timestamp
+                    )
+                    session.add(domain_record)
+                else:
+                    domain_record.updated_at = timestamp
+
+                # Note: In PostgreSQL version, we don't have specific SSL failure fields
+                # We just update the domain timestamp to mark it as processed
+                
+                await session.commit()
+                
+            except Exception as exc:
+                await session.rollback()
+                log.error("Failed to mark SSL failure for %s: %s", domain, exc)
+                raise
 
     def _log_success(self, domain: str, certificate: Dict[str, object]) -> None:
         log.info(
@@ -404,75 +554,76 @@ async def enqueue_domains(
 
 
 async def iter_pending_domains(
-    sync_client: MongoClient,
+    postgres_dsn: str,
     ports: Tuple[int, ...],
     batch_size: int = 10_000,
 ) -> AsyncIterator[str]:
-    loop = asyncio.get_running_loop()
-
-    def _iterator() -> List[str]:
-        results: List[str] = []
-        cursor = sync_client.ip_data.dns.find(
-            {
-                "ssl": {"$exists": False},
-                "ssl_scan_failed": {"$exists": False},
-                "cert_scan_failed": {"$exists": False},
-                "ports": {
-                    "$elemMatch": {
-                        "port": {"$in": list(ports)},
-                        "status": "open",
-                        "proto": "tcp",
-                    }
-                },
-            },
-            {"domain": 1},
-            sort=[("$natural", 1)],
-            batch_size=batch_size,
-        )
-        try:
-            for doc in cursor:
-                domain = doc.get("domain")
-                if domain:
-                    results.append(domain)
-        finally:
-            cursor.close()
-        return results
-
-    domains = await loop.run_in_executor(None, _iterator)
-    for domain in domains:
-        yield domain
+    """Iterate over domains that need SSL scanning."""
+    engine = create_async_engine(postgres_dsn)
+    session_factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False
+    )
+    
+    try:
+        async with session_factory() as session:
+            # Find domains that have open ports on the specified ports but no SSL data
+            stmt = (
+                select(Domain.name)
+                .join(PortService, Domain.id == PortService.domain_id)
+                .outerjoin(SSLData, Domain.id == SSLData.domain_id)
+                .where(
+                    PortService.port.in_(ports),
+                    PortService.status == "open",
+                    SSLData.id.is_(None)  # No SSL data exists
+                )
+                .distinct()
+                .limit(batch_size)
+            )
+            
+            result = await session.exec(stmt)
+            domains = result.all()
+            
+            for domain in domains:
+                yield domain
+    finally:
+        await engine.dispose()
 
 
 async def direct_worker(settings: DirectWorkerSettings) -> str:
     runtime = SSLRuntime(settings)
+    engine = create_async_engine(settings.postgres_dsn)
+    session_factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False
+    )
+    
     try:
-        cursor = runtime.mongo.db.dns.find(
-            {
-                "ssl": {"$exists": False},
-                "ssl_scan_failed": {"$exists": False},
-                "cert_scan_failed": {"$exists": False},
-                "ports": {
-                    "$elemMatch": {
-                        "port": {"$in": settings.ports},
-                        "status": "open",
-                        "proto": "tcp",
-                    }
-                },
-            },
-            {"domain": 1},
-            sort=[("$natural", 1)],
-            skip=settings.skip,
-            limit=settings.limit,
-        )
+        async with session_factory() as session:
+            # Find domains that need SSL scanning
+            stmt = (
+                select(Domain.name)
+                .join(PortService, Domain.id == PortService.domain_id)
+                .outerjoin(SSLData, Domain.id == SSLData.domain_id)
+                .where(
+                    PortService.port.in_(settings.ports),
+                    PortService.status == "open", 
+                    SSLData.id.is_(None)  # No SSL data exists
+                )
+                .distinct()
+                .offset(settings.skip)
+                .limit(settings.limit)
+            )
+            
+            result = await session.exec(stmt)
+            domains = result.all()
 
         pending: Set[asyncio.Task[None]] = set()
         semaphore = asyncio.Semaphore(max(1, settings.concurrency))
 
-        async for doc in cursor:
-            domain = doc.get("domain")
-            if not domain:
-                continue
-
+        for domain in domains:
             async def _process(target: str) -> None:
                 async with semaphore:
                     await runtime.process_domain(target)
@@ -485,6 +636,7 @@ async def direct_worker(settings: DirectWorkerSettings) -> str:
             await asyncio.gather(*pending, return_exceptions=True)
         return runtime.stats.summary()
     finally:
+        await engine.dispose()
         await runtime.close()
 
 
@@ -537,7 +689,7 @@ def run_worker_direct(settings: DirectWorkerSettings) -> str:
 
 @click.command()
 @click.option("--worker", "-w", type=int, default=4, show_default=True, help="Worker processes")
-@click.option("--host", "-h", type=str, required=True, help="MongoDB host")
+@click.option("--postgres-dsn", type=str, default=None, help="PostgreSQL DSN (uses settings if not provided)")
 @click.option("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY, show_default=True,
               help="Concurrent TLS scans per worker")
 @click.option("--timeout", type=float, default=DEFAULT_TIMEOUT, show_default=True,
@@ -559,7 +711,7 @@ def run_worker_direct(settings: DirectWorkerSettings) -> str:
 @click.option("--verbose", is_flag=True, help="Enable verbose debug logging")
 def main(
     worker: int,
-    host: str,
+    postgres_dsn: Optional[str],
     concurrency: int,
     timeout: float,
     ports: str,
@@ -571,8 +723,51 @@ def main(
     log_tls: bool,
     verbose: bool,
 ) -> None:
+    """PostgreSQL-backed SSL certificate scanner with RabbitMQ support."""
     log_level = logging.DEBUG if verbose else logging.INFO
     configure_logging(log_level)
+
+    # Use settings or .env file if no explicit DSN provided
+    if not postgres_dsn:
+        try:
+            postgres_dsn = resolve_dsn()
+        except ValueError as exc:
+            click.echo(f"[ERROR] {exc}")
+            click.echo("[INFO] Please set POSTGRES_DSN in environment or .env file")
+            click.echo("[INFO] Example: POSTGRES_DSN=postgresql+asyncpg://"
+                       "user:pass@localhost:5432/dbname")
+            sys.exit(1)
+        except Exception as exc:
+            click.echo(f"[ERROR] Could not resolve PostgreSQL DSN: {exc}")
+            sys.exit(1)
+
+    # Test database connection before proceeding
+    async def test_connection():
+        try:
+            engine = create_async_engine(postgres_dsn)
+            session_factory = async_sessionmaker(
+                bind=engine,
+                class_=AsyncSession,
+                expire_on_commit=False
+            )
+            async with session_factory() as session:
+                from sqlmodel import text
+                result = await session.exec(text("SELECT 1"))
+                result.first()
+            await engine.dispose()
+            return True
+        except Exception as exc:
+            click.echo(f"[ERROR] Database connection test failed: {exc}")
+            click.echo(f"[INFO] DSN: {postgres_dsn}")
+            click.echo("[INFO] Please check:")
+            click.echo("  - PostgreSQL server is running")
+            click.echo("  - Database name, host, port are correct")
+            click.echo("  - Username/password are valid")
+            click.echo("  - Network connectivity to database server")
+            return False
+
+    if not asyncio.run(test_connection()):
+        sys.exit(1)
 
     worker = max(1, worker)
     concurrency = max(1, concurrency)
@@ -580,7 +775,7 @@ def main(
     port_tuple = tuple(sorted({int(p.strip()) for p in ports.split(",") if p.strip()})) or DEFAULT_PORTS
 
     base_settings = WorkerSettings(
-        mongo_host=host,
+        postgres_dsn=postgres_dsn,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
@@ -605,29 +800,48 @@ def main(
                     click.echo(result)
         return
 
-    sync_client = MongoClient(f"mongodb://{host}:27017", tz_aware=True)
-    pending_filter = {
-        "ssl": {"$exists": False},
-        "ssl_scan_failed": {"$exists": False},
-        "cert_scan_failed": {"$exists": False},
-        "ports": {
-            "$elemMatch": {
-                "port": {"$in": list(port_tuple)},
-                "status": "open",
-                "proto": "tcp",
-            }
-        },
-    }
-    total_docs = sync_client.ip_data.dns.count_documents(pending_filter)
+    # Count pending domains
+    async def count_pending():
+        engine = create_async_engine(postgres_dsn)
+        session_factory = async_sessionmaker(
+            bind=engine,
+            class_=AsyncSession,
+            expire_on_commit=False
+        )
+        
+        try:
+            async with session_factory() as session:
+                stmt = (
+                    select(Domain.name)
+                    .join(PortService, Domain.id == PortService.domain_id)
+                    .outerjoin(SSLData, Domain.id == SSLData.domain_id)
+                    .where(
+                        PortService.port.in_(port_tuple),
+                        PortService.status == "open",
+                        SSLData.id.is_(None)  # No SSL data exists
+                    )
+                    .distinct()
+                )
+                result = await session.exec(stmt)
+                return len(result.all())
+        except Exception as exc:
+            log.error("Failed to connect to PostgreSQL: %s", exc)
+            click.echo(f"[ERROR] Database connection failed: {exc}")
+            click.echo(f"[INFO] PostgreSQL DSN: {postgres_dsn}")
+            click.echo("[INFO] Please check your database connection and DSN")
+            return 0
+        finally:
+            await engine.dispose()
+    
+    total_docs = asyncio.run(count_pending())
     click.echo(f"[INFO] total domains to scan: {total_docs}")
 
     if total_docs == 0:
-        sync_client.close()
         click.echo("[INFO] Nothing to scan")
         return
 
     if rabbitmq_url:
-        domains = iter_pending_domains(sync_client, port_tuple)
+        domains = iter_pending_domains(postgres_dsn, port_tuple)
         log.info("Publishing TLS scan jobs to RabbitMQ at %s", rabbitmq_url)
         published = asyncio.run(
             enqueue_domains(
@@ -639,10 +853,8 @@ def main(
             )
         )
         log.info("Queued %d domains onto RabbitMQ queue '%s'", published, queue_name)
-        sync_client.close()
         click.echo("[INFO] Published TLS scan jobs to RabbitMQ. Start workers with --service")
     else:
-        sync_client.close()
         chunk_size = math.ceil(total_docs / worker)
         tasks = []
         start = 0

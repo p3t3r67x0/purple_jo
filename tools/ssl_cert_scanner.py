@@ -227,7 +227,8 @@ class SSLRuntime:
                     domain,
                     port,
                 )
-            cert = ssl_obj.getpeercert() if ssl_obj else None
+                return {"error": f"SSL object missing after successful connection to {domain}:{port}"}
+            cert = ssl_obj.getpeercert()
         finally:
             writer.close()
             with contextlib.suppress(Exception):

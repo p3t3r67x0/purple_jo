@@ -5,33 +5,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.settings import reset_settings_cache, get_settings
-
-
-class DummyColl:
-    def __init__(self):
-        self.docs = []
-
-    async def insert_one(self, doc):  # noqa: D401
-        self.docs.append(doc)
-
-    async def create_index(self, *a, **k):  # noqa: D401
-        return None
-
-    async def find_one_and_update(self, key, update, upsert, return_document):
-        # Minimal rate-limit doc simulation
-        for d in self.docs:
-            if d.get("_key") == key:
-                d["count"] = d.get("count", 0) + 1
-                return d
-        new_doc = {"_key": key, "count": 1}
-        self.docs.append(new_doc)
-        return new_doc
-
-
-class DummyMongo:
-    def __init__(self):
-        self.contact_messages = DummyColl()
-        self.contact_rate_limit = DummyColl()
+from app.deps import get_postgres_session
 
 
 @pytest.fixture(autouse=True)
@@ -47,16 +21,28 @@ def clear_env_and_cache(monkeypatch):
 
 @pytest_asyncio.fixture
 async def client(monkeypatch):  # type: ignore[override]
-    # Patch email sending to avoid network
+    # Patch email and persistence to avoid database work
     from app.routes import contact as contact_module
 
     async def no_email(msg):  # noqa: D401
         return None
     contact_module._send_email_async = no_email  # type: ignore
 
-    # Provide in-memory mongo via app state for dependency resolution
-    original_mongo = getattr(app.state, "mongo", None)
-    app.state.mongo = DummyMongo()
+    async def noop_persist(*_args, **_kwargs):  # type: ignore
+        return None
+
+    contact_module._persist_message = noop_persist  # type: ignore
+
+    async def noop_rate_limit(*_args, **_kwargs):  # type: ignore
+        return None
+
+    contact_module._check_rate_limit = noop_rate_limit  # type: ignore
+
+    async def dummy_session(_request):
+        yield None
+
+    original_override = app.dependency_overrides.get(get_postgres_session)
+    app.dependency_overrides[get_postgres_session] = dummy_session
 
     transport = ASGITransport(app=app)
 
@@ -64,7 +50,10 @@ async def client(monkeypatch):  # type: ignore[override]
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
     finally:
-        app.state.mongo = original_mongo
+        if original_override is not None:
+            app.dependency_overrides[get_postgres_session] = original_override
+        else:
+            app.dependency_overrides.pop(get_postgres_session, None)
 
 
 @pytest.mark.asyncio
@@ -103,6 +92,23 @@ async def test_contact_token_invalid(client: AsyncClient):
 async def test_rate_limit_enforced(client: AsyncClient, monkeypatch):
     monkeypatch.setenv("CONTACT_RATE_LIMIT", "2")
     reset_settings_cache()
+
+    from app.routes import contact as contact_module
+
+    counter = {"count": 0}
+
+    async def limited_rate_limit(_session, _ip):  # type: ignore
+        counter["count"] += 1
+        if counter["count"] > 2:
+            from fastapi import HTTPException, status
+
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded",
+            )
+
+    contact_module._check_rate_limit = limited_rate_limit  # type: ignore
+
     for i in range(2):
         r = await client.post(
             "/contact",
@@ -126,3 +132,24 @@ async def test_rate_limit_enforced(client: AsyncClient, monkeypatch):
         },
     )
     assert r.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_captcha_required_when_secret_set(
+    client: AsyncClient, monkeypatch
+):
+    # Set hCaptcha secret but clear contact token to force captcha path
+    monkeypatch.setenv("HCAPTCHA_SECRET", "test-secret")
+    monkeypatch.delenv("CONTACT_TOKEN", raising=False)
+    reset_settings_cache()
+    
+    payload = {
+        "name": "Tester",
+        "email": "test@example.com",
+        "subject": "Hello",
+        "message": "Test without captcha token",
+        # No captcha_token provided
+    }
+    resp = await client.post("/contact", json=payload)
+    assert resp.status_code == 400
+    assert "captcha_token required" in resp.json()["detail"]

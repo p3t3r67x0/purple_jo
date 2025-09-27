@@ -3,7 +3,7 @@
 from .banners import grab_banner
 from .dns import fetch_dns_records
 from .geoip import fetch_geoip
-from .graph import extract_graph
+from .graph import build_domain_graph
 from .http import fetch_site_headers
 from .live_scan import perform_live_scan
 from .masscan import run_masscan
@@ -15,7 +15,7 @@ __all__ = [
     "grab_banner",
     "fetch_dns_records",
     "fetch_geoip",
-    "extract_graph",
+    "build_domain_graph",
     "fetch_site_headers",
     "perform_live_scan",
     "run_masscan",

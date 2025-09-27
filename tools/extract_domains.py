@@ -5,17 +5,41 @@ import re
 import time
 import math
 import multiprocessing
+import asyncio
+import sys
 import click
-from datetime import datetime
-from urllib.parse import urlparse
+from datetime import datetime, UTC
+from pathlib import Path
 
-from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError, AutoReconnect, CursorNotFound
+# Add the project root to the Python path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+from app.models.postgres import Domain, Url
 
 
-def connect(host):
-    # Create a fresh connection in each worker
-    return MongoClient(f'mongodb://{host}:27017', connect=False)
+def utcnow() -> datetime:
+    """Return current UTC datetime without timezone info."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+async def get_postgres_session(postgres_dsn: str) -> AsyncSession:
+    """Create a PostgreSQL session."""
+    engine = create_async_engine(
+        postgres_dsn,
+        echo=False,
+        pool_size=5,
+        max_overflow=10,
+    )
+    session_factory = async_sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
+    )
+    return session_factory()
 
 
 def match_ipv4(ipv4):
@@ -32,71 +56,116 @@ def find_domain(domain):
     )
 
 
-def retrieve_urls(db_url_data, skip, limit):
-    return list(
-        db_url_data.url.find({'domain_extracted': {'$exists': False}})
-        .sort([("$natural", -1)])
-        .skip(skip)
+async def retrieve_urls(session: AsyncSession, skip: int, limit: int):
+    """Retrieve URLs that haven't had domains extracted yet."""
+    stmt = (
+        select(Url)
+        .where(Url.domain_extracted.is_(None))
+        .order_by(Url.id.desc())
+        .offset(skip)
         .limit(limit)
     )
+    result = await session.exec(stmt)
+    return result.all()
 
 
-def update_data(db_url_data, url_id):
-    db_url_data.url.update_one(
-        {'_id': url_id},
-        {'$set': {'domain_extracted': datetime.utcnow()}},
-        upsert=False
-    )
+async def update_url(session: AsyncSession, url_id: int):
+    """Mark URL as having domain extracted."""
+    stmt = select(Url).where(Url.id == url_id)
+    result = await session.exec(stmt)
+    url = result.first()
+    if url:
+        url.domain_extracted = utcnow()
+        session.add(url)
+        await session.commit()
 
 
-def add_domains(db_url_data, db_ip_data, url_id, domain):
-    update_data(db_url_data, url_id)
+async def add_domains(session: AsyncSession, url_id: int, domain: str):
+    """Add domain and mark URL as processed."""
+    await update_url(session, url_id)
     try:
-        post = {'domain': domain.lower(), 'created': datetime.utcnow()}
-        post_id = db_ip_data.dns.insert_one(post).inserted_id
-        print(f"INFO: added domain {domain} with id {post_id}")
-    except AutoReconnect:
-        time.sleep(5)
-    except DuplicateKeyError as e:
+        # Check if domain already exists
+        stmt = select(Domain).where(Domain.name == domain.lower())
+        result = await session.exec(stmt)
+        existing_domain = result.first()
+        
+        if not existing_domain:
+            # Create new domain
+            new_domain = Domain(
+                name=domain.lower(),
+                created_at=utcnow(),
+                updated_at=utcnow()
+            )
+            session.add(new_domain)
+            await session.commit()
+            print(f"INFO: added domain {domain} with id {new_domain.id}")
+        else:
+            print(f"INFO: domain {domain} already exists")
+    except IntegrityError as e:
+        await session.rollback()
         print(f"Duplicate domain {domain}: {e}")
+    except Exception as e:
+        await session.rollback()
+        print(f"Error adding domain {domain}: {e}")
+        time.sleep(1)
+
+
+async def worker_async(postgres_dsn: str, skip: int, limit: int):
+    """Async worker to process URLs and extract domains."""
+    session = await get_postgres_session(postgres_dsn)
+    
+    try:
+        urls = await retrieve_urls(session, skip, limit)
+        for url in urls:
+            try:
+                domain = find_domain(url.url)
+                if domain is not None and not match_ipv4(domain.group(0)):
+                    print(f"INFO: processing {url.url}")
+                    await add_domains(session, url.id, domain.group(0))
+            except ValueError:
+                continue
+            except Exception as e:
+                print(f"ERROR processing {url.url}: {e}")
+                continue
+    except Exception as e:
+        print(f"ERROR in batch {skip}:{skip+limit}: {e}")
+    finally:
+        await session.close()
+    return f"Worker {skip}:{skip+limit} done"
 
 
 def worker(task):
-    host, skip, limit = task
-    client = connect(host)
-    db_url_data = client.url_data
-    db_ip_data = client.ip_data
+    """Synchronous wrapper for the async worker."""
+    postgres_dsn, skip, limit = task
+    return asyncio.run(worker_async(postgres_dsn, skip, limit))
 
+
+async def count_unprocessed_urls(postgres_dsn: str) -> int:
+    """Count URLs that haven't had domains extracted."""
+    session = await get_postgres_session(postgres_dsn)
     try:
-        urls = retrieve_urls(db_url_data, skip, limit)
-        for url in urls:
-            try:
-                domain = find_domain(url['url'])
-                if domain is not None and not match_ipv4(domain.group(0)):
-                    print(f"INFO: processing {url['url']}")
-                    add_domains(db_url_data, db_ip_data,
-                                url['_id'], domain.group(0))
-            except ValueError:
-                continue
-    except CursorNotFound:
-        print(f"Cursor error for batch {skip}:{skip+limit}")
+        stmt = select(Url).where(Url.domain_extracted.is_(None))
+        result = await session.exec(stmt)
+        urls = result.all()
+        return len(urls)
     finally:
-        client.close()
-    return f"Worker {skip}:{skip+limit} done"
-
+        await session.close()
 
 
 @click.command()
 @click.option('--workers', required=True, type=int, help='number of workers')
-@click.option('--host', required=True, type=str, help='MongoDB host')
-def main(workers, host):
-    client = connect(host)
-    total_docs = client.url_data.url.count_documents(
-        {'domain_extracted': {'$exists': False}})
-    client.close()
+@click.option('--postgres-dsn', required=True, type=str, help='PostgreSQL DSN')
+def main(workers, postgres_dsn):
+    """Extract domains from URLs using PostgreSQL backend."""
+    total_docs = asyncio.run(count_unprocessed_urls(postgres_dsn))
+    print(f"Found {total_docs} URLs to process")
+    
+    if total_docs == 0:
+        print("No URLs to process")
+        return
 
     chunk_size = math.ceil(total_docs / workers)
-    tasks = [(host, i * chunk_size, chunk_size)
+    tasks = [(postgres_dsn, i * chunk_size, chunk_size)
              for i in range(workers)]
 
     with multiprocessing.Pool(processes=workers) as pool:

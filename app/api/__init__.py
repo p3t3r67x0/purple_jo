@@ -12,11 +12,7 @@ from .queries import (
     extract_graph,
 )
 
-from .utils import (
-    fix_mongo_ids,
-    cache_key,
-    extra_fields,
-)
+from .utils import cache_key
 
 # asn lookup comes from services
 from app.services import asn_lookup

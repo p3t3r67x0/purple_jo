@@ -1,7 +1,7 @@
 from email.message import EmailMessage
 import smtplib
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import httpx
 import ipaddress
@@ -16,9 +16,11 @@ from fastapi import (
 )
 from pydantic import BaseModel, EmailStr, constr
 import aiosmtplib
-from motor.motor_asyncio import AsyncIOMotorDatabase
+from sqlalchemy import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.deps import get_mongo
+from app.deps import get_postgres_session
+from app.models.postgres import ContactMessage as ContactMessageModel, ContactRateLimit
 from app.settings import get_settings
 
 logger = logging.getLogger("contact")
@@ -27,7 +29,7 @@ logger.setLevel(logging.INFO)
 router = APIRouter()
 
 
-class ContactMessage(BaseModel):
+class ContactMessageForm(BaseModel):
     name: constr(
         strip_whitespace=True,
         min_length=1,
@@ -60,11 +62,10 @@ def _ip_blocked(ip: str) -> bool:
     deny = _parse_ip_denylist()
     if not deny:
         return False
-    # Support single IPs and CIDR ranges
     try:
         ip_obj = ipaddress.ip_address(ip)
     except Exception:  # noqa: BLE001
-        return True  # Malformed -> block for safety
+        return True
     for entry in deny:
         try:
             if "/" in entry:
@@ -79,7 +80,7 @@ def _ip_blocked(ip: str) -> bool:
     return False
 
 
-def _build_email(data: ContactMessage) -> EmailMessage:
+def _build_email(data: ContactMessageForm) -> EmailMessage:
     msg = EmailMessage()
     s = get_settings()
     msg["From"] = s.contact_from or data.email
@@ -144,62 +145,7 @@ async def _send_email_async(msg: EmailMessage):
             ) from exc
 
 
-_rate_index_created = False
-_message_index_created = False
-
-
-async def _ensure_indexes(mongo: AsyncIOMotorDatabase):
-    global _rate_index_created, _message_index_created
-    if not _rate_index_created:
-        try:
-            # TTL index for rate limit windows
-            await mongo.contact_rate_limit.create_index(
-                "expiresAt", expireAfterSeconds=0
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        _rate_index_created = True
-    if not _message_index_created:
-        try:
-            await mongo.contact_messages.create_index("created_at")
-            await mongo.contact_messages.create_index("ip")
-        except Exception:  # noqa: BLE001
-            pass
-        _message_index_created = True
-
-
-async def _check_rate_limit(
-    mongo: AsyncIOMotorDatabase, ip: str
-) -> None:
-    s = get_settings()
-    limit = s.contact_rate_limit
-    window = s.contact_rate_window  # seconds
-    now = datetime.utcnow()
-    window_start = now - timedelta(
-        seconds=now.second % window,
-        microseconds=now.microsecond,
-    )
-    expires = window_start + timedelta(seconds=window)
-
-    key = {"ip": ip, "window_start": window_start}
-    update = {
-        "$inc": {"count": 1},
-        "$setOnInsert": {"expiresAt": expires},
-    }
-    doc = await mongo.contact_rate_limit.find_one_and_update(
-        key,
-        update,
-        upsert=True,
-        return_document=True,
-    )
-    if doc and doc.get("count", 0) > limit:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limit exceeded. Please try again later.",
-        )
-
-
-def _verify_token(data: ContactMessage):
+def _verify_token(data: ContactMessageForm):
     # Token check only if captcha not configured
     s = get_settings()
     if s.hcaptcha_secret or s.recaptcha_secret:
@@ -215,7 +161,6 @@ def _verify_token(data: ContactMessage):
 async def _verify_captcha(captcha_token: Optional[str], ip: str):
     s = get_settings()
     if not captcha_token:
-        # If a captcha secret is configured, token must be supplied
         if s.hcaptcha_secret or s.recaptcha_secret:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -271,27 +216,69 @@ async def _verify_captcha(captcha_token: Optional[str], ip: str):
         ) from exc
 
 
+async def _check_rate_limit(session: AsyncSession, ip: str) -> None:
+    settings = get_settings()
+    limit = settings.contact_rate_limit
+    window_seconds = settings.contact_rate_window
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(
+        seconds=now.second % window_seconds,
+        microseconds=now.microsecond,
+    )
+    expires_at = window_start + timedelta(seconds=window_seconds)
+
+    stmt = (
+        select(ContactRateLimit)
+        .where(
+            ContactRateLimit.ip_address == ip,
+            ContactRateLimit.window_start == window_start,
+        )
+        .with_for_update()
+    )
+    result = await session.exec(stmt)
+    record = result.scalars().one_or_none()
+
+    if record is None:
+        record = ContactRateLimit(
+            ip_address=ip,
+            window_start=window_start,
+            expires_at=expires_at,
+            count=1,
+        )
+        session.add(record)
+        await session.flush()
+        return
+
+    if record.expires_at <= now:
+        record.window_start = window_start
+        record.expires_at = expires_at
+        record.count = 1
+    else:
+        record.count += 1
+        if record.count > limit:
+            await session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded. Please try again later.",
+            )
+    await session.flush()
+
+
 async def _persist_message(
-    mongo: AsyncIOMotorDatabase,
-    form: ContactMessage,
+    session: AsyncSession,
+    form: ContactMessageForm,
     ip: str,
-    user_agent: Optional[str],
-):
-    doc = {
-        "name": form.name,
-        "email": form.email,
-        "subject": form.subject,
-        "message": form.message,
-        "ip": ip,
-        "user_agent": user_agent,
-        "created_at": datetime.utcnow(),
-        "has_token": bool(form.token),
-        "has_captcha": bool(form.captcha_token),
-    }
-    try:
-        await mongo.contact_messages.insert_one(doc)
-    except Exception:  # noqa: BLE001
-        pass  # Do not block on persistence failure
+) -> None:
+    message = ContactMessageModel(
+        name=form.name,
+        email=form.email,
+        subject=form.subject,
+        message=form.message,
+        ip_address=ip,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(message)
+    await session.flush()
 
 
 @router.post(
@@ -309,17 +296,15 @@ async def _persist_message(
 )
 async def submit_contact(
     request: Request,
-    form: ContactMessage,
+    form: ContactMessageForm,
     tasks: BackgroundTasks,
-    mongo: AsyncIOMotorDatabase = Depends(get_mongo),
+    session: AsyncSession = Depends(get_postgres_session),
 ):
-    """Validate input, enforce rate limits, and queue email delivery for the contact form."""
-    await _ensure_indexes(mongo)
+    """Validate input, enforce rate limits, and queue email delivery."""
+
     _verify_token(form)
 
-    # Client metadata
     ip = request.client.host if request.client else "unknown"
-    user_agent = request.headers.get("user-agent")
 
     if _ip_blocked(ip):
         logger.warning("Blocked contact submission from %s", ip)
@@ -328,17 +313,25 @@ async def submit_contact(
             detail="Forbidden",
         )
 
-    await _check_rate_limit(mongo, ip)
-    await _verify_captcha(form.captcha_token, ip)
-    await _persist_message(mongo, form, ip, user_agent)
+    try:
+        await _check_rate_limit(session, ip)
+        await _verify_captcha(form.captcha_token, ip)
+        await _persist_message(session, form, ip)
+        await session.commit()
+    except HTTPException:
+        await session.rollback()
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await session.rollback()
+        logger.exception("Failed to persist contact message")
+        raise HTTPException(status_code=500, detail="Unable to store message") from exc
 
     msg = _build_email(form)
     tasks.add_task(_send_email_async, msg)
     logger.info(
-        "contact_submission ip=%s email=%s subject_len=%d ua_len=%d",
+        "contact_submission ip=%s email=%s subject_len=%d",
         ip,
         form.email,
         len(form.subject or ""),
-        len(user_agent or ""),
     )
     return {"status": "accepted"}

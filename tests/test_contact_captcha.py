@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.settings import reset_settings_cache
-from tests.utils import build_test_mongo
+from app.deps import get_postgres_session
 
 
 @pytest.fixture(autouse=True)
@@ -28,11 +28,26 @@ def client(monkeypatch):
         return None
 
     monkeypatch.setattr(contact_module, "_send_email_async", no_email)
-    original_mongo = getattr(app.state, "mongo", None)
-    app.state.mongo = build_test_mongo()
+
+    async def noop_persist(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(contact_module, "_persist_message", noop_persist)
+    monkeypatch.setattr(contact_module, "_check_rate_limit", noop_persist)
+
+    async def dummy_session(_request):
+        yield None
+
+    original_override = app.dependency_overrides.get(get_postgres_session)
+    app.dependency_overrides[get_postgres_session] = dummy_session
+
     with TestClient(app) as test_client:
         yield test_client
-    app.state.mongo = original_mongo
+
+    if original_override is not None:
+        app.dependency_overrides[get_postgres_session] = original_override
+    else:
+        app.dependency_overrides.pop(get_postgres_session, None)
 
 
 def _payload(**overrides):

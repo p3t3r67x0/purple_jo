@@ -1,14 +1,21 @@
+"""Dependency helpers for request-scoped PostgreSQL sessions."""
+
+from __future__ import annotations
+
+from typing import AsyncGenerator
+
 from fastapi import Request
-from motor.motor_asyncio import AsyncIOMotorDatabase
+from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.db import db  # your shared db instance
+from app.db_postgres import get_session_factory
 
 
-async def get_mongo(request: Request) -> AsyncIOMotorDatabase:
-    """Return the configured Mongo database, falling back to the default client."""
+async def get_postgres_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
+    """Yield a PostgreSQL session for use within request handlers."""
 
-    mongo_override = getattr(request.app.state, "mongo", None)
-    if mongo_override is not None:
-        return mongo_override
+    session_factory = getattr(request.app.state, "postgres_session_factory", None)
+    if session_factory is None:
+        session_factory = get_session_factory()
 
-    return db
+    async with session_factory() as session:
+        yield session

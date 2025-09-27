@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.settings import reset_settings_cache
-from tests.utils import build_test_mongo
+from app.deps import get_postgres_session
 
 
 @pytest.fixture(autouse=True)
@@ -32,13 +32,39 @@ def client(monkeypatch):
         return None
 
     monkeypatch.setattr(contact_module, "_send_email_async", no_email)
-    # Patch mongo dependency
-    original_mongo = getattr(app.state, "mongo", None)
-    test_mongo = build_test_mongo()
-    app.state.mongo = test_mongo  # simple approach; deps return this
+
+    async def noop_persist(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(contact_module, "_persist_message", noop_persist)
+
+    counter = {"count": 0}
+
+    async def limited_rate_limit(_session, _ip):
+        counter["count"] += 1
+        if counter["count"] > 2:
+            from fastapi import HTTPException, status
+
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded",
+            )
+
+    monkeypatch.setattr(contact_module, "_check_rate_limit", limited_rate_limit)
+
+    async def dummy_session(_request):
+        yield None
+
+    original_override = app.dependency_overrides.get(get_postgres_session)
+    app.dependency_overrides[get_postgres_session] = dummy_session
+
     with TestClient(app) as test_client:
         yield test_client
-    app.state.mongo = original_mongo
+
+    if original_override is not None:
+        app.dependency_overrides[get_postgres_session] = original_override
+    else:
+        app.dependency_overrides.pop(get_postgres_session, None)
 
 
 def _payload(i: int):

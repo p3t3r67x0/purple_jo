@@ -17,7 +17,11 @@ def utcnow() -> datetime:
 class Domain(SQLModel, table=True):
     __tablename__ = "domains"
     __table_args__ = (
-        Index("ix_domains_name", "name", unique=True)
+        Index("ix_domains_name", "name", unique=True),
+        Index("ix_domains_city_updated", "city", "updated_at"),
+        Index("ix_domains_country_updated", "country", "updated_at"),
+        Index("ix_domains_state_updated", "state", "updated_at"),
+        Index("ix_domains_country_code_updated", "country_code", "updated_at"),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -37,7 +41,23 @@ class Domain(SQLModel, table=True):
     header_server: Optional[str] = Field(default=None, max_length=255)
     header_x_powered_by: Optional[str] = Field(default=None, max_length=255)
 
-    # Relationships assigned below after classes are defined
+    # HTTP Response Headers
+    header_content_type: Optional[str] = Field(default=None, max_length=255)
+    header_content_length: Optional[int] = Field(default=None)
+    header_content_encoding: Optional[str] = Field(default=None, max_length=50)
+    header_cache_control: Optional[str] = Field(default=None, max_length=255)
+    header_etag: Optional[str] = Field(default=None, max_length=255)
+    header_set_cookie: Optional[str] = Field(default=None)
+    header_location: Optional[str] = Field(default=None, max_length=2048)
+    header_www_authenticate: Optional[str] = Field(
+        default=None, max_length=255
+    )
+    header_access_control_allow_origin: Optional[str] = Field(
+        default=None, max_length=255
+    )
+    header_strict_transport_security: Optional[str] = Field(
+        default=None, max_length=255
+    )
 
 
 class ARecord(SQLModel, table=True):
@@ -311,7 +331,8 @@ class AdminUser(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     email: str = Field(sa_column=Column("email", String(255), nullable=False))
-    password_hash: str = Field(sa_column=Column("password_hash", String(255), nullable=False))
+    password_hash: str = Field(sa_column=Column(
+        "password_hash", String(255), nullable=False))
     full_name: Optional[str] = Field(default=None, max_length=255)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=utcnow, nullable=False)
@@ -325,7 +346,8 @@ class AdminToken(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="admin_users.id", nullable=False)
-    token_hash: str = Field(sa_column=Column("token_hash", String(128), nullable=False))
+    token_hash: str = Field(sa_column=Column(
+        "token_hash", String(128), nullable=False))
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
     expires_at: datetime = Field(default_factory=utcnow, nullable=False)
 

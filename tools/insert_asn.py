@@ -1,55 +1,170 @@
 #!/usr/bin/env python3
 
-import argparse
+import asyncio
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List
 
-from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError
-
-from datetime import datetime
-
-
-def connect(host):
-    return MongoClient('mongodb://{}:27017'.format(host))
+import asyncpg
+import click
 
 
-def add_asn(db, asn):
-    try:
-        now = datetime.utcnow()
-        post = {'asn': asn, 'created': now}
-        post_id = db.asn.insert_one(post).inserted_id
-
-        print(u'INFO: the asn {} was added with the id {}'.format(asn, post_id))
-    except DuplicateKeyError:
-        return
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
 
-def load_asn_file(filename):
+def _parse_env_file(path: Path) -> dict:
+    """Parse a .env file and return key-value pairs."""
+    env_vars = {}
+    if not path.exists():
+        return env_vars
+
+    with open(path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                env_vars[key.strip()] = value.strip().strip('"\'')
+    return env_vars
+
+
+def resolve_dsn() -> str:
+    """Resolve PostgreSQL DSN from environment or .env file."""
+    # First try environment variables
+    if "POSTGRES_DSN" in os.environ:
+        dsn = os.environ["POSTGRES_DSN"]
+    else:
+        # Try to load from .env file
+        env_vars = _parse_env_file(ENV_PATH)
+        dsn = env_vars.get("POSTGRES_DSN")
+
+        if not dsn:
+            raise ValueError(
+                "POSTGRES_DSN not found in environment or .env file"
+            )
+
+    # Convert SQLAlchemy DSN to asyncpg format
+    if dsn.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
+    if dsn.startswith("postgresql+psycopg://"):
+        return "postgresql://" + dsn[len("postgresql+psycopg://"):]
+    return dsn
+
+
+def utcnow() -> datetime:
+    """Return a naive UTC timestamp compatible with PostgreSQL columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+async def create_postgres_pool(dsn: str) -> asyncpg.Pool:
+    """Create a PostgreSQL connection pool."""
+    return await asyncpg.create_pool(dsn)
+
+
+async def check_asn_table(pool: asyncpg.Pool) -> None:
+    """Check if the ASN table exists and is properly migrated."""
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                    AND table_name = 'asn_records'
+                )
+            """)
+            if not result:
+                raise RuntimeError(
+                    "ASN table not found. Please run 'alembic upgrade head' "
+                    "to create the required database schema."
+                )
+        except Exception as e:
+            print(f"[ERROR] Failed to check ASN table: {e}")
+            raise
+
+
+async def add_asn_record(pool: asyncpg.Pool, cidr: str, asn: str) -> None:
+    """Add a CIDR/ASN record to the database."""
+    async with pool.acquire() as conn:
+        try:
+            now = utcnow()
+            query = (
+                "INSERT INTO asn_records (cidr, asn, created_at) "
+                "VALUES ($1, $2, $3)"
+            )
+            result = await conn.execute(query, cidr, asn, now)
+            if result == "INSERT 0 1":
+                print(f'INFO: CIDR {cidr} -> ASN {asn} was added successfully')
+        except asyncpg.UniqueViolationError:
+            # Record already exists, skip silently
+            pass
+        except Exception as e:
+            print(f"ERROR: Failed to add CIDR {cidr} -> ASN {asn}: {e}")
+
+
+def load_asn_file(filename: str) -> List[tuple]:
+    """Load CIDR/ASN pairs from a text file."""
+    records = []
     with open(filename, 'r') as f:
-        return f.readlines()
+        for line in f:
+            line = line.strip()
+            # Skip empty lines and comments
+            if not line or line.startswith(';'):
+                continue
+            
+            # Parse CIDR and ASN (format: "1.0.0.0/24      13335")
+            parts = line.split()
+            if len(parts) >= 2:
+                cidr = parts[0]
+                asn = parts[1]
+                records.append((cidr, asn))
+    
+    return records
 
 
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input', help='set input file name', type=str, required=True)
-    parser.add_argument('--host', help='set the host', type=str, required=True)
-    args = parser.parse_args()
+async def process_asns(postgres_dsn: str, input_file: str) -> None:
+    """Process ASN file and insert records into PostgreSQL."""
+    pool = await create_postgres_pool(postgres_dsn)
 
-    return args
+    try:
+        # Check if the ASN table exists
+        await check_asn_table(pool)
+
+        # Load CIDR/ASN pairs from file
+        records = load_asn_file(input_file)
+        click.echo(f"[INFO] Loaded {len(records)} CIDR/ASN records from "
+                   f"{input_file}")
+
+        # Process each record
+        for cidr, asn in records:
+            click.echo(f'INFO: Processing {cidr} -> ASN {asn}')
+            await add_asn_record(pool, cidr, asn)
+
+        click.echo("[INFO] ASN processing completed")
+
+    finally:
+        await pool.close()
 
 
-def main():
-    args = argparser()
-    client = connect(args.host)
-    db = client.ip_data
-    db.asn.create_index('asn', unique=True)
+@click.command()
+@click.option(
+    "--input",
+    type=click.Path(exists=True, readable=True),
+    required=True,
+    help="Input file containing CIDR/ASN pairs (e.g., '1.0.0.0/24 13335')"
+)
+def main(input: str):
+    """ASN insertion tool with PostgreSQL backend.
 
-    asns = load_asn_file(args.input)
+    Loads CIDR/ASN pairs from a text file and inserts them into PostgreSQL.
+    Each line should contain a CIDR block and ASN number separated by
+    whitespace. Lines starting with ';' are treated as comments and skipped.
+    """
+    postgres_dsn = resolve_dsn()
 
-    for asn in asns:
-        asn = asn.strip()
+    click.echo("[INFO] Starting ASN insertion")
+    click.echo(f"[INFO] Input file: {input}")
 
-        print(u'INFO: the asn {} is beeing processed'.format(asn))
-        add_asn(db, asn)
+    asyncio.run(process_asns(postgres_dsn, input))
 
 
 if __name__ == '__main__':

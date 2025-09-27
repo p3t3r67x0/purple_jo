@@ -19,41 +19,61 @@ pip install -r tools/requirements.txt
 Most tools require a PostgreSQL connection string via the `POSTGRES_DSN` environment variable or `.env` file:
 
 ```bash
-export POSTGRES_DSN="postgresql+asyncpg://username:password@localhost/purple_jo"
+export POSTGRES_DSN="postgresql+asyncpg://username:password@localhost/netscanner"
 ```
+
+**Quick Setup:**
+1. Install dependencies: `pip install -r tools/requirements.txt`
+2. Set up database: `alembic upgrade head`
+3. Configure environment: Add `POSTGRES_DSN` to your `.env` file
+4. Run tools with appropriate worker counts based on your system resources
+
+**Common Environment Variables:**
+- `POSTGRES_DSN` - PostgreSQL connection string (required)
+- `RABBITMQ_URL` - RabbitMQ connection for distributed processing (optional)
+- `LOG_LEVEL` - Logging verbosity (default: INFO)
 
 **Database Requirements:**
 - PostgreSQL 12+ with async support via asyncpg driver
 - Database schema initialized via Alembic migrations (`alembic upgrade head`)
+- **Consolidated Migration System:** All database changes are now managed through a single comprehensive migration file (`202509271600_consolidated_schema.py`) for simplified setup and maintenance
 - Proper indexes and constraints are automatically created by the migration system
 - Connection pooling is configured per tool for optimal performance
+- QR code support is automatically enabled via schema migration or self-healing table updates
 
 Some scripts also depend on external binaries or services (for example `masscan`, `chromedriver`, or a MaxMind GeoIP database); those prerequisites are called out in their respective sections.
 
 ## Inventory At A Glance
 
-| Script                      | Category      | Purpose                                                                          |
-| --------------------------- | ------------- | -------------------------------------------------------------------------------- |
-| `banner_grabber.py`         | Enrichment    | Capture SSH banners for domains with open port 22.                               |
-| `crawl_urls.py`             | Crawling      | Fetch root pages for pending domains and store discovered links.                 |
-| `cve_2019_19781_scanner.py` | Security      | Probe Citrix ADC appliances for the CVE-2019-19781 path traversal bug.           |
-| `decode_idna.py`            | Normalisation | Convert punycode (`xn--`) hostnames in PostgreSQL back to Unicode.               |
-| `extract_certstream.py`     | Acquisition   | Subscribe to Certstream and ingest newly seen domains.                           |
-| `extract_domains.py`        | Normalisation | Derive domain names from saved URLs.                                             |
+| Script                      | Category      | Purpose                                                                           |
+| --------------------------- | ------------- | --------------------------------------------------------------------------------- |
+| `banner_grabber.py`         | Enrichment    | Capture SSH banners for domains with open port 22.                                |
+| `crawl_urls.py`             | Crawling      | Fetch root pages for pending domains and store discovered links.                  |
+| `cve_2019_19781_scanner.py` | Security      | Probe Citrix ADC appliances for the CVE-2019-19781 path traversal bug.            |
+| `decode_idna.py`            | Normalisation | Convert punycode (`xn--`) hostnames in PostgreSQL back to Unicode.                |
+| `extract_certstream.py`     | Acquisition   | Subscribe to Certstream and ingest newly seen domains.                            |
+| `extract_domains.py`        | Normalisation | Derive domain names from saved URLs.                                              |
 | `extract_geoip.py`          | Enrichment    | Populate GeoIP fields by looking up A records in a MaxMind database (PostgreSQL). |
-| `extract_graph.py`          | Analysis      | Build a relationship graph between domains via DNS/SSL edges.                    |
-| `extract_header.py`         | Enrichment    | Issue HTTP `HEAD` requests and store response headers.                           |
-| `extract_records.py`        | Enrichment    | Resolve common DNS record types for domains lacking data.                        |
-| `extract_whois.py`          | Enrichment    | Fetch WHOIS/ASN details for `dns` or `ipv4` records.                             |
-| `generate_qrcode.py`        | Reporting     | Generate base64 PNG QR codes for HTTPS URLs.                                     |
-| `generate_sitemap.py`       | Reporting     | Merge Selenium-discovered URLs with an existing sitemap.                         |
-| `import_domains.py`         | Ingestion     | Seed the URL collection from a plaintext list.                                   |
-| `import_ip.py`              | Ingestion     | Insert IPv4 addresses (or CIDR ranges) into PostgreSQL subnet tables.           |
-| `import_records.py`         | Ingestion     | Replay JSON lines with DNS answers into PostgreSQL DNS tables.                   |
-| `insert_asn.py`             | Ingestion     | Load AS numbers into PostgreSQL ASN tables.                                      |
-| `masscan_scanner.py`        | Security      | Run `masscan` against claimed IPs and persist open-port data.                    |
-| `screenshot_scraper.py`     | Reporting     | Capture Chrome screenshots of HTTPS landing pages.                               |
-| `ssl_cert_scanner.py`       | Enrichment    | Perform TLS handshakes, archive certificate metadata, and test protocol support. |
+| `extract_graph.py`          | Analysis      | Build a relationship graph between domains via DNS/SSL edges.                     |
+| `extract_header.py`         | Enrichment    | Issue HTTP `HEAD` requests and store response headers.                            |
+| `extract_records.py`        | Enrichment    | Resolve common DNS record types for domains lacking data.                         |
+| `extract_whois.py`          | Enrichment    | Fetch WHOIS/ASN details for `dns` or `ipv4` records.                              |
+| `generate_qrcode.py`        | Reporting     | Generate base64 PNG QR codes for HTTPS URLs (migrated to PostgreSQL).             |
+| `generate_sitemap.py`       | Reporting     | Merge Selenium-discovered URLs with an existing sitemap.                          |
+| `import_domains.py`         | Ingestion     | Seed the URL collection from a plaintext list.                                    |
+| `import_ip.py`              | Ingestion     | Insert IPv4 addresses (or CIDR ranges) into PostgreSQL subnet tables.             |
+| `import_records.py`         | Ingestion     | Replay JSON lines with DNS answers into PostgreSQL DNS tables.                    |
+| `insert_asn.py`             | Ingestion     | Load AS numbers into PostgreSQL ASN tables.                                       |
+| `masscan_scanner.py`        | Security      | Run `masscan` against claimed IPs and persist open-port data.                     |
+| `screenshot_scraper.py`     | Reporting     | Capture Chrome screenshots of HTTPS landing pages.                                |
+| `ssl_cert_scanner.py`       | Enrichment    | Perform TLS handshakes, archive certificate metadata, and test protocol support.  |
+
+## Utility Scripts
+
+| Script                         | Category | Purpose                                                              |
+| ------------------------------ | -------- | -------------------------------------------------------------------- |
+| `add_qrcode_column.py`         | Database | Add the qrcode column to the domains table (one-time setup utility). |
+| `fix_alembic_consolidation.sh` | Database | Fix Alembic version references after migration consolidation.        |
 
 The remainder of this guide documents the behaviour, CLI flags, and workflow for each utility.
 
@@ -136,10 +156,14 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 
 ### generate_qrcode.py
 - **Purpose:** Store a base64-encoded PNG QR code that points to each HTTPS domain.
-- **CLI:** `python tools/generate_qrcode.py --worker 4 --postgres-dsn "postgresql+asyncpg://..."`
+- **CLI:** `python tools/generate_qrcode.py --workers 4`
 - **Details:**
-  - Targets domains without a `qrcode` field; excludes punycode entries via regex.
-  - Creates `https://<domain>` QR codes (`pyqrcode`) and saves them back to PostgreSQL with an `updated_at` timestamp.
+  - **Migrated from MongoDB to PostgreSQL** for consistency with the rest of the project.
+  - Automatically creates the `qrcode` column in the domains table if it doesn't exist.
+  - Targets domains without a `qrcode` field; excludes punycode entries via regex matching.
+  - Creates `https://<domain>` QR codes using `pyqrcode` and saves them back to PostgreSQL with an `updated_at` timestamp.
+  - Uses async connection pooling and multiprocessing for efficient batch processing.
+  - Reads database configuration from `POSTGRES_DSN` environment variable or `.env` file.
 
 ### screenshot_scraper.py
 - **Purpose:** Capture full-page screenshots of HTTPS sites and attach the file name to each domain record.
@@ -200,11 +224,15 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 - **Prerequisites:** A GeoIP2/City `.mmdb` file (GeoLite2 or commercial) accessible on disk.
 
 ### extract_whois.py
-- **Purpose:** Retrieve ASN/WHOIS data for domains or IP addresses using PostgreSQL.
-- **CLI:** `python tools/extract_whois.py --target domains --worker 4 --postgres-dsn "postgresql+asyncpg://..."`
+- **Purpose:** Retrieve ASN/WHOIS data for domains with A records using PostgreSQL.
+- **CLI:** `python tools/extract_whois.py --workers 4 --batch-size 100`
 - **Details:**
-  - Workers claim domains missing WHOIS data, query the `ipwhois` library, and store the response in the whois_records table with an `updated_at` timestamp.
-  - For IP address lookups, WHOIS results are written to subnet lookup tables and enrichment flags are updated.
+  - **Recently Updated:** Fixed database initialization and worker coordination issues.
+  - Workers atomically claim domains missing WHOIS data via a `whois_state` coordination table to prevent race conditions.
+  - Queries the `ipwhois` library for ASN/registry information and stores results in the `whois_records` table.
+  - Uses async connection pooling and multiprocessing for efficient batch processing.
+  - Automatically initializes required database tables and handles schema setup.
+  - Reads database configuration from `POSTGRES_DSN` environment variable or `.env` file.
 
 ### ssl_cert_scanner.py
 - **Purpose:** Perform TLS handshakes, capture certificate metadata, and test supported protocol versions.
@@ -237,11 +265,41 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 
 ## Typical End-to-End Workflow
 
-1. **Seed data:** Run `import_domains.py`, `import_ip.py`, and `insert_asn.py` as needed to populate PostgreSQL.
-2. **Derive domains:** Execute `extract_domains.py` to turn stored URLs into registerable domains.
-3. **Resolve DNS:** Use `extract_records.py` (and optionally `import_records.py`) to enrich each domain with DNS answers stored in relational tables.
-4. **Network enrichment:** Launch `extract_geoip.py`, `extract_header.py`, `ssl_cert_scanner.py`, `extract_whois.py`, `banner_grabber.py`, and `masscan_scanner.py` to gather network metadata.
-5. **Crawling & reporting:** Run `crawl_urls.py`, `generate_qrcode.py`, `screenshot_scraper.py`, and `generate_sitemap.py` for additional context and presentation outputs.
-6. **Continuous discovery:** Keep `extract_certstream.py` (and optional security checks like `cve_2019_19781_scanner.py`) running to ingest newly observed assets.
+1. **Database setup:** Initialize schema with `alembic upgrade head`
+2. **Seed data:** Run `import_domains.py`, `import_ip.py`, and `insert_asn.py` as needed to populate PostgreSQL.
+3. **Derive domains:** Execute `extract_domains.py` to turn stored URLs into registerable domains.
+4. **Resolve DNS:** Use `extract_records.py` to enrich each domain with DNS answers stored in relational tables.
+5. **Network enrichment:** Launch `extract_geoip.py`, `extract_header.py`, `ssl_cert_scanner.py`, `extract_whois.py`, `banner_grabber.py`, and `masscan_scanner.py` to gather network metadata.
+6. **Crawling & reporting:** Run `crawl_urls.py`, `generate_qrcode.py`, `screenshot_scraper.py`, and `generate_sitemap.py` for additional context and presentation outputs.
+7. **Continuous discovery:** Keep `extract_certstream.py` (and optional security checks like `cve_2019_19781_scanner.py`) running to ingest newly observed assets.
+
+**Performance Tips:**
+- Start with small worker counts (2-4) and scale up based on system resources
+- Monitor PostgreSQL connection limits when running multiple tools simultaneously  
+- Use RabbitMQ for distributed processing when scaling across multiple machines
+- Run database-intensive operations during off-peak hours for better performance
+
+## Database Utilities
+
+### add_qrcode_column.py
+- **Purpose:** One-time utility to add the `qrcode` column to the domains table if not present.
+- **CLI:** `python tools/add_qrcode_column.py`
+- **Details:**
+  - Automatically detects if the `qrcode` column exists in the domains table.
+  - Adds the column as `TEXT NULL` if missing, enabling QR code functionality.
+  - Safe to run multiple times; only executes ALTER TABLE if needed.
+  - Uses the same PostgreSQL connection configuration as other tools.
+
+### Migration System
+- **Consolidated Migrations:** The project now uses a single comprehensive Alembic migration (`202509271600_consolidated_schema.py`) instead of multiple incremental migrations.
+- **Setup:** Run `alembic upgrade head` to initialize or update the database schema.
+- **Troubleshooting:** If you encounter Alembic version errors after consolidation, run the `fix_alembic_consolidation.sh` script to update version references.
+
+## Notes
 
 All scripts are idempotent: they rely on marker fields (`*_failed`, `claimed`, `updated_at`, etc.) so that interrupting and re-running them is safe. The PostgreSQL schema uses foreign keys and proper constraints to maintain data integrity. Validate new configurations with a small worker count before scaling out.
+
+**Recent Updates:**
+- **PostgreSQL Migration Complete:** All tools now use PostgreSQL exclusively, with MongoDB dependencies removed.
+- **QR Code Support:** The `generate_qrcode.py` tool has been fully migrated to PostgreSQL with automatic schema updates.
+- **Simplified Migrations:** Database schema management is now handled through a single consolidated Alembic migration for easier setup and maintenance.

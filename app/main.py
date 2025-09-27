@@ -3,9 +3,12 @@ import logging
 
 from fastapi import FastAPI
 
-from app.responses import MongoJSONResponse
+from fastapi.responses import JSONResponse
+
 from app.middleware import log_stats
-from app.db import db, recreate_text_index, TEXT_INDEX_NAME
+from app.db_postgres import (
+    get_engine, get_session_factory, init_db, cleanup_db
+)
 
 from app.routes import (
     query,
@@ -95,27 +98,33 @@ async def lifespan(app: FastAPI):
     if warnings:
         for w in warnings:
             logger.warning("CONFIG: %s", w)
-    active_mongo = getattr(app.state, "mongo", db)
-    if active_mongo is db:
+    
+    engine = None
+    try:
+        await init_db()
+        engine = get_engine()
+        app.state.postgres_engine = engine
+        app.state.postgres_session_factory = get_session_factory()
+        logger.info("PostgreSQL engine initialised")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to initialise PostgreSQL engine: %s", exc)
+    
+    try:
+        yield
+    finally:
+        # Cleanup database connections on shutdown
         try:
-            existing = await db.dns.list_indexes().to_list(length=None)
-            if any(idx.get("name") == TEXT_INDEX_NAME for idx in existing):
-                logger.debug("Text index already present; skipping rebuild")
-            else:
-                await recreate_text_index()
-                logger.info("Created text index")
+            await cleanup_db()
+            logger.info("PostgreSQL connections cleaned up")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Skipping text index rebuild: %s", exc)
-    else:
-        logger.debug("Skipping text index rebuild for custom mongo instance")
-    yield
+            logger.warning("Error cleaning up PostgreSQL: %s", exc)
 
 
 app = FastAPI(
     title="NetScanner API",
     description=API_DESCRIPTION,
     version="0.1.12",
-    default_response_class=MongoJSONResponse,
+    default_response_class=JSONResponse,
     lifespan=lifespan,
     contact={"name": "NetScanner Support", "email": "hello@netscanner.io"},
     license_info={"name": "MIT License",
@@ -125,9 +134,6 @@ app = FastAPI(
 
 # Middleware
 app.middleware("http")(log_stats)
-
-# Mongo connection
-app.state.mongo = db
 
 # Routers
 app.include_router(query.router)

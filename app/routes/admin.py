@@ -1,11 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, status
 from fastapi.security import OAuth2PasswordBearer
-from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import func, select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.auth import (
     create_access_token,
@@ -13,7 +13,8 @@ from app.auth import (
     hash_password,
     verify_password,
 )
-from app.deps import get_mongo
+from app.deps import get_postgres_session
+from app.models.postgres import AdminUser, ContactMessage
 
 router = APIRouter(prefix="/admin", tags=["Admin"])  # Simple prefix
 
@@ -60,33 +61,30 @@ class AdminPasswordGrantForm:
 
 async def get_current_admin(
     token: str = Depends(oauth2_scheme),
-    mongo: AsyncIOMotorDatabase = Depends(get_mongo),
+    session: AsyncSession = Depends(get_postgres_session),
 ) -> AdminProfile:
-    token_doc = await get_active_token(mongo, token)
-    if not token_doc:
+    token_row = await get_active_token(session, token)
+    if token_row is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired access token",
         )
 
-    user_id = token_doc.get("user_id")
-    if not isinstance(user_id, ObjectId):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid access token",
-        )
-
-    user = await mongo.admin_users.find_one({"_id": user_id})
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Admin no longer exists",
-        )
+    user = token_row.user
+    if user is None:
+        stmt = select(AdminUser).where(AdminUser.id == token_row.user_id)
+        result = await session.exec(stmt)
+        user = result.scalars().one_or_none()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Admin no longer exists",
+            )
 
     return AdminProfile(
-        id=str(user["_id"]),
-        email=user["email"],
-        full_name=user.get("full_name"),
+        id=str(user.id),
+        email=user.email,
+        full_name=user.full_name,
     )
 
 
@@ -97,10 +95,12 @@ async def get_current_admin(
 )
 async def signup_admin(
     payload: AdminSignupRequest,
-    mongo: AsyncIOMotorDatabase = Depends(get_mongo),
+    session: AsyncSession = Depends(get_postgres_session),
 ):
     email = payload.email.lower()
-    existing = await mongo.admin_users.find_one({"email": email})
+    stmt = select(AdminUser).where(func.lower(AdminUser.email) == email)
+    result = await session.exec(stmt)
+    existing = result.scalars().one_or_none()
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -108,20 +108,22 @@ async def signup_admin(
         )
 
     password_hash = hash_password(payload.password)
-    now = datetime.utcnow()
-    doc = {
-        "email": email,
-        "password_hash": password_hash,
-        "full_name": payload.full_name,
-        "created_at": now,
-        "updated_at": now,
-    }
+    now = datetime.now(timezone.utc)
+    admin_user = AdminUser(
+        email=email,
+        password_hash=password_hash,
+        full_name=payload.full_name,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(admin_user)
+    await session.commit()
+    await session.refresh(admin_user)
 
-    result = await mongo.admin_users.insert_one(doc)
     return {
-        "id": str(result.inserted_id),
-        "email": email,
-        "full_name": payload.full_name,
+        "id": str(admin_user.id),
+        "email": admin_user.email,
+        "full_name": admin_user.full_name,
     }
 
 
@@ -132,7 +134,7 @@ async def signup_admin(
 )
 async def login_admin(
     form_data: AdminPasswordGrantForm = Depends(),
-    mongo: AsyncIOMotorDatabase = Depends(get_mongo),
+    session: AsyncSession = Depends(get_postgres_session),
 ):
     if form_data.grant_type not in ("", "password", None):
         raise HTTPException(
@@ -141,15 +143,17 @@ async def login_admin(
         )
 
     email = form_data.username.lower()
-    user = await mongo.admin_users.find_one({"email": email})
-    if not user or not verify_password(form_data.password, user.get("password_hash", "")):
+    stmt = select(AdminUser).where(func.lower(AdminUser.email) == email)
+    result = await session.exec(stmt)
+    user = result.scalars().one_or_none()
+    if not user or not verify_password(form_data.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Incorrect username or password",
         )
 
-    token, expires_at = await create_access_token(mongo, user["_id"])
-    expires_in = max(0, int((expires_at - datetime.utcnow()).total_seconds()))
+    token, expires_at = await create_access_token(session, user.id)
+    expires_in = max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds()))
 
     return TokenResponse(access_token=token, token_type="bearer", expires_in=expires_in)
 
@@ -162,23 +166,33 @@ async def login_admin(
     },
 )
 async def list_contact_messages(
-    mongo: AsyncIOMotorDatabase = Depends(get_mongo),
+    session: AsyncSession = Depends(get_postgres_session),
     _admin: AdminProfile = Depends(get_current_admin),
     limit: int = Query(50, ge=1, le=500),
     since_minutes: Optional[int] = Query(None, ge=1, le=60 * 24),
 ):
     """Return the most recent contact form submissions for operational monitoring."""
 
-    query = {}
+    stmt = select(ContactMessage)
     if since_minutes:
-        query["created_at"] = {
-            "$gte": datetime.utcnow() - timedelta(minutes=since_minutes)
-        }
+        since = datetime.now(timezone.utc) - timedelta(minutes=since_minutes)
+        stmt = stmt.where(ContactMessage.created_at >= since)
+    stmt = stmt.order_by(ContactMessage.created_at.desc()).limit(limit)
 
-    cursor = (
-        mongo.contact_messages.find(query, {"_id": 0})
-        .sort("created_at", -1)
-        .limit(limit)
-    )
-    results = await cursor.to_list(length=limit)
-    return {"count": len(results), "results": results}
+    result = await session.exec(stmt)
+    messages = result.scalars().all()
+    items = [
+        {
+            "id": message.id,
+            "name": message.name,
+            "email": message.email,
+            "subject": message.subject,
+            "message": message.message,
+            "ip_address": message.ip_address,
+            "created_at": message.created_at.isoformat()
+            if message.created_at
+            else None,
+        }
+        for message in messages
+    ]
+    return {"count": len(items), "results": items}

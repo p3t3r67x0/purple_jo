@@ -7,8 +7,9 @@ def test_settings_loads_defaults():
     os.environ.pop("CONTACT_RATE_LIMIT", None)
     os.environ.pop("CONTACT_RATE_WINDOW", None)
     reset_settings_cache()
+    os.environ.pop("POSTGRES_POOL_SIZE", None)
     s = get_settings()
-    assert s.mongo_uri.startswith("mongodb://"), "Expected default Mongo URI"
+    assert s.postgres_pool_size == 10, "Default pool size should be 10"
     assert s.contact_rate_limit == 5, "Default contact rate limit should be 5"
 
 

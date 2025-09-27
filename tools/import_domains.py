@@ -5,24 +5,7 @@ import argparse
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 from datetime import datetime
-import sys
-import os
 import re
-import socket
-import idna
-import dns.resolver
-import dns.exception
-import dns.name
-import dns.reversename
-import requests
-from requests.exceptions import RequestException
-from requests.exceptions import ConnectionError
-from requests.exceptions import Timeout
-from requests.exceptions import TooManyRedirects
-from requests.exceptions import InvalidURL
-from requests.exceptions import MissingSchema
-from urllib3.exceptions import NewConnectionError
-from urllib3.exceptions import MaxRetryError
 
 
 def connect(host):
@@ -35,7 +18,7 @@ def add_url(db, url):
         post = {'url': url, 'created': now}
         post_id = db.url.insert_one(post).inserted_id
 
-        print(u'INFO: the url {} was added with the id {}'.format(url, post_id))
+        print(f'INFO: the url {url} was added with the id {post_id}')
     except DuplicateKeyError:
         return
 

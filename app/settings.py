@@ -6,11 +6,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Core
-    mongo_uri: str = Field(
-        default="mongodb://localhost:27017",
-        alias="MONGO_URI",
+    use_postgres: bool = Field(default=True, alias="USE_POSTGRES")
+    postgres_dsn: Optional[str] = Field(default=None, alias="POSTGRES_DSN")
+    postgres_echo: bool = Field(default=False, alias="POSTGRES_ECHO")
+    postgres_pool_size: int = Field(default=10, alias="POSTGRES_POOL_SIZE")
+    postgres_pool_max_overflow: int = Field(
+        default=10,
+        alias="POSTGRES_POOL_MAX_OVERFLOW",
     )
-    db_name: str = Field(default="ip_data", alias="DB_NAME")
+    postgres_pool_timeout: int = Field(
+        default=30,
+        alias="POSTGRES_POOL_TIMEOUT",
+    )
+    postgres_pool_recycle: int = Field(
+        default=3600,
+        alias="POSTGRES_POOL_RECYCLE",
+    )
 
     # Redis
     redis_host: str = Field(default="localhost", alias="REDIS_HOST")
@@ -86,6 +97,8 @@ class Settings(BaseSettings):
                     "or emails will fail."
                 )
             )
+        if not self.postgres_dsn:
+            warnings.append("POSTGRES_DSN is not set; database access will fail.")
         return warnings
 
 

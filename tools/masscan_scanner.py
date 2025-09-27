@@ -1,17 +1,63 @@
 #!/usr/bin/env python3
 import sys
 import json
-import argparse
 import contextlib
 import multiprocessing
 import os
 import subprocess
 import tempfile
-import time
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Dict, Any
 
-from pymongo import MongoClient, UpdateOne
-from pymongo.errors import DuplicateKeyError, AutoReconnect
+import asyncpg
+import asyncio
+import click
+
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+
+
+def _parse_env_file(path: Path) -> Dict[str, str]:
+    """Parse environment variables from .env file."""
+    env_vars = {}
+    if not path.exists():
+        return env_vars
+    
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                env_vars[key.strip()] = value.strip().strip('"\'')
+    return env_vars
+
+
+def resolve_dsn() -> str:
+    """Resolve PostgreSQL DSN from environment or .env file."""
+    env_value = os.environ.get("POSTGRES_DSN")
+    if env_value:
+        dsn = env_value
+    else:
+        file_values = _parse_env_file(ENV_PATH)
+        dsn = file_values.get("POSTGRES_DSN")
+
+    if not dsn:
+        raise RuntimeError(
+            "POSTGRES_DSN must be set as an environment variable "
+            "or in .env file"
+        )
+
+    # Convert SQLAlchemy DSN to asyncpg format
+    if dsn.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
+    if dsn.startswith("postgresql+psycopg://"):
+        return "postgresql://" + dsn[len("postgresql+psycopg://"):]
+    return dsn
+
+
+def utcnow() -> datetime:
+    """Return a naive UTC timestamp compatible with PostgreSQL columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def load_ports(filename):
@@ -24,27 +70,59 @@ def load_ports(filename):
         sys.exit(1)
 
 
-def connect(host):
-    return MongoClient(f"mongodb://{host}:27017", connect=False)
+async def create_postgres_pool(dsn: str) -> asyncpg.Pool:
+    """Create a PostgreSQL connection pool."""
+    return await asyncpg.create_pool(dsn)
 
 
-def claim_ips(db, batch_size):
+async def claim_ips(pool: asyncpg.Pool, batch_size: int) -> List[str]:
     """Atomically claim a batch of IPs for scanning."""
-    docs = list(
-        db.dns.find(
-            {"ports": {"$exists": False}, "claimed_port": {"$ne": True}},  # exclude already claimed_port
-            {"a_record": 1}
-        ).limit(batch_size)
-    )
-    if not docs:
-        return []
-
-    ids = [d["_id"] for d in docs]
-    db.dns.update_many({"_id": {"$in": ids}}, {"$set": {"claimed_port": True}})
-    ips = []
-    for doc in docs:
-        ips.extend(doc.get("a_record", []))
-    return ips
+    async with pool.acquire() as conn:
+        # Create scanning state table if not exists
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS masscan_state (
+                domain_id INTEGER PRIMARY KEY REFERENCES domains(id),
+                claimed_at TIMESTAMP DEFAULT NOW(),
+                scan_completed TIMESTAMP
+            )
+        """)
+        
+        # Step 1: Find and claim unclaimed domains with A records
+        claim_query = """
+            WITH candidates AS (
+                SELECT DISTINCT d.id as domain_id
+                FROM domains d
+                JOIN a_records ar ON d.id = ar.domain_id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM masscan_state ms WHERE ms.domain_id = d.id
+                )
+                ORDER BY d.id
+                LIMIT $1
+            )
+            INSERT INTO masscan_state (domain_id)
+            SELECT domain_id FROM candidates
+            ON CONFLICT (domain_id) DO NOTHING
+            RETURNING domain_id
+        """
+        
+        claimed_rows = await conn.fetch(claim_query, batch_size)
+        if not claimed_rows:
+            return []
+        
+        claimed_domain_ids = [row['domain_id'] for row in claimed_rows]
+        
+        # Step 2: Get IP addresses for claimed domains
+        ip_query = """
+            SELECT array_agg(DISTINCT ar.ip_address) as ip_addresses
+            FROM a_records ar
+            WHERE ar.domain_id = ANY($1)
+        """
+        
+        ip_rows = await conn.fetch(ip_query, claimed_domain_ids)
+        if not ip_rows or not ip_rows[0]['ip_addresses']:
+            return []
+        
+        return ip_rows[0]['ip_addresses']
 
 
 def run_masscan(ips, ports, rate=1000):
@@ -98,7 +176,9 @@ def run_masscan(ips, ports, rate=1000):
                 payload = json.loads(line)
             except json.JSONDecodeError as e:
                 preview = line[:80] + ("..." if len(line) > 80 else "")
-                print(f"[-] Failed to parse masscan JSON line: {e} -> {preview}")
+                print(
+                    f"[-] Failed to parse masscan JSON line: {e} -> {preview}"
+                )
                 continue
 
             if "ip" in payload and payload.get("ports"):
@@ -114,99 +194,171 @@ def run_masscan(ips, ports, rate=1000):
     return []
 
 
-def update_data(db, scan_results, now):
-    """Bulk update lookup + dns collections with scan results."""
-    lookup_ops = []
-    dns_ops = []
+async def update_data(
+    pool: asyncpg.Pool,
+    scan_results: List[Dict[str, Any]],
+    now: datetime
+) -> None:
+    """Bulk update port_services table with scan results."""
+    if not scan_results:
+        return
+    
+    async with pool.acquire() as conn:
+        port_service_inserts = []
+        updated_domains = set()
+        
+        for result in scan_results:
+            ip = result.get("ip")
+            ports_info = result.get("ports", [])
+            if not ip or not ports_info:
+                continue
 
-    for result in scan_results:
-        ip = result.get("ip")
-        ports_info = result.get("ports", [])
-        if not ip or not ports_info:
-            continue
+            # Find domains that have this IP address
+            domain_rows = await conn.fetch("""
+                SELECT d.id as domain_id
+                FROM domains d
+                JOIN a_records ar ON d.id = ar.domain_id
+                WHERE ar.ip_address = $1
+            """, ip)
+            
+            for domain_row in domain_rows:
+                domain_id = domain_row['domain_id']
+                updated_domains.add(domain_id)
+                
+                for port_info in ports_info:
+                    port = port_info.get("port")
+                    status = port_info.get("status", "open")
+                    
+                    # Handle service field - it can be a string or dict
+                    service_info = port_info.get("service", "")
+                    if isinstance(service_info, dict):
+                        # Extract service name from dict, fallback to empty
+                        service = service_info.get("name", "")
+                        # Ensure service is a string
+                        if not isinstance(service, str):
+                            service = str(service) if service else ""
+                    elif isinstance(service_info, str):
+                        service = service_info
+                    else:
+                        # Convert any other type to string
+                        service = str(service_info) if service_info else ""
+                    
+                    if port:
+                        port_service_inserts.append((
+                            domain_id, port, status, service, now
+                        ))
 
-        port_data_list = [
-            {
-                "port": r.get("port"),
-                "proto": r.get("proto", "tcp"),
-                "status": r.get("status", "open"),
-                "reason": r.get("reason", ""),
-            }
-            for r in ports_info
-        ]
+        if port_service_inserts:
+            # First, delete existing port services for these domains
+            # to avoid duplicates (rescans might have different results)
+            domain_ids_for_cleanup = list(updated_domains)
+            if domain_ids_for_cleanup:
+                await conn.execute("""
+                    DELETE FROM port_services
+                    WHERE domain_id = ANY($1)
+                """, domain_ids_for_cleanup)
+            
+            # Insert new port services
+            await conn.executemany("""
+                INSERT INTO port_services (
+                    domain_id, port, status, service, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5)
+            """, port_service_inserts)
+            
+            print(f"[INFO] Inserted/updated {len(port_service_inserts)} "
+                  f"port services for {len(updated_domains)} domains")
 
-        lookup_ops.append(
-            UpdateOne(
-                {"ip": ip},
-                {
-                    "$set": {"updated": now},
-                    "$addToSet": {"ports": {"$each": port_data_list}},
-                },
-                upsert=True,
-            )
+        # Mark domains as scan completed
+        if updated_domains:
+            await conn.execute("""
+                UPDATE masscan_state
+                SET scan_completed = $1
+                WHERE domain_id = ANY($2)
+            """, now, list(updated_domains))
+        
+        # Update domains' updated_at timestamp
+        if updated_domains:
+            await conn.execute("""
+                UPDATE domains
+                SET updated_at = $1
+                WHERE id = ANY($2)
+            """, now, list(updated_domains))
+
+
+async def worker_async(
+    postgres_dsn: str, ports: str, rate: int, batch_size: int
+):
+    """Async worker that scans IPs and updates PostgreSQL."""
+    pool = await create_postgres_pool(postgres_dsn)
+    
+    try:
+        while True:
+            ips = await claim_ips(pool, batch_size)
+            if not ips:
+                print("[INFO] No more IPs to scan")
+                break
+
+            print(f"[INFO] Scanning {len(ips)} IPs")
+            scan_results = run_masscan(ips, ports, rate=rate)
+            await update_data(pool, scan_results, utcnow())
+    finally:
+        await pool.close()
+
+
+def worker(postgres_dsn: str, ports: str, rate: int, batch_size: int):
+    """Synchronous wrapper for the async worker."""
+    asyncio.run(worker_async(postgres_dsn, ports, rate, batch_size))
+
+
+@click.command()
+@click.option(
+    "--workers",
+    type=int,
+    required=True,
+    help="Number of worker processes to run"
+)
+@click.option(
+    "--input",
+    "input_file",
+    type=click.Path(exists=True, readable=True),
+    required=True,
+    help="Path to ports file"
+)
+@click.option(
+    "--batch",
+    type=int,
+    default=500,
+    help="Number of IPs per worker batch"
+)
+@click.option(
+    "--rate",
+    type=int,
+    default=5000,
+    help="Masscan scan rate (packets per second)"
+)
+def main(workers: int, input_file: str, batch: int, rate: int):
+    """Masscan scanner tool with PostgreSQL backend.
+    
+    Scans domains from the database using masscan and stores results.
+    """
+    ports = load_ports(input_file)
+    postgres_dsn = resolve_dsn()
+
+    click.echo(f"[INFO] Ports loaded: {ports}")
+    click.echo(
+        f"[INFO] Starting {workers} processes, "
+        f"batch size {batch}, rate {rate}"
+    )
+
+    with multiprocessing.Pool(processes=workers) as pool:
+        pool.starmap(
+            worker,
+            [(postgres_dsn, ports, rate, batch)] * workers
         )
 
-        dns_ops.append(
-            UpdateOne(
-                {"a_record": {"$in": [ip]}},   # safer than "a_record": ip
-                {"$set": {"updated": now, "ports": port_data_list}},
-                upsert=False,
-            )
-        )
-
-    if lookup_ops:
-        try:
-            res = db.lookup.bulk_write(lookup_ops, ordered=False)
-            print(
-                f"[INFO] bulk updated lookup: {res.modified_count} modified, {res.upserted_count} inserted")
-        except (AutoReconnect, DuplicateKeyError):
-            time.sleep(10)
-
-    if dns_ops:
-        try:
-            res = db.dns.bulk_write(dns_ops, ordered=False)
-            print(f"[INFO] bulk updated dns: {res.modified_count} modified")
-        except (AutoReconnect, DuplicateKeyError):
-            time.sleep(10)
-
-
-def worker(host, ports, rate, batch_size):
-    client = connect(host)
-    db = client.ip_data
-
-    while True:
-        ips = claim_ips(db, batch_size)
-        if not ips:
-            break
-
-        scan_results = run_masscan(ips, ports, rate=rate)
-        update_data(db, scan_results, datetime.utcnow())
-
-    client.close()
-
-
-def argparser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--workers", type=int, required=True,
-                        help="number of processes")
-    parser.add_argument("--input", type=str, required=True, help="ports file")
-    parser.add_argument("--host", type=str, required=True, help="mongo host")
-    parser.add_argument("--batch", type=int, default=500,
-                        help="number of IPs per worker batch")
-    parser.add_argument("--rate", type=int, default=5000, help="masscan rate")
-    return parser.parse_args()
+    click.echo("[INFO] All workers finished")
 
 
 if __name__ == "__main__":
-    args = argparser()
-    ports = load_ports(args.input)
-
-    print(f"[INFO] Ports loaded: {ports}")
-    print(
-        f"[INFO] Starting {args.workers} processes, batch size {args.batch}, rate {args.rate}")
-
-    with multiprocessing.Pool(processes=args.workers) as pool:
-        pool.starmap(
-            worker, [(args.host, ports, args.rate, args.batch)] * args.workers)
-
-    print("[INFO] All workers finished")
+    main()

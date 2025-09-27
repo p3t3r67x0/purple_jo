@@ -1,8 +1,7 @@
-# app/api/utils.py
+"""Shared helpers for API pagination and caching."""
+
 import math
 from typing import Any, Awaitable, Callable, Dict, Iterable, Tuple
-
-from bson import ObjectId
 
 from app.cache import fetch_from_cache
 
@@ -49,34 +48,6 @@ async def cached_paginated_fetch(
     return await fetch_from_cache(key, _populate, ttl=ttl)
 
 
-def fix_mongo_ids(doc):
-    """
-    Recursively convert ObjectId fields in MongoDB documents to strings
-    so they can be serialized as JSON.
-    """
-    if isinstance(doc, list):
-        return [fix_mongo_ids(d) for d in doc]
-    if isinstance(doc, dict):
-        return {k: fix_mongo_ids(v) for k, v in doc.items()}
-    if isinstance(doc, ObjectId):
-        return str(doc)
-    return doc
-
-
 def cache_key(key: str) -> str:
     import re
     return re.sub(r'[\\\/\(\)\'\"\[\],;:#+~\. ]', '-', key)
-
-
-def extra_fields(context: str) -> dict:
-    data = {
-        'created_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$created'}},
-        'updated_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$updated'}},
-        'domain_crawled_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$domain_crawled'}},
-        'header_scan_failed_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$header_scan_failed'}},
-        'ssl.not_after_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_after'}},
-        'ssl.not_before_formatted': {'$dateToString': {'format': '%Y-%m-%d %H:%M:%S', 'date': '$ssl.not_before'}}
-    }
-    if context == 'text':
-        data['score'] = {'$meta': "textScore"}
-    return data

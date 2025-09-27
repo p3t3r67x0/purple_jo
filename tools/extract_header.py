@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Distributed HTTP header extractor backed by RabbitMQ and MongoDB."""
+"""Distributed HTTP header extractor backed by RabbitMQ and PostgreSQL."""
 
 from __future__ import annotations
 
@@ -10,17 +10,17 @@ import math
 import multiprocessing
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import AsyncIterator, Dict, List, Optional, Set, Tuple
 
 import aio_pika
 from aio_pika import DeliveryMode, Message
 from aiormq.exceptions import AMQPConnectionError
+import asyncpg
 import click
 import httpx
 from fake_useragent import UserAgent
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import MongoClient
 
 
 STOP_SENTINEL = b"__STOP__"
@@ -28,9 +28,53 @@ DEFAULT_PREFETCH = 400
 DEFAULT_CONCURRENCY = 200
 DEFAULT_TIMEOUT = 5.0
 DEFAULT_SCHEMES: Tuple[str, ...] = ("http", "https")
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
 
 log = logging.getLogger("extract_header")
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse environment variables from .env file."""
+    env_vars = {}
+    if not path.exists():
+        return env_vars
+    
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                env_vars[key.strip()] = value.strip().strip('"\'')
+    return env_vars
+
+
+def resolve_dsn() -> str:
+    """Resolve PostgreSQL DSN from environment or .env file."""
+    env_value = os.environ.get("POSTGRES_DSN")
+    if env_value:
+        dsn = env_value
+    else:
+        file_values = _parse_env_file(ENV_PATH)
+        dsn = file_values.get("POSTGRES_DSN")
+
+    if not dsn:
+        raise RuntimeError(
+            "POSTGRES_DSN must be set as an environment variable "
+            "or in .env file"
+        )
+
+    # Convert SQLAlchemy DSN to asyncpg format
+    if dsn.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
+    if dsn.startswith("postgresql+psycopg://"):
+        return "postgresql://" + dsn[len("postgresql+psycopg://"):]
+    return dsn
+
+
+def utcnow() -> datetime:
+    """Return a naive UTC timestamp compatible with PostgreSQL columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def configure_logging(level: int) -> None:
@@ -55,7 +99,7 @@ def build_user_agent() -> str:
 
 @dataclass
 class WorkerSettings:
-    mongo_host: str
+    postgres_dsn: str
     rabbitmq_url: Optional[str]
     queue_name: str
     prefetch: int
@@ -99,22 +143,35 @@ class HeaderStats:
         )
 
 
-class MongoAsync:
-    def __init__(self, host: str) -> None:
-        self._client = AsyncIOMotorClient(f"mongodb://{host}:27017", tz_aware=True)
-        self.db = self._client.ip_data
+class PostgresAsync:
+    def __init__(self, dsn: str) -> None:
+        # Convert SQLAlchemy DSN to asyncpg format if needed
+        if dsn.startswith("postgresql+asyncpg://"):
+            dsn = "postgresql://" + dsn[len("postgresql+asyncpg://"):]
+        elif dsn.startswith("postgresql+psycopg://"):
+            dsn = "postgresql://" + dsn[len("postgresql+psycopg://"):]
+        self._dsn = dsn
+        self._pool: Optional[asyncpg.Pool] = None
 
-    def close(self) -> None:
-        self._client.close()
+    async def get_pool(self) -> asyncpg.Pool:
+        if self._pool is None:
+            self._pool = await asyncpg.create_pool(self._dsn)
+        return self._pool
+
+    async def close(self) -> None:
+        if self._pool:
+            await self._pool.close()
 
 
 class HeaderRuntime:
     def __init__(self, settings: WorkerSettings) -> None:
         self.settings = settings
-        self.mongo = MongoAsync(settings.mongo_host)
+        self.db = PostgresAsync(settings.postgres_dsn)
         self.stats = HeaderStats()
         timeout = httpx.Timeout(settings.request_timeout)
-        limits = httpx.Limits(max_keepalive_connections=settings.concurrency * 2)
+        limits = httpx.Limits(
+            max_keepalive_connections=settings.concurrency * 2
+        )
         self.http = httpx.AsyncClient(
             http2=True,
             timeout=timeout,
@@ -125,7 +182,7 @@ class HeaderRuntime:
 
     async def close(self) -> None:
         await self.http.aclose()
-        self.mongo.close()
+        await self.db.close()
 
     async def process_domain(self, domain: str) -> bool:
         domain = domain.strip().lower()
@@ -146,7 +203,9 @@ class HeaderRuntime:
         self._log_headers(domain, headers, final_url, chain)
         return True
 
-    async def _fetch_headers(self, domain: str) -> Tuple[Dict[str, str], str, List[str]]:
+    async def _fetch_headers(
+        self, domain: str
+    ) -> Tuple[Dict[str, str], str, List[str]]:
         last_error: Optional[Exception] = None
         for scheme in self.settings.schemes:
             url = f"{scheme}://{domain}"
@@ -164,8 +223,15 @@ class HeaderRuntime:
                     }
                 )
                 final_url = str(response.url)
-                chain = [str(item.url) for item in response.history] + [final_url] if response.history else [final_url]
-                log.debug("Fetched %s -> %s (%s)", domain, final_url, response.status_code)
+                if response.history:
+                    chain = [str(item.url) for item in response.history]
+                    chain.append(final_url)
+                else:
+                    chain = [final_url]
+                log.debug(
+                    "Fetched %s -> %s (%s)",
+                    domain, final_url, response.status_code
+                )
                 return header_map, final_url, chain
             except httpx.HTTPError as exc:
                 last_error = exc
@@ -179,31 +245,74 @@ class HeaderRuntime:
         final_url: str,
         chain: List[str],
     ) -> None:
-        timestamp = datetime.now()
-        update_fields = {
-            "header": headers,
-            "header_final_url": final_url,
-            "header_redirect_chain": chain,
-            "updated": timestamp,
-        }
-        update_doc = {
-            "$set": update_fields,
-            "$setOnInsert": {"created": timestamp, "domain": domain},
-            "$unset": {"header_scan_failed": ""},
+        timestamp = utcnow()
+        pool = await self.db.get_pool()
+        
+        # Extract specific headers to store in dedicated columns
+        header_updates = {
+            'header_content_type': headers.get('content-type'),
+            'header_content_length': (
+                int(headers.get('content-length'))
+                if headers.get('content-length', '').isdigit()
+                else None
+            ),
+            'header_content_encoding': headers.get('content-encoding'),
+            'header_cache_control': headers.get('cache-control'),
+            'header_etag': headers.get('etag'),
+            'header_set_cookie': headers.get('set-cookie'),
+            'header_location': headers.get('location'),
+            'header_www_authenticate': headers.get('www-authenticate'),
+            'header_access_control_allow_origin': headers.get(
+                'access-control-allow-origin'
+            ),
+            'header_strict_transport_security': headers.get(
+                'strict-transport-security'
+            ),
+            'header_status': headers.get('status'),
+            'header_server': headers.get('server'),
+            'header_x_powered_by': headers.get('x-powered-by'),
         }
 
-        await self.mongo.db.dns.update_one({"domain": domain}, update_doc, upsert=True)
+        async with pool.acquire() as conn:
+            # Build the SET clause dynamically for non-null values
+            set_clauses = ['updated_at = $2']
+            params = [domain, timestamp]
+            param_idx = 3
+            
+            for column, value in header_updates.items():
+                if value is not None:
+                    set_clauses.append(f'{column} = ${param_idx}')
+                    params.append(value)
+                    param_idx += 1
+            
+            set_clause = ', '.join(set_clauses)
+            
+            await conn.execute(f"""
+                INSERT INTO domains (name, created_at, updated_at)
+                VALUES ($1, $2, $2)
+                ON CONFLICT (name) DO UPDATE SET {set_clause}
+            """, *params)
 
     async def _mark_failed(self, domain: str) -> None:
-        timestamp = datetime.now()
-        await self.mongo.db.dns.update_one(
-            {"domain": domain},
-            {
-                "$set": {"header_scan_failed": timestamp},
-                "$setOnInsert": {"created": timestamp, "domain": domain},
-            },
-            upsert=True,
-        )
+        timestamp = utcnow()
+        pool = await self.db.get_pool()
+        
+        async with pool.acquire() as conn:
+            # Create a simple state table for tracking failed scans
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS header_scan_state (
+                    domain_name VARCHAR(255) PRIMARY KEY,
+                    header_scan_failed TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            await conn.execute("""
+                INSERT INTO header_scan_state (domain_name, header_scan_failed)
+                VALUES ($1, $2)
+                ON CONFLICT (domain_name) DO UPDATE SET
+                    header_scan_failed = $2
+            """, domain, timestamp)
 
     def _log_headers(
         self,
@@ -324,57 +433,85 @@ async def enqueue_domains(
 
 
 async def iter_pending_domains(
-    sync_client: MongoClient,
+    postgres_dsn: str,
     batch_size: int = 10_000,
 ) -> AsyncIterator[str]:
-    loop = asyncio.get_running_loop()
-
-    def _iterator() -> List[str]:
-        results: List[str] = []
-        cursor = sync_client.ip_data.dns.find(
-            {
-                "header": {"$exists": False},
-                "header_scan_failed": {"$exists": False},
-                "ports.port": {"$in": [80, 443]},
-            },
-            {"domain": 1},
-            sort=[("$natural", 1)],
-            batch_size=batch_size,
-        )
-        try:
-            for doc in cursor:
-                domain = doc.get("domain")
-                if domain:
-                    results.append(domain)
-        finally:
-            cursor.close()
-        return results
-
-    domains = await loop.run_in_executor(None, _iterator)
-    for domain in domains:
-        yield domain
+    # Convert SQLAlchemy DSN to asyncpg format if needed
+    if postgres_dsn.startswith("postgresql+asyncpg://"):
+        dsn = "postgresql://" + postgres_dsn[len("postgresql+asyncpg://"):]
+    elif postgres_dsn.startswith("postgresql+psycopg://"):
+        dsn = "postgresql://" + postgres_dsn[len("postgresql+psycopg://"):]
+    else:
+        dsn = postgres_dsn
+    
+    pool = await asyncpg.create_pool(dsn)
+    try:
+        async with pool.acquire() as conn:
+            # Ensure the header_scan_state table exists
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS header_scan_state (
+                    domain_name VARCHAR(255) PRIMARY KEY,
+                    header_scan_failed TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            # Query domains that have port 80 or 443 but no header data
+            query = """
+                SELECT DISTINCT d.name, d.updated_at
+                FROM domains d
+                JOIN port_services ps ON d.id = ps.domain_id
+                LEFT JOIN header_scan_state hss ON d.name = hss.domain_name
+                WHERE ps.port IN (80, 443)
+                AND d.header_content_type IS NULL
+                AND d.header_status IS NULL
+                AND hss.header_scan_failed IS NULL
+                ORDER BY d.updated_at DESC
+                LIMIT $1
+            """
+            rows = await conn.fetch(query, batch_size)
+            
+            for row in rows:
+                yield row['name']
+    finally:
+        await pool.close()
 
 
 async def direct_worker(settings: DirectWorkerSettings) -> str:
     runtime = HeaderRuntime(settings)
     try:
-        cursor = runtime.mongo.db.dns.find(
-            {
-                "header": {"$exists": False},
-                "header_scan_failed": {"$exists": False},
-                "ports.port": {"$in": [80, 443]},
-            },
-            {"domain": 1},
-            sort=[("$natural", 1)],
-            skip=settings.skip,
-            limit=settings.limit,
-        )
+        pool = await runtime.db.get_pool()
+        
+        async with pool.acquire() as conn:
+            # Ensure the header_scan_state table exists
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS header_scan_state (
+                    domain_name VARCHAR(255) PRIMARY KEY,
+                    header_scan_failed TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            # Query domains that need header scanning
+            query = """
+                SELECT DISTINCT d.name, d.updated_at
+                FROM domains d
+                JOIN port_services ps ON d.id = ps.domain_id
+                LEFT JOIN header_scan_state hss ON d.name = hss.domain_name
+                WHERE ps.port IN (80, 443)
+                AND d.header_content_type IS NULL
+                AND d.header_status IS NULL
+                AND hss.header_scan_failed IS NULL
+                ORDER BY d.updated_at DESC
+                OFFSET $1 LIMIT $2
+            """
+            rows = await conn.fetch(query, settings.skip, settings.limit)
 
         pending: Set[asyncio.Task[None]] = set()
         semaphore = asyncio.Semaphore(max(1, settings.concurrency))
 
-        async for doc in cursor:
-            domain = doc.get("domain")
+        for row in rows:
+            domain = row['name']
             if not domain:
                 continue
 
@@ -425,7 +562,8 @@ def run_worker(settings: WorkerSettings) -> str:
 def run_worker_direct(settings: DirectWorkerSettings) -> str:
     configure_logging(settings.log_level)
     log.info(
-        "Worker process %s starting (mode=direct, slice=%d:%d, concurrency=%d)",
+        "Worker process %s starting (mode=direct, slice=%d:%d, "
+        "concurrency=%d)",
         os.getpid(),
         settings.skip,
         settings.skip + settings.limit,
@@ -441,28 +579,47 @@ def run_worker_direct(settings: DirectWorkerSettings) -> str:
 
 
 @click.command()
-@click.option("--worker", "-w", type=int, default=4, show_default=True, help="Worker processes")
-@click.option("--host", "-h", type=str, required=True, help="MongoDB host")
-@click.option("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY, show_default=True,
-              help="Concurrent requests per worker")
-@click.option("--request-timeout", type=float, default=DEFAULT_TIMEOUT, show_default=True,
-              help="HTTP request timeout in seconds")
-@click.option("--rabbitmq-url", "-r", type=str, default=None,
-              help="RabbitMQ URL (enables distributed mode)")
-@click.option("--queue-name", "-q", type=str, default="header_scans", show_default=True,
-              help="RabbitMQ queue name")
-@click.option("--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
-              help="RabbitMQ prefetch per worker")
-@click.option("--purge-queue/--no-purge-queue", default=True,
-              help="Purge the queue before enqueuing new domains")
-@click.option("--service", is_flag=True,
-              help="Run as a RabbitMQ-consuming header extraction service")
-@click.option("--log-headers", is_flag=True,
-              help="Log full headers after each successful fetch")
-@click.option("--verbose", is_flag=True, help="Enable verbose debug logging")
+@click.option(
+    "--worker", "-w", type=int, default=4, show_default=True,
+    help="Worker processes"
+)
+@click.option(
+    "--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY,
+    show_default=True, help="Concurrent requests per worker"
+)
+@click.option(
+    "--request-timeout", type=float, default=DEFAULT_TIMEOUT,
+    show_default=True, help="HTTP request timeout in seconds"
+)
+@click.option(
+    "--rabbitmq-url", "-r", type=str, default=None,
+    help="RabbitMQ URL (enables distributed mode)"
+)
+@click.option(
+    "--queue-name", "-q", type=str, default="header_scans",
+    show_default=True, help="RabbitMQ queue name"
+)
+@click.option(
+    "--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
+    help="RabbitMQ prefetch per worker"
+)
+@click.option(
+    "--purge-queue/--no-purge-queue", default=True,
+    help="Purge the queue before enqueuing new domains"
+)
+@click.option(
+    "--service", is_flag=True,
+    help="Run as a RabbitMQ-consuming header extraction service"
+)
+@click.option(
+    "--log-headers", is_flag=True,
+    help="Log full headers after each successful fetch"
+)
+@click.option(
+    "--verbose", is_flag=True, help="Enable verbose debug logging"
+)
 def main(
     worker: int,
-    host: str,
     concurrency: int,
     request_timeout: float,
     rabbitmq_url: Optional[str],
@@ -479,9 +636,12 @@ def main(
     worker = max(1, worker)
     concurrency = max(1, concurrency)
     prefetch = max(1, prefetch)
+    
+    # Get PostgreSQL DSN from environment
+    postgres_dsn = resolve_dsn()
 
     base_settings = WorkerSettings(
-        mongo_host=host,
+        postgres_dsn=postgres_dsn,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
@@ -493,9 +653,13 @@ def main(
 
     if service:
         if not rabbitmq_url:
-            raise click.BadParameter("RabbitMQ URL is required when --service is set")
+            raise click.BadParameter(
+                "RabbitMQ URL is required when --service is set"
+            )
 
-        worker_args = [WorkerSettings(**base_settings.__dict__) for _ in range(worker)]
+        worker_args = [
+            WorkerSettings(**base_settings.__dict__) for _ in range(worker)
+        ]
         if worker == 1:
             click.echo(run_worker(worker_args[0]))
         else:
@@ -505,56 +669,83 @@ def main(
                     click.echo(result)
         return
 
-    sync_client = MongoClient(f"mongodb://{host}:27017", tz_aware=True)
-    pending_filter = {
-        "header": {"$exists": False},
-        "header_scan_failed": {"$exists": False},
-        "ports.port": {"$in": [80, 443]},
-    }
-    total_docs = sync_client.ip_data.dns.count_documents(pending_filter)
-    click.echo(f"[INFO] total domains to scan: {total_docs}")
+    # Count pending domains using PostgreSQL
+    async def count_and_process():
+        pool = await asyncpg.create_pool(postgres_dsn)
+        try:
+            async with pool.acquire() as conn:
+                # Ensure the header_scan_state table exists
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS header_scan_state (
+                        domain_name VARCHAR(255) PRIMARY KEY,
+                        header_scan_failed TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+                
+                query = """
+                    SELECT COUNT(DISTINCT d.name)
+                    FROM domains d
+                    JOIN port_services ps ON d.id = ps.domain_id
+                    LEFT JOIN header_scan_state hss ON d.name = hss.domain_name
+                    WHERE ps.port IN (80, 443)
+                    AND d.header_content_type IS NULL
+                    AND d.header_status IS NULL
+                    AND hss.header_scan_failed IS NULL
+                """
+                total_docs = await conn.fetchval(query)
+            
+            click.echo(f"[INFO] total domains to scan: {total_docs}")
 
-    if total_docs == 0:
-        sync_client.close()
-        click.echo("[INFO] Nothing to scan")
-        return
+            if total_docs == 0:
+                click.echo("[INFO] Nothing to scan")
+                return
 
-    if rabbitmq_url:
-        domains = iter_pending_domains(sync_client)
-        log.info("Publishing header jobs to RabbitMQ at %s", rabbitmq_url)
-        published = asyncio.run(
-            enqueue_domains(
-                rabbitmq_url=rabbitmq_url,
-                queue_name=queue_name,
-                domains=domains,
-                worker_count=worker,
-                purge_queue=purge_queue,
-            )
-        )
-        log.info("Queued %d domains onto RabbitMQ queue '%s'", published, queue_name)
-        sync_client.close()
-        click.echo(
-            "[INFO] Published header jobs to RabbitMQ. Start workers with --service"
-        )
-    else:
-        sync_client.close()
-        chunk_size = math.ceil(total_docs / worker)
-        tasks = []
-        start = 0
-        while start < total_docs:
-            limit = min(chunk_size, total_docs - start)
-            settings = DirectWorkerSettings(
-                **base_settings.__dict__,
-                skip=start,
-                limit=limit,
-            )
-            tasks.append(settings)
-            start += limit
+            if rabbitmq_url:
+                domains = iter_pending_domains(postgres_dsn)
+                log.info(
+                    "Publishing header jobs to RabbitMQ at %s", rabbitmq_url
+                )
+                published = await enqueue_domains(
+                    rabbitmq_url=rabbitmq_url,
+                    queue_name=queue_name,
+                    domains=domains,
+                    worker_count=worker,
+                    purge_queue=purge_queue,
+                )
+                log.info(
+                    "Queued %d domains onto RabbitMQ queue '%s'",
+                    published, queue_name
+                )
+                click.echo(
+                    "[INFO] Published header jobs to RabbitMQ. "
+                    "Start workers with --service"
+                )
+            else:
+                chunk_size = math.ceil(total_docs / worker)
+                tasks = []
+                start = 0
+                while start < total_docs:
+                    limit = min(chunk_size, total_docs - start)
+                    settings = DirectWorkerSettings(
+                        **base_settings.__dict__,
+                        skip=start,
+                        limit=limit,
+                    )
+                    tasks.append(settings)
+                    start += limit
 
-        with multiprocessing.Pool(processes=worker) as pool:
-            log.info("Spawned %d direct worker processes", worker)
-            for result in pool.imap_unordered(run_worker_direct, tasks):
-                click.echo(result)
+                with multiprocessing.Pool(processes=worker) as process_pool:
+                    log.info("Spawned %d direct worker processes", worker)
+                    results = process_pool.imap_unordered(
+                        run_worker_direct, tasks
+                    )
+                    for result in results:
+                        click.echo(result)
+        finally:
+            await pool.close()
+    
+    asyncio.run(count_and_process())
 
 
 if __name__ == "__main__":

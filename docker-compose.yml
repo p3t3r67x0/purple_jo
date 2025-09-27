@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+
+  # DNS Publisher Service (runs once to queue domains)
+  publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile.dns
+    container_name: dns-publisher
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      PYTHONPATH: /app
+    command: [
+      "python", "tools/dns_publisher_service.py",
+      "--postgres-dsn", "${POSTGRES_DSN}",
+      "--rabbitmq-url", "${RABBITMQ_URL}",
+      "--queue-name", "dns_records",
+      "--worker-count", "10",
+      "--batch-size", "5000",
+      "--verbose"
+    ]
+    network_mode: host  # Use host networking to access localhost services
+    restart: "no"  # Run once and exit
+
+  # DNS Worker Services (scalable)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dns
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      PYTHONPATH: /app
+      WORKER_ID: "${HOSTNAME:-worker}"
+    command: [
+      "python", "tools/dns_worker_service.py",
+      "--postgres-dsn", "${POSTGRES_DSN}",
+      "--rabbitmq-url", "${RABBITMQ_URL}",
+      "--queue-name", "dns_records",
+      "--worker-id", "${WORKER_ID}",
+      "--concurrency", "500",
+      "--prefetch", "100",
+      "--dns-timeout", "1.0",
+      "--verbose"
+    ]
+    network_mode: host  # Use host networking to access localhost services
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+# Note: Using host networking, so no custom networks needed
+# Services connect directly to host's PostgreSQL and RabbitMQ

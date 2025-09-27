@@ -1,3 +1,4 @@
+
 import asyncio
 import contextlib
 import json
@@ -7,6 +8,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from app.services import perform_live_scan
+from app.db_postgres import get_session_factory
 
 
 router = APIRouter(prefix="/live", tags=["Live Scans"])
@@ -23,9 +25,18 @@ async def stream_live_scan(websocket: WebSocket, domain: str) -> None:
     async def reporter(event: Dict[str, Any]) -> None:
         await queue.put(event)
 
+    session_factory = getattr(websocket.app.state, "postgres_session_factory", None)
+    if session_factory is None:
+        session_factory = get_session_factory()
+
     async def run_scan() -> None:
         try:
-            await perform_live_scan(websocket.app.state.mongo, domain, reporter=reporter)
+            async with session_factory() as session:
+                await perform_live_scan(
+                    domain,
+                    reporter=reporter,
+                    postgres_session=session,
+                )
         except HTTPException as exc:
             await queue.put(
                 {

@@ -409,7 +409,7 @@ async def migrate(
                     except Exception as exc:  # noqa: BLE001
                         failed += 1
                         await session.rollback()
-                        logger.exception("Failed to migrate domain=%s", doc.get("domain"), exc_info=exc)
+                        logger.exception("Failed to migrate domain=%s", doc.get("domain"))
 
                 if processed % batch_size == 0:
                     logger.info(

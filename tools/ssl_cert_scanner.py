@@ -221,6 +221,12 @@ class SSLRuntime:
         try:
             ssl_obj = writer.get_extra_info("ssl_object")
             # Get certificate from SSL object instead of peercert extra info
+            if ssl_obj is None:
+                log.warning(
+                    "SSL object missing after successful connection to %s:%d. This may indicate a connection or handshake issue.",
+                    domain,
+                    port,
+                )
             cert = ssl_obj.getpeercert() if ssl_obj else None
         finally:
             writer.close()

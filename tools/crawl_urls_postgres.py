@@ -318,22 +318,33 @@ class CrawlRuntime:
 
         async with await self.postgres.get_session() as session:
             inserted_count = 0
+            url_objs = []
             for url in urls:
-                try:
-                    # Create URL object
-                    url_obj = Url(url=url, created_at=utcnow())
+                url_obj = Url(url=url, created_at=utcnow())
+                url_objs.append(url_obj)
+            session.add_all(url_objs)
+            try:
+                await session.commit()
+                inserted_count = len(url_objs)
+            except IntegrityError:
+                # Some URLs already exist (unique constraint violation)
+                await session.rollback()
+                # Try inserting one by one to count only new URLs
+                for url_obj in url_objs:
                     session.add(url_obj)
-                    await session.commit()
-                    inserted_count += 1
-                except IntegrityError:
-                    # URL already exists (unique constraint violation)
-                    await session.rollback()
-                    continue
-                except Exception as exc:
-                    log.warning("Failed to insert URL %s: %s", url, exc)
-                    await session.rollback()
-                    continue
-
+                    try:
+                        await session.commit()
+                        inserted_count += 1
+                    except IntegrityError:
+                        await session.rollback()
+                        continue
+                    except Exception as exc:
+                        log.warning("Failed to insert URL %s: %s", url_obj.url, exc)
+                        await session.rollback()
+                        continue
+            except Exception as exc:
+                log.warning("Failed to batch insert URLs: %s", exc)
+                await session.rollback()
             return inserted_count
 
     async def _claim_domain(self, domain: str) -> bool:

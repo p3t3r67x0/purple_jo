@@ -389,8 +389,12 @@ class DNSRuntime:
                             ))
             elif record_type == "cname_record":
                 cname_records.extend([
-                    CNAMERecord(domain_id=domain_id, target=cname.get('target') if isinstance(cname, dict) else str(cname))
+                    CNAMERecord(domain_id=domain_id, target=str(cname.get('target')).strip())
                     for cname in record_list
+                    if (
+                        (isinstance(cname, dict) and cname.get('target') is not None and str(cname.get('target')).strip()) or
+                        (not isinstance(cname, dict) and str(cname).strip())
+                    )
                 ])
         
         # Bulk add all records at once

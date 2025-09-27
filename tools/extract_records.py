@@ -258,9 +258,12 @@ class DNSRuntime:
                 self._resolver = resolver.Resolver()
                 self._resolver.timeout = timeout
                 self._resolver.lifetime = timeout
-                # Use Google DNS for better reliability
-                self._resolver.nameservers = ['8.8.8.8', '8.8.4.4']
-            
+                # Use DNS servers from environment variable if set, else default to Google DNS
+                nameservers_env = os.environ.get("DNS_NAMESERVERS")
+                if nameservers_env:
+                    self._resolver.nameservers = [ns.strip() for ns in nameservers_env.split(",") if ns.strip()]
+                else:
+                    self._resolver.nameservers = ['8.8.8.8', '8.8.4.4']
             res = self._resolver
             try:
                 items = res.resolve(domain, record_type)

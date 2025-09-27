@@ -167,10 +167,10 @@ async def update_whois_data(
             if whois_data:
                 # Extract WHOIS fields
                 asn = whois_data.get('asn')
-                asn_description = whois_data.get('asn_description', '')[:255]
-                asn_country_code = whois_data.get('asn_country_code', '')[:8]
-                asn_registry = whois_data.get('asn_registry', '')[:255]
-                asn_cidr = whois_data.get('asn_cidr', '')[:64]
+                asn_description = (whois_data.get('asn_description') or '')[:255]
+                asn_country_code = (whois_data.get('asn_country_code') or '')[:8]
+                asn_registry = (whois_data.get('asn_registry') or '')[:255]
+                asn_cidr = (whois_data.get('asn_cidr') or '')[:64]
                 
                 whois_inserts.append((
                     domain_id, asn, asn_description, asn_country_code,

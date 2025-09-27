@@ -20,6 +20,7 @@ from dns.exception import DNSException, Timeout
 from dns.name import EmptyLabel, LabelTooLong
 from dns.resolver import NoAnswer, NoNameservers, NXDOMAIN
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -295,21 +296,16 @@ class DNSRuntime:
                     session.add(domain_obj)
                     try:
                         await session.flush()  # Get the ID
-                    except Exception as e:
+                    except IntegrityError:
                         # Handle unique constraint violation from another process
-                        error_str = str(e).lower()
-                        if ("uniqueviolationerror" in str(type(e)).lower() or
-                                "unique constraint" in error_str):
-                            await session.rollback()
-                            # Retry select to get domain inserted by another process
-                            result = await session.execute(stmt)
-                            domain_obj = result.scalar_one_or_none()
-                            if domain_obj is None:
-                                raise  # If not found, re-raise original error
-                            domain_obj.updated_at = timestamp
-                            session.add(domain_obj)
-                        else:
-                            raise
+                        await session.rollback()
+                        # Retry select to get domain inserted by another process
+                        result = await session.execute(stmt)
+                        domain_obj = result.scalar_one_or_none()
+                        if domain_obj is None:
+                            raise  # If not found, re-raise original error
+                        domain_obj.updated_at = timestamp
+                        session.add(domain_obj)
                 else:
                     domain_obj.updated_at = timestamp
                     session.add(domain_obj)
@@ -429,21 +425,16 @@ class DNSRuntime:
                     session.add(domain_obj)
                     try:
                         await session.flush()
-                    except Exception as e:
+                    except IntegrityError:
                         # Handle unique constraint violation from another process
-                        error_str = str(e).lower()
-                        if ("uniqueviolationerror" in str(type(e)).lower() or
-                                "unique constraint" in error_str):
-                            await session.rollback()
-                            # Retry select for domain from another process
-                            result = await session.execute(stmt)
-                            domain_obj = result.scalar_one_or_none()
-                            if domain_obj is None:
-                                raise  # If not found, re-raise original error
-                            domain_obj.updated_at = timestamp
-                            session.add(domain_obj)
-                        else:
-                            raise
+                        await session.rollback()
+                        # Retry select for domain from another process
+                        result = await session.execute(stmt)
+                        domain_obj = result.scalar_one_or_none()
+                        if domain_obj is None:
+                            raise  # If not found, re-raise original error
+                        domain_obj.updated_at = timestamp
+                        session.add(domain_obj)
                 else:
                     domain_obj.updated_at = timestamp
                     session.add(domain_obj)

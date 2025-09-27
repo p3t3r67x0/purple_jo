@@ -104,6 +104,7 @@ python migrate_mongo_to_postgres.py \
 - ✅ **insert_asn.py** - Fully migrated to PostgreSQL with two-column CIDR/ASN format
 - ✅ **decode_idna.py** - Completely converted from MongoDB to PostgreSQL with async patterns
 - ✅ **ssl_cert_scanner.py** - Fully migrated to PostgreSQL with independent operation
+- ✅ **extract_certstream.py** - Fully migrated to PostgreSQL with modern async patterns
 - ✅ **crawl_urls_postgres.py** - PostgreSQL version available
 - 🔄 **Other tools** - Migration pattern established, can be updated as needed
 
@@ -179,6 +180,14 @@ cert = ssl_obj.getpeercert() if ssl_obj else None
 - Enhanced error handling for database connection failures
 - Supports RabbitMQ distributed processing and direct scanning modes
 - Uses PostgreSQL for domain/port lookup and SSL certificate storage
+
+**extract_certstream.py**:
+- Complete conversion from MongoDB to PostgreSQL with async patterns
+- Replaced `argparse` with modern `click` CLI framework
+- Added `PostgresAsync` class for self-contained database operations
+- Enhanced domain processing with duplicate detection and proper logging
+- Monitors Certificate Transparency logs and stores domains in PostgreSQL
+- Independent operation with DSN resolution from environment/.env files
 
 **Common Improvements**:
 - Modern async/await patterns throughout
@@ -257,9 +266,10 @@ pip uninstall pymongo motor
 
 ### Tools Migration  
 - [x] Update critical tools in `tools/` directory to use PostgreSQL
-- [x] Test tools individually (insert_asn.py, decode_idna.py, ssl_cert_scanner.py)
+- [x] Test tools individually (insert_asn.py, decode_idna.py, ssl_cert_scanner.py, extract_certstream.py)
 - [x] Update tool command-line interfaces to use modern patterns
 - [x] Fix SSL certificate scanner SSL context and certificate extraction issues
+- [x] Convert Certificate Transparency monitor to PostgreSQL
 
 ### Cleanup
 - [x] Remove MongoDB client code from main application

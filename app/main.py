@@ -6,7 +6,9 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from app.middleware import log_stats
-from app.db_postgres import get_engine, get_session_factory, init_db
+from app.db_postgres import (
+    get_engine, get_session_factory, init_db, cleanup_db
+)
 
 from app.routes import (
     query,
@@ -96,14 +98,26 @@ async def lifespan(app: FastAPI):
     if warnings:
         for w in warnings:
             logger.warning("CONFIG: %s", w)
+    
+    engine = None
     try:
         await init_db()
-        app.state.postgres_engine = get_engine()
+        engine = get_engine()
+        app.state.postgres_engine = engine
         app.state.postgres_session_factory = get_session_factory()
         logger.info("PostgreSQL engine initialised")
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to initialise PostgreSQL engine: %s", exc)
-    yield
+    
+    try:
+        yield
+    finally:
+        # Cleanup database connections on shutdown
+        try:
+            await cleanup_db()
+            logger.info("PostgreSQL connections cleaned up")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Error cleaning up PostgreSQL: %s", exc)
 
 
 app = FastAPI(

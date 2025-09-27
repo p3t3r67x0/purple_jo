@@ -5,7 +5,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.settings import reset_settings_cache, get_settings
-from app.deps import get_postgres_session
+from app.deps import get_postgres_session, get_client_ip
 
 
 @pytest.fixture(autouse=True)
@@ -38,22 +38,46 @@ async def client(monkeypatch):  # type: ignore[override]
 
     contact_module._check_rate_limit = noop_rate_limit  # type: ignore
 
-    async def dummy_session(_request):
-        yield None
+    class MockSession:
+        async def rollback(self):
+            pass
+        
+        async def commit(self):
+            pass
+        
+        async def flush(self):
+            pass
+        
+        def add(self, obj):
+            pass
+
+    async def dummy_session(request):
+        yield MockSession()
+
+    def dummy_client_ip():
+        return "127.0.0.1"
 
     original_override = app.dependency_overrides.get(get_postgres_session)
+    original_ip_override = app.dependency_overrides.get(get_client_ip)
     app.dependency_overrides[get_postgres_session] = dummy_session
+    app.dependency_overrides[get_client_ip] = dummy_client_ip
 
     transport = ASGITransport(app=app)
 
     try:
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async with AsyncClient(transport=transport,
+                               base_url="http://test") as ac:
             yield ac
     finally:
         if original_override is not None:
             app.dependency_overrides[get_postgres_session] = original_override
         else:
             app.dependency_overrides.pop(get_postgres_session, None)
+        
+        if original_ip_override is not None:
+            app.dependency_overrides[get_client_ip] = original_ip_override
+        else:
+            app.dependency_overrides.pop(get_client_ip, None)
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.crawl_urls_postgres import PostgresAsync
 
 
-async def test_claiming(postgres_dsn: str):
+async def verify_claiming(postgres_dsn: str):
     """Test the domain claiming functionality."""
     print("Testing domain claiming functionality...")
     
@@ -72,8 +72,8 @@ async def test_claiming(postgres_dsn: str):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python test_claiming.py <postgres_dsn>")
+        print("Usage: python claiming_test.py <postgres_dsn>")
         sys.exit(1)
     
     postgres_dsn = sys.argv[1]
-    asyncio.run(test_claiming(postgres_dsn))
+    asyncio.run(verify_claiming(postgres_dsn))

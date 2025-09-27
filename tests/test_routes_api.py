@@ -1,11 +1,11 @@
 from datetime import datetime
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 from app.main import app
-from app.deps import get_postgres_session
+from app.deps import get_postgres_session, get_client_ip
 
 
 @pytest.fixture
@@ -14,10 +14,27 @@ def client(monkeypatch):
 
     app.dependency_overrides.clear()
 
-    async def dummy_session(_request):
-        yield None
+    class MockSession:
+        async def rollback(self):
+            pass
+        
+        async def commit(self):
+            pass
+        
+        async def flush(self):
+            pass
+        
+        def add(self, obj):
+            pass
+
+    async def dummy_session(request: Request):
+        yield MockSession()
+    
+    def dummy_client_ip():
+        return "127.0.0.1"
 
     app.dependency_overrides[get_postgres_session] = dummy_session
+    app.dependency_overrides[get_client_ip] = dummy_client_ip
 
     from app.routes import contact as contact_module
 
@@ -92,7 +109,8 @@ def test_dns_route_success(client, monkeypatch):
 
     async def fake_fetch(*, session, page=1, page_size=25):
         return {
-            "results": [{"domain": "example.com", "a_record": ["203.0.113.1"]}],
+            "results": [{"domain": "example.com",
+                         "a_record": ["203.0.113.1"]}],
             "total": 1,
             "page": page,
             "page_size": page_size,
@@ -120,7 +138,8 @@ def test_cidr_route_success(client, monkeypatch):
 
     response = client.get("/cidr")
     assert response.status_code == 200
-    assert response.json()["results"][0]["whois"]["asn_cidr"] == "198.51.100.0/24"
+    result = response.json()["results"][0]["whois"]["asn_cidr"]
+    assert result == "198.51.100.0/24"
 
 
 def test_ipv4_route_success(client, monkeypatch):
@@ -262,27 +281,35 @@ def test_live_websocket_handles_disconnect(monkeypatch):
     from app.routes import live as live_routes
 
     async def fake_scan(domain, reporter, postgres_session):
-        await reporter({"type": "progress", "step": "dns", "status": "started"})
+        await reporter({"type": "progress", "step": "dns",
+                        "status": "started"})
 
     monkeypatch.setattr(live_routes, "perform_live_scan", fake_scan)
 
     with TestClient(app) as websocket_client:
-        with pytest.raises(WebSocketDisconnect):
-            with websocket_client.websocket_connect("/live/scan/example.com") as websocket:
-                websocket.close()
+        websocket_url = "/live/scan/example.com"
+        with websocket_client.websocket_connect(websocket_url) as websocket:
+            # Receive initial message to ensure connection is established
+            message = websocket.receive_json()
+            assert message["type"] == "progress"
+            # Close the connection - this should be handled gracefully
+            websocket.close()
+            # Test passes if no exception is raised during close
 
 
 def test_live_websocket_streams_events(monkeypatch):
     from app.routes import live as live_routes
 
     async def fake_scan(domain, reporter, postgres_session):
-        await reporter({"type": "progress", "step": "dns", "status": "started"})
+        await reporter({"type": "progress", "step": "dns",
+                        "status": "started"})
         await reporter({"type": "result", "data": {"domain": domain}})
 
     monkeypatch.setattr(live_routes, "perform_live_scan", fake_scan)
 
     with TestClient(app) as websocket_client:
-        with websocket_client.websocket_connect("/live/scan/example.com") as websocket:
+        websocket_url = "/live/scan/example.com"
+        with websocket_client.websocket_connect(websocket_url) as websocket:
             message1 = websocket.receive_json()
             message2 = websocket.receive_json()
             assert message1["type"] == "progress"

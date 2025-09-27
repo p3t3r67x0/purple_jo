@@ -26,6 +26,13 @@ def _engine_kwargs() -> dict[str, object]:
         "pool_recycle": settings.postgres_pool_recycle,
         "pool_pre_ping": True,
         "future": True,
+        # Additional connection cleanup settings
+        "pool_reset_on_return": "commit",
+        "connect_args": {
+            "server_settings": {
+                "application_name": "purple_jo_app",
+            }
+        },
     }
 
 
@@ -36,7 +43,8 @@ def get_engine() -> AsyncEngine:
     settings = get_settings()
     if not settings.postgres_dsn:
         raise RuntimeError(
-            "POSTGRES_DSN must be configured before using the PostgreSQL engine."
+            "POSTGRES_DSN must be configured before using the "
+            "PostgreSQL engine."
         )
 
     try:
@@ -74,11 +82,27 @@ async def init_db() -> None:
                 SQLModel.metadata.create_all(sync_conn, checkfirst=True)
             except ProgrammingError as exc:  # pragma: no cover - defensive
                 message = str(exc).lower()
-                if any(token in message for token in ("already exists", "existiert bereits", "duplicate")):
+                if any(token in message for token in (
+                    "already exists", "existiert bereits", "duplicate"
+                )):
                     return
                 raise
 
         await conn.run_sync(_create_all)
+
+
+async def cleanup_db() -> None:
+    """Clean up database connections and dispose of the engine."""
+    try:
+        engine = get_engine()
+        await engine.dispose()
+    except Exception:
+        # Ignore cleanup errors
+        pass
+    finally:
+        # Clear the cached engine and session factory
+        get_engine.cache_clear()
+        get_session_factory.cache_clear()
 
 
 __all__ = [
@@ -88,4 +112,5 @@ __all__ = [
     "get_session",
     "get_session_factory",
     "init_db",
+    "cleanup_db",
 ]

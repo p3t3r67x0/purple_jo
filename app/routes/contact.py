@@ -19,8 +19,11 @@ import aiosmtplib
 from sqlalchemy import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.deps import get_postgres_session
-from app.models.postgres import ContactMessage as ContactMessageModel, ContactRateLimit
+from app.db_postgres import get_session_factory
+from app.models.postgres import (
+    ContactMessage as ContactMessageModel,
+    ContactRateLimit,
+)
 from app.settings import get_settings
 
 logger = logging.getLogger("contact")
@@ -298,7 +301,6 @@ async def submit_contact(
     request: Request,
     form: ContactMessageForm,
     tasks: BackgroundTasks,
-    session: AsyncSession = Depends(get_postgres_session),
 ):
     """Validate input, enforce rate limits, and queue email delivery."""
 
@@ -313,18 +315,28 @@ async def submit_contact(
             detail="Forbidden",
         )
 
-    try:
-        await _check_rate_limit(session, ip)
-        await _verify_captcha(form.captcha_token, ip)
-        await _persist_message(session, form, ip)
-        await session.commit()
-    except HTTPException:
-        await session.rollback()
-        raise
-    except Exception as exc:  # noqa: BLE001
-        await session.rollback()
-        logger.exception("Failed to persist contact message")
-        raise HTTPException(status_code=500, detail="Unable to store message") from exc
+    # Get session factory from app state or create new one
+    session_factory = getattr(
+        request.app.state, "postgres_session_factory", None
+    )
+    if session_factory is None:
+        session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        try:
+            await _check_rate_limit(session, ip)
+            await _verify_captcha(form.captcha_token, ip)
+            await _persist_message(session, form, ip)
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            logger.exception("Failed to persist contact message")
+            raise HTTPException(
+                status_code=500, detail="Unable to store message"
+            ) from exc
 
     msg = _build_email(form)
     tasks.add_task(_send_email_async, msg)

@@ -136,6 +136,9 @@ async def _seed_postgres() -> None:
 
 
 async def _update_a_record(new_ip: str) -> None:
+    # Clear caches to ensure fresh connections for this event loop
+    get_engine.cache_clear()
+    get_session_factory.cache_clear()
     session_factory = get_session_factory()
     async with session_factory() as session:
         result = await session.exec(select(ARecord))
@@ -201,6 +204,11 @@ def postgres_client(monkeypatch):
 
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
     
+    # Clear caches again after seeding to ensure fresh connections
+    # for TestClient
+    get_engine.cache_clear()
+    get_session_factory.cache_clear()
+    
     # Override the postgres session dependency to use our test database
     from app.deps import get_postgres_session
     
@@ -221,27 +229,15 @@ def postgres_client(monkeypatch):
     app.dependency_overrides.clear()
     cache_module.cache = original_cache
 
+    # Use the centralized cleanup function
     try:
-        engine = db_postgres.get_engine()
-        if engine:
-            # Avoid event loop issues during teardown
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Schedule disposal for later if loop is running
-                    loop.create_task(engine.dispose())
-                else:
-                    asyncio.run(engine.dispose())
-            except Exception:
-                # Ignore cleanup errors during test teardown
-                pass
-    except RuntimeError:
-        # Engine not available, nothing to clean up
+        from app.db_postgres import cleanup_db
+        asyncio.run(cleanup_db())
+    except Exception:
+        # Ignore cleanup errors during test teardown
         pass
 
     reset_settings_cache()
-    get_engine.cache_clear()
-    get_session_factory.cache_clear()
 
     admin_conn = psycopg.connect(str(admin_url), autocommit=True)
     with admin_conn.cursor() as cur:

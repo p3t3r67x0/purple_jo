@@ -19,3 +19,8 @@ async def get_postgres_session(request: Request) -> AsyncGenerator[AsyncSession,
 
     async with session_factory() as session:
         yield session
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract the client IP address from the request."""
+    return request.client.host if request.client else "unknown"

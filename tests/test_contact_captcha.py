@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.settings import reset_settings_cache
-from app.deps import get_postgres_session
+from app.deps import get_postgres_session, get_client_ip
 
 
 @pytest.fixture(autouse=True)
@@ -34,12 +34,33 @@ def client(monkeypatch):
 
     monkeypatch.setattr(contact_module, "_persist_message", noop_persist)
     monkeypatch.setattr(contact_module, "_check_rate_limit", noop_persist)
+    
+    # Mock IP blocking to avoid Request dependency issues
+    monkeypatch.setattr(contact_module, "_ip_blocked", lambda ip: False)
 
-    async def dummy_session(_request):
-        yield None
+    class MockSession:
+        async def rollback(self):
+            pass
+        
+        async def commit(self):
+            pass
+        
+        async def flush(self):
+            pass
+        
+        def add(self, obj):
+            pass
+
+    async def dummy_session(request):
+        yield MockSession()
+
+    def dummy_client_ip(request):
+        return "127.0.0.1"
 
     original_override = app.dependency_overrides.get(get_postgres_session)
+    original_ip_override = app.dependency_overrides.get(get_client_ip)
     app.dependency_overrides[get_postgres_session] = dummy_session
+    app.dependency_overrides[get_client_ip] = dummy_client_ip
 
     with TestClient(app) as test_client:
         yield test_client
@@ -48,6 +69,11 @@ def client(monkeypatch):
         app.dependency_overrides[get_postgres_session] = original_override
     else:
         app.dependency_overrides.pop(get_postgres_session, None)
+    
+    if original_ip_override is not None:
+        app.dependency_overrides[get_client_ip] = original_ip_override
+    else:
+        app.dependency_overrides.pop(get_client_ip, None)
 
 
 def _payload(**overrides):

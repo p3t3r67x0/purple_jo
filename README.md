@@ -1,6 +1,6 @@
 # NetScanner - Network Intelligence API
 
-A comprehensive network intelligence and domain analysis API built with **FastAPI**. NetScanner provides ASN lookups, domain analysis, live scanning capabilities, and network relationship mapping through a high-performance async API.
+A comprehensive network intelligence and domain analysis API built with **FastAPI** and **PostgreSQL**. NetScanner provides ASN lookups, domain analysis, live scanning capabilities, and network relationship mapping through a high-performance async API.
 
 ## 🚀 Features
 
@@ -10,8 +10,9 @@ A comprehensive network intelligence and domain analysis API built with **FastAP
 - **DNS Intelligence**: DNS record analysis and domain relationships
 - **Graph Analysis**: Network relationship mapping and visualization data
 - **Trend Analytics**: Request patterns and usage statistics
-- **High Performance**: Async FastAPI with PostgreSQL backend
+- **High Performance**: Async FastAPI with PostgreSQL backend and connection pooling
 - **Interactive Documentation**: Auto-generated OpenAPI/Swagger docs
+- **Modern Migration**: Fully migrated from MongoDB to PostgreSQL for better performance
 
 ## 📋 Prerequisites
 
@@ -562,13 +563,26 @@ sudo systemctl enable certbot.timer
 
 ## 🛠️ Development Tools
 
-The project includes various tools in the `tools/` directory:
+The project includes various PostgreSQL-powered tools in the `tools/` directory:
 
+**✅ Fully Migrated Tools:**
+- `ssl_cert_scanner.py` - Distributed SSL certificate analysis with PostgreSQL and RabbitMQ
+- `extract_certstream.py` - Certificate Transparency log monitor for domain discovery
+- `decode_idna.py` - IDNA domain decoder with async PostgreSQL operations
+- `insert_asn.py` - ASN data importer with CIDR/ASN mapping
+
+**🔧 Additional Tools:**
 - `extract_domains.py` - Domain extraction from URLs
 - `import_domains.py` - Bulk domain import
 - `banner_grabber.py` - Network banner collection
-- `ssl_cert_scanner.py` - SSL certificate analysis
 - `masscan_scanner.py` - Port scanning integration
+- `dns_shared.py` - Shared DNS utilities with PostgreSQL backend
+
+All migrated tools feature:
+- Modern async/await patterns with SQLAlchemy
+- Click-based CLI interfaces
+- Independent operation with `.env` configuration
+- Comprehensive error handling and logging
 
 ## 🤝 Contributing
 

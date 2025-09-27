@@ -186,9 +186,18 @@ def grab_banner(ip: str, port: int, timeout: float) -> str | None:
         else:
             print(f"WARN: empty banner from {ip}:{port}")
         return decoded
-    except Exception as exc:  # noqa: BLE001
-        print(f"ERROR: failed to grab banner from {ip}:{port} -> {exc}")
+    except socket.timeout as exc:
+        print(f"ERROR: timeout while grabbing banner from {ip}:{port} -> {exc}")
         return None
+    except ConnectionRefusedError as exc:
+        print(f"ERROR: connection refused for {ip}:{port} -> {exc}")
+        return None
+    except OSError as exc:
+        print(f"ERROR: OS error while grabbing banner from {ip}:{port} -> {exc}")
+        return None
+    except Exception as exc:
+        print(f"ERROR: unexpected error while grabbing banner from {ip}:{port} -> {exc}")
+        raise
 
 
 async def _finalize_state_with_conn(

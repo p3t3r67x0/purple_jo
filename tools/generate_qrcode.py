@@ -221,7 +221,7 @@ def main(workers: int):
         
         # Last worker gets any remaining domains
         if i == workers - 1:
-            limit = total_domains - skip
+            limit = max(0, total_domains - skip)
         
         if limit <= 0:
             break

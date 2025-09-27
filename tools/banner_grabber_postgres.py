@@ -109,35 +109,43 @@ async def retrieve_batch(
     
     filter_clause = _reset_failed_filter_clause(retry_failed)
     
-    query = f"""
-        WITH candidates AS (
-            SELECT d.id, d.name
-            FROM domains d
-            LEFT JOIN banner_scan_state bss ON d.id = bss.domain_id
-            WHERE {filter_clause}
-            AND EXISTS (
-                SELECT 1 FROM port_services ps 
-                WHERE ps.domain_id = d.id AND ps.port = $1
-            )
-            ORDER BY d.updated_at DESC
-            LIMIT $2
-            FOR UPDATE SKIP LOCKED
+    # Step 1: Select and lock candidate domain IDs from domains table only
+    select_query = f"""
+        SELECT d.id
+        FROM domains d
+        LEFT JOIN banner_scan_state bss ON d.id = bss.domain_id
+        WHERE {filter_clause}
+        AND EXISTS (
+            SELECT 1 FROM port_services ps 
+            WHERE ps.domain_id = d.id AND ps.port = $1
         )
-        INSERT INTO banner_scan_state (domain_id, banner_scan_started, port)
-        SELECT c.id, $3, $1
-        FROM candidates c
-        ON CONFLICT (domain_id) DO UPDATE SET
-            banner_scan_started = $3,
-            banner_scan_failed = NULL
-        RETURNING domain_id, (
-            SELECT name FROM domains WHERE id = domain_id
-        ) as domain_name
+        ORDER BY d.updated_at DESC
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
     """
     
     now = utcnow()
     
     async with pool.acquire() as conn:
-        rows = await conn.fetch(query, port, batch_size, now)
+        # Step 1: Claim candidate domain IDs
+        candidate_rows = await conn.fetch(select_query, port, batch_size)
+        candidate_ids = [row["id"] for row in candidate_rows]
+        if not candidate_ids:
+            return []
+        
+        # Step 2: Insert/update banner_scan_state for claimed domains
+        insert_query = f"""
+            INSERT INTO banner_scan_state (domain_id, banner_scan_started, port)
+            SELECT id, $2, $1
+            FROM unnest($3::int[]) AS id
+            ON CONFLICT (domain_id) DO UPDATE SET
+                banner_scan_started = $2,
+                banner_scan_failed = NULL
+            RETURNING domain_id, (
+                SELECT name FROM domains WHERE id = domain_id
+            ) as domain_name
+        """
+        rows = await conn.fetch(insert_query, port, now, candidate_ids)
         return [
             {
                 "domain_id": row["domain_id"],

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -127,7 +128,8 @@ async def retrieve_batch(
             if not selections:
                 return []
 
-            ids = [int(row["id"]) for row in selections]
+            # Ensure unique IDs to avoid CardinalityViolationError
+            ids = list(set(int(row["id"]) for row in selections))
             now = utcnow()
 
             await conn.execute(
@@ -172,32 +174,51 @@ async def retrieve_batch(
 
 
 def grab_banner(ip: str, port: int, timeout: float) -> str | None:
-    """Attempt to read an SSH banner from ``ip:port``."""
-
+    """Attempt to read an SSH banner from ``ip:port`` with optimizations."""
+    sock = None
     try:
+        # Create socket with optimizations
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.settimeout(timeout)
+
+        # Connect and read banner
         sock.connect((ip, port))
-        banner = sock.recv(1024)
-        sock.close()
-        decoded = banner.decode("utf-8", errors="ignore").strip()
-        if decoded:
-            print(f"INFO: grabbed banner from {ip}:{port} -> {decoded}")
-        else:
-            print(f"WARN: empty banner from {ip}:{port}")
-        return decoded
-    except socket.timeout as exc:
-        print(f"ERROR: timeout while grabbing banner from {ip}:{port} -> {exc}")
-        return None
-    except ConnectionRefusedError as exc:
-        print(f"ERROR: connection refused for {ip}:{port} -> {exc}")
-        return None
-    except OSError as exc:
-        print(f"ERROR: OS error while grabbing banner from {ip}:{port} -> {exc}")
-        return None
+
+        # Read with a reasonable buffer size
+        banner = sock.recv(4096)  # Increased buffer for larger banners
+
+        if not banner:
+            return None
+
+        # Clean the banner: remove null bytes and non-printable characters
+        cleaned = banner.replace(b'\x00', b'').strip()
+        if not cleaned:
+            return None
+
+        decoded = cleaned.decode("utf-8", errors="ignore").strip()
+        if not decoded:
+            return None
+
+        # Further clean: remove control characters except newlines/tabs
+        decoded = ''.join(char for char in decoded
+                          if char.isprintable() or char in '\n\r\t').strip()
+
+        return decoded if decoded else None
+
+    except socket.timeout:
+        return None  # Silent timeout - very common
+    except (ConnectionRefusedError, OSError):
+        return None  # Silent connection errors - also common
     except Exception as exc:
-        print(f"ERROR: unexpected error while grabbing banner from {ip}:{port} -> {exc}")
-        raise
+        print(f"ERROR: unexpected error {ip}:{port} -> {exc}")
+        return None
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass  # Ignore close errors
 
 
 async def _finalize_state_with_conn(
@@ -275,7 +296,9 @@ async def persist_success(
                 now,
                 domain_id,
             )
-            await _finalize_state_with_conn(conn, domain_id, failed=False, failure_reason=None)
+            await _finalize_state_with_conn(
+                conn, domain_id, failed=False, failure_reason=None
+            )
 
 
 async def persist_failure(
@@ -286,7 +309,123 @@ async def persist_failure(
 ) -> None:
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await _finalize_state_with_conn(conn, domain_id, failed=True, failure_reason=error)
+            await _finalize_state_with_conn(
+                conn, domain_id, failed=True, failure_reason=error
+            )
+
+
+async def persist_batch_results(
+    pool: asyncpg.Pool,
+    successes: list[tuple[int, str]],
+    failures: list[tuple[int, str]],
+) -> None:
+    """Batch persist results for better database performance."""
+    if not successes and not failures:
+        return
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            now = utcnow()
+
+            # Batch update successful banners
+            if successes:
+                await conn.executemany(
+                    """
+                    UPDATE domains
+                    SET banner = $2,
+                        updated_at = $3
+                    WHERE id = $1
+                    """,
+                    [(domain_id, banner, now)
+                     for domain_id, banner in successes]
+                )
+
+                # Batch update success states
+                await conn.executemany(
+                    """
+                    INSERT INTO banner_scan_state (
+                        domain_id, in_progress, last_attempted_at,
+                        last_failed_at, failure_reason
+                    )
+                    VALUES ($1, FALSE, $2, NULL, NULL)
+                    ON CONFLICT (domain_id)
+                    DO UPDATE SET
+                        in_progress = FALSE,
+                        last_attempted_at = $2,
+                        last_failed_at = NULL,
+                        failure_reason = NULL
+                    """,
+                    [(domain_id, now) for domain_id, _ in successes]
+                )
+
+            # Batch update failure states
+            if failures:
+                await conn.executemany(
+                    """
+                    INSERT INTO banner_scan_state (
+                        domain_id, in_progress, last_attempted_at,
+                        last_failed_at, failure_reason
+                    )
+                    VALUES ($1, FALSE, $2, $3, $4)
+                    ON CONFLICT (domain_id)
+                    DO UPDATE SET
+                        in_progress = FALSE,
+                        last_attempted_at = $2,
+                        last_failed_at = $3,
+                        failure_reason = $4
+                    """,
+                    [(domain_id, now, now, error[:500])
+                     for domain_id, error in failures]
+                )
+
+
+async def process_banner_batch(
+    items: list[dict[str, str | int]],
+    port: int,
+    timeout: float,
+    pool: asyncpg.Pool,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """Process banner scans concurrently with batch DB operations."""
+    async def scan_single_domain(
+        item: dict[str, str | int]
+    ) -> tuple[int, str, str, str | None]:
+        async with semaphore:
+            domain_id = int(item["id"])
+            domain = str(item["domain"])
+            ip = str(item["ip"])
+
+            banner = await asyncio.to_thread(grab_banner, ip, port, timeout)
+            return domain_id, domain, ip, banner
+
+    # Process all items in the batch concurrently
+    tasks = [scan_single_domain(item) for item in items]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Separate successes and failures for batch processing
+    successes: list[tuple[int, str]] = []
+    failures: list[tuple[int, str]] = []
+
+    for result in results:
+        if isinstance(result, Exception):
+            continue  # Skip exceptions for now
+
+        domain_id, domain, ip, banner = result
+        if banner:
+            successes.append((domain_id, banner))
+            print(f"INFO: grabbed banner for {domain} ({ip})")
+        else:
+            failures.append(
+                (domain_id, f"No banner response from {ip}:{port}")
+            )
+
+    # Batch persist all results
+    await persist_batch_results(pool, successes, failures)
+
+    if successes:
+        print(f"INFO: stored {len(successes)} successful banners")
+    if failures:
+        print(f"INFO: recorded {len(failures)} failed attempts")
 
 
 async def worker(
@@ -296,30 +435,51 @@ async def worker(
     port: int,
     timeout: float,
     retry_failed: bool,
+    concurrent_scans: int = 10,
+    limit: int | None = None,
 ) -> None:
+    """Worker function using optimized batch processing with concurrency."""
     label = f"worker-{worker_index}"
+    processed_count = 0
+    start_time = time.time()
+
     while True:
-        batch = await retrieve_batch(pool, batch_size, port, retry_failed)
-        if not batch:
-            print(f"[{label}] no more domains to process")
+        # Check limit before retrieving next batch
+        if limit and processed_count >= limit:
+            print(f"[{label}] reached limit of {limit} domains")
             break
 
-        print(f"[{label}] processing {len(batch)} domains")
-        for item in batch:
-            domain_id = int(item["id"])
-            domain = str(item["domain"])
-            ip = str(item["ip"])
+        # Adjust batch size if we're approaching the limit
+        effective_batch_size = batch_size
+        if limit:
+            remaining = limit - processed_count
+            effective_batch_size = min(batch_size, remaining)
 
-            banner = await asyncio.to_thread(grab_banner, ip, port, timeout)
-            if banner:
-                await persist_success(pool, domain_id=domain_id, banner=banner)
-                print(f"INFO: stored banner for {domain} ({ip})")
-            else:
-                await persist_failure(
-                    pool,
-                    domain_id=domain_id,
-                    error=f"No banner response from {ip}:{port}",
-                )
+        # Retrieve a batch of domains to process
+        batch = await retrieve_batch(
+            pool, effective_batch_size, port, retry_failed
+        )
+        if not batch:
+            elapsed = time.time() - start_time
+            rate = processed_count / elapsed if elapsed > 0 else 0
+            print(f"[{label}] completed {processed_count} domains "
+                  f"in {elapsed:.2f}s ({rate:.1f}/sec)")
+            break
+
+        batch_count = len(batch)
+        processed_count += batch_count
+
+        print(f"[{label}] processing {batch_count} domains")
+        batch_start = time.time()
+
+        # Process the batch with optimized concurrent scanning
+        semaphore = asyncio.Semaphore(concurrent_scans)
+        await process_banner_batch(batch, port, timeout, pool, semaphore)
+
+        batch_time = time.time() - batch_start
+        batch_rate = batch_count / batch_time if batch_time > 0 else 0
+        print(f"[{label}] batch completed: {batch_count} domains "
+              f"in {batch_time:.2f}s ({batch_rate:.1f}/sec)")
 
 
 async def run_async(
@@ -328,21 +488,34 @@ async def run_async(
     port: int,
     timeout: float,
     retry_failed: bool,
+    limit: int | None = None,
 ) -> None:
     dsn = resolve_dsn()
 
     min_size = max(1, min(worker_count, 4))
     max_size = max(worker_count * 2, min_size)
 
-    async with asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size) as pool:
+    async with asyncpg.create_pool(
+        dsn, min_size=min_size, max_size=max_size
+    ) as pool:
         await ensure_state_table(pool)
-        tasks = [
-            asyncio.create_task(
-                worker(i + 1, pool, batch, port, timeout, retry_failed)
+
+        # If limit is specified, implement simple coordination
+        if limit:
+            print(f"INFO: Processing up to {limit} domains")
+            # For simplicity with limit, use single worker approach
+            await worker(
+                1, pool, batch, port, timeout, retry_failed, limit=limit
             )
-            for i in range(worker_count)
-        ]
-        await asyncio.gather(*tasks)
+        else:
+            # Use multiple workers for unlimited processing
+            tasks = [
+                asyncio.create_task(
+                    worker(i + 1, pool, batch, port, timeout, retry_failed)
+                )
+                for i in range(worker_count)
+            ]
+            await asyncio.gather(*tasks)
 
 
 @click.command(help=__doc__)
@@ -379,18 +552,27 @@ async def run_async(
     is_flag=True,
     help="Re-attempt domains previously marked as failed",
 )
+@click.option(
+    "--limit",
+    type=int,
+    help="Maximum number of domains to process (for testing)",
+)
 def main(
     worker_count: int,
     batch: int,
     port: int,
     timeout: float,
     retry_failed: bool,
+    limit: int | None,
 ) -> None:
+    limit_str = f" limit={limit}" if limit else ""
     print(
         "INFO: starting banner grabber | "
-        f"workers={worker_count} batch={batch} port={port}"
+        f"workers={worker_count} batch={batch} port={port}{limit_str}"
     )
-    asyncio.run(run_async(worker_count, batch, port, timeout, retry_failed))
+    asyncio.run(
+        run_async(worker_count, batch, port, timeout, retry_failed, limit)
+    )
 
 
 if __name__ == "__main__":

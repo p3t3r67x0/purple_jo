@@ -7,6 +7,7 @@ Maintains the same high-throughput architecture while using the new database bac
 """
 
 from __future__ import annotations
+from app.models.postgres import CrawlStatus, Domain, Url
 
 import asyncio
 import contextlib
@@ -34,8 +35,6 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 # Add the project root to the Python path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from app.models.postgres import CrawlStatus, Domain, Url
 
 
 log = logging.getLogger(__name__)
@@ -140,6 +139,20 @@ class PostgresAsync:
     """Async PostgreSQL database operations for the crawler."""
 
     def __init__(self, postgres_dsn: str) -> None:
+        # Convert asyncpg DSN to psycopg DSN if needed
+        if postgres_dsn.startswith("postgresql+asyncpg://"):
+            postgres_dsn = postgres_dsn.replace(
+                "postgresql+asyncpg://", "postgresql+psycopg://"
+            )
+        elif postgres_dsn.startswith("postgresql://"):
+            postgres_dsn = postgres_dsn.replace(
+                "postgresql://", "postgresql+psycopg://"
+            )
+        elif not postgres_dsn.startswith("postgresql+psycopg://"):
+            # If no scheme, assume we need psycopg
+            if "://" not in postgres_dsn:
+                postgres_dsn = f"postgresql+psycopg://{postgres_dsn}"
+
         self.postgres_dsn = postgres_dsn
         self._engine = None
         self._session_factory = None
@@ -147,7 +160,9 @@ class PostgresAsync:
     async def _ensure_engine(self) -> None:
         """Ensure the engine is initialized."""
         if self._engine is None:
-            from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+            from sqlalchemy.ext.asyncio import (
+                create_async_engine, async_sessionmaker
+            )
             self._engine = create_async_engine(
                 self.postgres_dsn,
                 echo=False,
@@ -339,7 +354,8 @@ class CrawlRuntime:
                         await session.rollback()
                         continue
                     except Exception as exc:
-                        log.warning("Failed to insert URL %s: %s", url_obj.url, exc)
+                        log.warning("Failed to insert URL %s: %s",
+                                    url_obj.url, exc)
                         await session.rollback()
                         continue
             except Exception as exc:
@@ -509,7 +525,7 @@ async def direct_worker(settings: DirectWorkerSettings) -> str:
         async with await runtime.postgres.get_session() as session:
             # Get domains that haven't been crawled yet (no crawl_status record means not claimed)
             from sqlalchemy.orm import aliased
-            
+
             # Use SQLModel approach instead of raw SQL
             cs = aliased(CrawlStatus)
             stmt = (
@@ -622,7 +638,7 @@ async def iter_pending_domains_postgres(postgres_dsn: str, batch_size: int = 10_
             offset = 0
             while True:
                 from sqlalchemy.orm import aliased
-                
+
                 # Use SQLModel approach instead of raw SQL
                 cs = aliased(CrawlStatus)
                 stmt = (

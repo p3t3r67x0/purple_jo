@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models.postgres import (  # noqa: E402
     Domain, ARecord, AAAARecord, NSRecord, MXRecord,
-    SoaRecord, CNAMERecord
+    SoaRecord, CNAMERecord, TXTRecord
 )
 
 
@@ -51,13 +51,14 @@ DEFAULT_PREFETCH = 800  # Increased for better throughput
 DEFAULT_CONCURRENCY = 500  # Increased for better parallelism
 DEFAULT_TIMEOUT = 1.0  # Reduced for faster failure detection
 
-DNS_RECORD_TYPES: Tuple[Tuple[str, str], ...] = (
+DNS_RECORD_TYPES = (
     ("A", "a_record"),
     ("AAAA", "aaaa_record"),
     ("NS", "ns_record"),
     ("MX", "mx_record"),
     ("SOA", "soa_record"),
     ("CNAME", "cname_record"),
+    ("TXT", "txt_record"),
 )
 
 
@@ -111,18 +112,38 @@ class DNSStats:
     processed: int = 0
     succeeded: int = 0
     failed: int = 0
+    skipped: int = 0
+    total_records: int = 0
+    start_time: Optional[datetime] = None
 
-    def record(self, success: bool) -> None:
+    def __post_init__(self):
+        if self.start_time is None:
+            self.start_time = utcnow()
+
+    def record(self, success: bool, record_count: int = 0) -> None:
         self.processed += 1
         if success:
             self.succeeded += 1
+            self.total_records += record_count
         else:
             self.failed += 1
 
+    def record_skip(self) -> None:
+        self.skipped += 1
+
+    def rate(self) -> float:
+        """Calculate processing rate in domains per second."""
+        if not self.start_time:
+            return 0.0
+        elapsed = (utcnow() - self.start_time).total_seconds()
+        return self.processed / elapsed if elapsed > 0 else 0.0
+
     def summary(self) -> str:
+        rate = self.rate()
         return (
             f"processed={self.processed} succeeded={self.succeeded} "
-            f"failed={self.failed}"
+            f"failed={self.failed} skipped={self.skipped} "
+            f"records={self.total_records} rate={rate:.1f}/sec"
         )
 
 
@@ -140,9 +161,9 @@ class PostgresAsync:
         self._engine = create_async_engine(
             postgres_dsn,
             echo=False,
-            pool_size=20,  # Increased for better concurrency
-            max_overflow=50,  # Higher overflow for burst traffic
-            pool_timeout=30,
+            pool_size=50,  # Significantly increased for high concurrency
+            max_overflow=100,  # Higher overflow for burst traffic
+            pool_timeout=60,  # Increased timeout for busy periods
             pool_recycle=3600,
             pool_pre_ping=True,
             # Performance optimizations
@@ -174,6 +195,51 @@ class DNSRuntime:
         self.settings = settings
         self.postgres = PostgresAsync(settings.postgres_dsn)
         self.stats = DNSStats()
+        self._resolver_pool = []
+        self._initialize_resolver_pool()
+
+    def _initialize_resolver_pool(self) -> None:
+        """Initialize a pool of DNS resolvers for better performance."""
+        pool_size = min(self.settings.concurrency, 50)  # Limit pool size
+
+        for _ in range(pool_size):
+            resolver_instance = resolver.Resolver()
+            resolver_instance.timeout = self.settings.dns_timeout
+            resolver_instance.lifetime = self.settings.dns_timeout * 2
+
+            # Configure nameservers
+            nameservers_env = os.environ.get("DNS_NAMESERVERS")
+            if nameservers_env:
+                resolver_instance.nameservers = [
+                    ns.strip() for ns in nameservers_env.split(",")
+                    if ns.strip()
+                ]
+            else:
+                # Use multiple DNS servers for better performance
+                resolver_instance.nameservers = [
+                    '8.8.8.8', '8.8.4.4',  # Google DNS
+                    '1.1.1.1', '1.0.0.1',  # Cloudflare DNS
+                ]
+
+            self._resolver_pool.append(resolver_instance)
+
+    def _get_resolver(self) -> resolver.Resolver:
+        """Get a resolver from the pool (round-robin)."""
+        if not self._resolver_pool:
+            self._initialize_resolver_pool()
+
+        # Simple round-robin selection
+        import threading
+        if not hasattr(self, '_resolver_index'):
+            self._resolver_index = 0
+            self._resolver_lock = threading.Lock()
+
+        with self._resolver_lock:
+            resolver_instance = self._resolver_pool[self._resolver_index]
+            self._resolver_index = (
+                self._resolver_index + 1) % len(self._resolver_pool)
+
+        return resolver_instance
 
     async def close(self) -> None:
         await self.postgres.close()
@@ -183,43 +249,123 @@ class DNSRuntime:
         # Skip obviously invalid domains
         if not domain or len(domain) < 3 or len(domain) > 253:
             return True
-        
+
         # Skip domains with invalid characters
-        if any(c in domain for c in ['<', '>', '"', '`', ' ', '\t']):
+        if any(c in domain for c in ['<', '>', '"', '`', ' ', '\t', '\n', '\r']):
             return True
-            
+
         # Skip localhost and IP addresses
         if domain in ('localhost', '127.0.0.1', '::1'):
             return True
-            
-        # Skip domains that are likely to be invalid
+
+        # Skip domains that are likely to be invalid or problematic
         invalid_patterns = [
-            'xn--', 'www.www.', '-.', '.-', '..',
-            'internal', 'local', 'test'
+            'xn--', 'www.www.', '-.', '.-', '..', '--',
+            'internal', 'local', 'test', 'example',
+            'invalid', 'localhost', '192.168.',
         ]
         if any(pattern in domain for pattern in invalid_patterns):
             return True
-            
+
+        # Skip domains without valid TLD structure
+        if '.' not in domain or domain.startswith('.') or domain.endswith('.'):
+            return True
+
+        # Skip domains with consecutive dots or invalid format
+        if '..' in domain or domain.count('.') < 1:
+            return True
+
+        # Check for basic domain name validation
+        import re
+        domain_pattern = re.compile(
+            r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?'
+            r'(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
+        )
+        if not domain_pattern.match(domain):
+            return True
+
         return False
 
     async def process_domain(self, domain: str) -> bool:
         domain = domain.strip().lower()
         if not domain or self._should_skip_domain(domain):
+            self.stats.record_skip()
             return False
 
         records = await self._resolve_all(domain)
         now = utcnow()
 
-        if records and any(records.values()):
-            await self._store_records(domain, records, now)
-            self._log_records(domain, records)
-            self.stats.record(True)
-            return True
+        # Use a single session for both success and failure cases
+        try:
+            if records and any(records.values()):
+                record_count = sum(len(values) for values in records.values())
+                await self._store_records(domain, records, now)
+                self._log_records(domain, records)
+                self.stats.record(True, record_count)
+                return True
+            else:
+                await self._mark_failed(domain, now)
+                self.stats.record(False)
+                log.debug("DNS lookup failed for %s", domain)
+                return False
+        except Exception as e:
+            log.error("Database error processing domain %s: %s", domain, e)
+            self.stats.record(False)
+            return False
 
-        await self._mark_failed(domain, now)
-        self.stats.record(False)
-        log.debug("DNS lookup failed for %s", domain)
-        return False
+    async def process_batch(self, domains: List[str]) -> Dict[str, bool]:
+        """Process a batch of domains with controlled database concurrency."""
+        # Limit database connections to prevent pool exhaustion
+        db_semaphore = asyncio.Semaphore(
+            min(20, self.settings.concurrency // 2))
+        dns_semaphore = asyncio.Semaphore(self.settings.concurrency)
+
+        async def process_single(domain: str) -> Tuple[str, bool]:
+            # DNS resolution can be highly concurrent
+            async with dns_semaphore:
+                domain = domain.strip().lower()
+                if not domain or self._should_skip_domain(domain):
+                    self.stats.record_skip()
+                    return domain, False
+
+                records = await self._resolve_all(domain)
+                now = utcnow()
+
+                # Limit database operations to prevent connection pool exhaustion
+                async with db_semaphore:
+                    try:
+                        if records and any(records.values()):
+                            record_count = sum(len(values)
+                                               for values in records.values())
+                            await self._store_records(domain, records, now)
+                            self._log_records(domain, records)
+                            self.stats.record(True, record_count)
+                            return domain, True
+                        else:
+                            await self._mark_failed(domain, now)
+                            self.stats.record(False)
+                            return domain, False
+                    except Exception as e:
+                        log.error(
+                            "Database error processing %s: %s", domain, e)
+                        self.stats.record(False)
+                        return domain, False
+
+        # Process all domains in the batch concurrently
+        tasks = [process_single(domain)
+                 for domain in domains if domain.strip()]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Collect results
+        batch_results = {}
+        for result in results:
+            if isinstance(result, Exception):
+                log.error("Batch processing error: %s", result)
+                continue
+            domain, success = result
+            batch_results[domain] = success
+
+        return batch_results
 
     async def _resolve_all(self, domain: str) -> Dict[str, List[object]]:
         # Use asyncio.gather for better performance
@@ -227,11 +373,11 @@ class DNSRuntime:
             self._resolve_record(domain, record_type)
             for record_type, _ in DNS_RECORD_TYPES
         ]
-        
+
         try:
             # Resolve all DNS record types concurrently
             results_list = await asyncio.gather(*tasks, return_exceptions=True)
-            
+
             results: Dict[str, List[object]] = {}
             for i, (_, field_name) in enumerate(DNS_RECORD_TYPES):
                 result = results_list[i]
@@ -241,7 +387,7 @@ class DNSRuntime:
                     results[field_name] = []
                 else:
                     results[field_name] = result or []
-                    
+
             return results
         except Exception as e:
             log.error("Failed to resolve DNS records for %s: %s", domain, e)
@@ -249,25 +395,15 @@ class DNSRuntime:
 
     async def _resolve_record(self, domain: str,
                               record_type: str) -> List[object]:
-        timeout = self.settings.dns_timeout
-
         def _lookup() -> List[object]:
             result: List[object] = []
-            # Reuse resolver instance for better performance
-            if not hasattr(self, '_resolver'):
-                self._resolver = resolver.Resolver()
-                self._resolver.timeout = timeout
-                self._resolver.lifetime = timeout
-                # Use DNS servers from environment variable if set, else default to Google DNS
-                nameservers_env = os.environ.get("DNS_NAMESERVERS")
-                if nameservers_env:
-                    self._resolver.nameservers = [ns.strip() for ns in nameservers_env.split(",") if ns.strip()]
-                else:
-                    self._resolver.nameservers = ['8.8.8.8', '8.8.4.4']
-            res = self._resolver
+            # Get resolver from pool for better performance and concurrency
+            res = self._get_resolver()
+
             try:
                 items = res.resolve(domain, record_type)
-            except (Timeout, LabelTooLong, NoNameservers, EmptyLabel, NoAnswer, NXDOMAIN):
+            except (Timeout, LabelTooLong, NoNameservers, EmptyLabel,
+                    NoAnswer, NXDOMAIN):
                 return result
             except DNSException:
                 return result
@@ -279,7 +415,9 @@ class DNSRuntime:
                     continue
 
                 if record_type == "NS":
-                    result.append(item.target.to_unicode().strip(".").lower())
+                    result.append(
+                        item.target.to_unicode().strip(".").lower()
+                    )
                 elif record_type == "SOA":
                     text = item.to_text().replace("\\", "").lower()
                     if result:
@@ -287,15 +425,14 @@ class DNSRuntime:
                     else:
                         result.append(text)
                 elif record_type == "CNAME":
-                    result.append(
-                        {"target": item.target.to_unicode().strip(".").lower()})
+                    result.append({
+                        "target": item.target.to_unicode().strip(".").lower()
+                    })
                 else:  # MX
-                    result.append(
-                        {
-                            "preference": item.preference,
-                            "exchange": item.exchange.to_unicode().lower().strip("."),
-                        }
-                    )
+                    result.append({
+                        "preference": item.preference,
+                        "exchange": item.exchange.to_unicode().lower().strip("."),
+                    })
 
             return result
 
@@ -310,142 +447,171 @@ class DNSRuntime:
         records: Dict[str, List[object]],
         timestamp: datetime,
     ) -> None:
-        async with await self.postgres.get_session() as session:
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                # Find or create domain
-                stmt = select(Domain).where(Domain.name == domain)
-                result = await session.exec(stmt)
-                domain_obj = result.first()
+                async with await self.postgres.get_session() as session:
+                    try:
+                        # Use more efficient get-or-create pattern with SQLAlchemy
+                        stmt = select(Domain).where(Domain.name == domain)
+                        result = await session.exec(stmt)
+                        domain_obj = result.first()
 
-                if not domain_obj:
-                    domain_obj = Domain(
-                        name=domain,
-                        created_at=timestamp,
-                        updated_at=timestamp
-                    )
-                    session.add(domain_obj)
-                    await session.flush()  # Get the ID
-                else:
-                    domain_obj.updated_at = timestamp
-                    session.add(domain_obj)
+                        if not domain_obj:
+                            # Create new domain using SQLAlchemy ORM
+                            domain_obj = Domain(
+                                name=domain,
+                                created_at=timestamp,
+                                updated_at=timestamp
+                            )
+                            session.add(domain_obj)
+                            await session.flush()  # Get the ID immediately
+                            domain_id = domain_obj.id
+                        else:
+                            # Update existing domain using SQLAlchemy ORM
+                            domain_obj.updated_at = timestamp
+                            session.add(domain_obj)  # Mark for update
+                            domain_id = domain_obj.id
 
-                # Store DNS records
-                await self._store_dns_records(session, domain_obj.id, records)
-                await session.commit()
+                        # Store DNS records using bulk SQLAlchemy operations
+                        await self._store_dns_records_bulk(session, domain_id, records)
+                        await session.commit()
+                        return  # Success, exit retry loop
+
+                    except Exception as e:
+                        await session.rollback()
+                        raise e
 
             except Exception as e:
-                await session.rollback()
-                log.error("Failed to store records for domain %s: %s",
-                          domain, e)
-                raise
+                if "QueuePool" in str(e) and attempt < max_retries - 1:
+                    # Wait briefly before retrying connection pool errors
+                    await asyncio.sleep(0.1 * (attempt + 1))
+                    log.warning("Connection pool error, retrying %d/%d for %s: %s",
+                                attempt + 1, max_retries, domain, e)
+                    continue
+                else:
+                    log.error("Failed to store records for domain %s: %s",
+                              domain, e)
+                    raise
 
-    async def _store_dns_records(
+    async def _store_dns_records_bulk(
         self,
-        session,
+        session: AsyncSession,
         domain_id: int,
         records: Dict[str, List[object]]
     ) -> None:
-        """Store DNS records in PostgreSQL tables using bulk operations"""
-        # Prepare bulk record lists for better performance
-        a_records = []
-        aaaa_records = []
-        ns_records = []
-        mx_records = []
-        soa_records = []
-        cname_records = []
-        
+        """Store DNS records using efficient SQLAlchemy bulk operations"""
+
+        # Prepare bulk record lists using SQLModel ORM objects
+        record_objects = []
+
         for record_type, record_list in records.items():
             if not record_list:
                 continue
 
-            if record_type == "a":
-                a_records.extend([
+            # Use SQLAlchemy ORM objects for type safety and validation
+            if record_type == "a_record":
+                record_objects.extend([
                     ARecord(domain_id=domain_id, ip_address=ip)
                     for ip in record_list
                 ])
-            elif record_type == "aaaa":
-                aaaa_records.extend([
+
+            elif record_type == "aaaa_record":
+                record_objects.extend([
                     AAAARecord(domain_id=domain_id, ip_address=ip)
                     for ip in record_list
                 ])
-            elif record_type == "ns":
-                ns_records.extend([
-                    NSRecord(domain_id=domain_id, nameserver=ns)
+
+            elif record_type == "ns_record":
+                record_objects.extend([
+                    NSRecord(domain_id=domain_id, value=ns)
                     for ns in record_list
                 ])
-            elif record_type == "mx":
+
+            elif record_type == "mx_record":
                 for mx in record_list:
                     if isinstance(mx, dict):
-                        mx_records.append(MXRecord(
+                        record_objects.append(MXRecord(
                             domain_id=domain_id,
                             exchange=mx.get('exchange'),
-                            preference=mx.get('preference', 0)
+                            priority=mx.get('preference', 0)
                         ))
                     else:
-                        mx_records.append(MXRecord(
-                            domain_id=domain_id, exchange=str(mx)
-                        ))
-            elif record_type == "soa":
-                for soa in record_list:
-                    if isinstance(soa, dict):
-                        soa_records.append(SoaRecord(
+                        record_objects.append(MXRecord(
                             domain_id=domain_id,
-                            mname=soa.get('mname'),
-                            rname=soa.get('rname'),
-                            serial=soa.get('serial'),
-                            refresh=soa.get('refresh'),
-                            retry=soa.get('retry'),
-                            expire=soa.get('expire'),
-                            minimum=soa.get('minimum')
+                            exchange=str(mx),
+                            priority=0
                         ))
-                    else:
-                        soa_records.append(SoaRecord(
-                            domain_id=domain_id, mname=str(soa)
-                        ))
-            elif record_type == "cname":
-                cname_records.extend([
-                    CNAMERecord(domain_id=domain_id, target=cname)
-                    for cname in record_list
+
+            elif record_type == "soa_record":
+                record_objects.extend([
+                    SoaRecord(domain_id=domain_id, value=str(soa))
+                    for soa in record_list
                 ])
-        
-        # Bulk add all records at once
-        if a_records:
-            session.add_all(a_records)
-        if aaaa_records:
-            session.add_all(aaaa_records)
-        if ns_records:
-            session.add_all(ns_records)
-        if mx_records:
-            session.add_all(mx_records)
-        if soa_records:
-            session.add_all(soa_records)
-        if cname_records:
-            session.add_all(cname_records)
+
+            elif record_type == "cname_record":
+                for cname in record_list:
+                    if isinstance(cname, dict):
+                        target = cname.get('target', str(cname))
+                    else:
+                        target = str(cname)
+                    record_objects.append(CNAMERecord(
+                        domain_id=domain_id,
+                        target=target
+                    ))
+
+            elif record_type == "txt_record":
+                record_objects.extend([
+                    TXTRecord(domain_id=domain_id, content=txt)
+                    for txt in record_list
+                ])
+
+        # Use SQLAlchemy's efficient bulk add operation
+        if record_objects:
+            session.add_all(record_objects)
 
     async def _mark_failed(self, domain: str, timestamp: datetime) -> None:
-        async with await self.postgres.get_session() as session:
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                # Find or create domain
-                stmt = select(Domain).where(Domain.name == domain)
-                result = await session.exec(stmt)
-                domain_obj = result.first()
+                async with await self.postgres.get_session() as session:
+                    try:
+                        # Use SQLAlchemy ORM for efficient get-or-create pattern
+                        stmt = select(Domain).where(Domain.name == domain)
+                        result = await session.exec(stmt)
+                        domain_obj = result.first()
 
-                if not domain_obj:
-                    domain_obj = Domain(
-                        name=domain,
-                        created_at=timestamp,
-                        updated_at=timestamp
-                    )
-                    session.add(domain_obj)
-                else:
-                    domain_obj.updated_at = timestamp
-                    session.add(domain_obj)
+                        if not domain_obj:
+                            # Create new domain using SQLAlchemy ORM
+                            domain_obj = Domain(
+                                name=domain,
+                                created_at=timestamp,
+                                updated_at=timestamp
+                            )
+                            session.add(domain_obj)
+                        else:
+                            # Update existing domain using SQLAlchemy ORM
+                            domain_obj.updated_at = timestamp
+                            session.add(domain_obj)  # Mark for update
 
-                await session.commit()
+                        await session.commit()
+                        return  # Success, exit retry loop
+
+                    except Exception as e:
+                        await session.rollback()
+                        raise e
+
             except Exception as e:
-                await session.rollback()
-                log.error("Failed to mark domain as failed %s: %s", domain, e)
-                raise
+                if "QueuePool" in str(e) and attempt < max_retries - 1:
+                    # Wait briefly before retrying connection pool errors
+                    await asyncio.sleep(0.1 * (attempt + 1))
+                    log.warning("Connection pool error, retrying %d/%d for %s",
+                                attempt + 1, max_retries, domain)
+                    continue
+                else:
+                    log.error(
+                        "Failed to mark domain as failed %s: %s", domain, e)
+                    raise
 
     def _log_records(self, domain: str, records: Dict[str, List[object]]) -> None:
         total = sum(len(values) for values in records.values())
@@ -462,6 +628,8 @@ class DNSConsumer:
         self._semaphore = asyncio.Semaphore(max(1, settings.concurrency))
         self._pending: Set[asyncio.Task[None]] = set()
         self._stopped = asyncio.Event()
+        self._last_progress_report = utcnow()
+        self._progress_interval = 30  # Report progress every 30 seconds
 
     async def consume(self) -> None:
         log.info(
@@ -484,12 +652,37 @@ class DNSConsumer:
                 log.debug("Worker %s received STOP", os.getpid())
                 break
 
+            # Report progress periodically
+            self._maybe_report_progress()
+
             task = asyncio.create_task(self._handle_job(job))
             self._pending.add(task)
             task.add_done_callback(self._pending.discard)
 
         if self._pending:
             await asyncio.gather(*self._pending, return_exceptions=True)
+
+        # Final progress report
+        self._report_progress(force=True)
+
+    def _maybe_report_progress(self) -> None:
+        """Report progress if enough time has passed."""
+        now = utcnow()
+        elapsed = (now - self._last_progress_report).total_seconds()
+
+        if elapsed >= self._progress_interval:
+            self._report_progress()
+            self._last_progress_report = now
+
+    def _report_progress(self, force: bool = False) -> None:
+        """Report current processing statistics."""
+        stats = self.runtime.stats
+        if force or stats.processed > 0:
+            log.info(
+                "Worker %s progress: %s",
+                os.getpid(),
+                stats.summary()
+            )
 
     async def _handle_job(self, job: DNSJob) -> None:
         try:
@@ -566,27 +759,27 @@ async def iter_pending_domains(
     postgres: PostgresAsync,
     batch_size: int = 10_000,
 ) -> AsyncIterator[str]:
-    """Stream domains in batches to avoid memory overload."""
+    """Stream domains in batches using efficient SQLAlchemy queries."""
     offset = 0
-    
+
     while True:
         async with await postgres.get_session() as session:
-            # Get domains that don't have any A records processed yet
+            # Use SQLAlchemy LEFT JOIN to find unprocessed domains efficiently
             stmt = select(Domain.name).outerjoin(ARecord).where(
                 ARecord.domain_id.is_(None)
-            ).offset(offset).limit(batch_size)
+            ).offset(offset).limit(batch_size).order_by(Domain.id)
 
             result = await session.exec(stmt)
             domains = result.all()
-            
+
             if not domains:
                 break
-                
+
             for domain in domains:
                 yield domain
-                
+
             offset += len(domains)
-            
+
             # If we got fewer than batch_size, we're done
             if len(domains) < batch_size:
                 break
@@ -597,9 +790,10 @@ async def direct_worker(settings: DirectWorkerSettings) -> str:
     try:
         # Get domains that don't have any A records processed yet
         async with await runtime.postgres.get_session() as session:
+            # Use SQLAlchemy query with proper ordering for consistent results
             stmt = select(Domain.name).outerjoin(ARecord).where(
                 ARecord.domain_id.is_(None)
-            ).offset(settings.skip).limit(settings.limit)
+            ).offset(settings.skip).limit(settings.limit).order_by(Domain.id)
 
             result = await session.exec(stmt)
             domains = result.all()
@@ -746,8 +940,8 @@ def main(
 
     async def count_pending_domains():
         async with await postgres.get_session() as session:
+            # Use efficient SQLAlchemy aggregate query with LEFT JOIN
             # Count domains that don't have any A records processed yet
-            # (A records are usually the first to be processed)
             stmt = select(func.count(Domain.id)).outerjoin(ARecord).where(
                 ARecord.domain_id.is_(None)
             )
@@ -805,14 +999,14 @@ def main(
 def run_separate_services():
     """
     For better performance and scalability, use the separate services:
-    
+
     1. Start publisher service:
        python tools/dns_publisher_service.py --postgres-dsn "..." --rabbitmq-url "..."
-       
+
     2. Start worker services (can run multiple instances):
        python tools/dns_worker_service.py --postgres-dsn "..." --rabbitmq-url "..." --worker-id "worker-1"
        python tools/dns_worker_service.py --postgres-dsn "..." --rabbitmq-url "..." --worker-id "worker-2"
-       
+
     This approach provides:
     - Better horizontal scaling
     - Independent service management

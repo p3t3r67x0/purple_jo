@@ -179,7 +179,6 @@ def postgres_client(monkeypatch):
         base_url.set(drivername="postgresql+asyncpg", database=dbname)
     )
 
-    monkeypatch.setenv("USE_POSTGRES", "true")
     monkeypatch.setenv("POSTGRES_DSN", async_dsn)
     monkeypatch.setenv("POSTGRES_POOL_SIZE", "1")
     monkeypatch.setenv("POSTGRES_POOL_MAX_OVERFLOW", "0")

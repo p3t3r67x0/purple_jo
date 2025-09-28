@@ -6,7 +6,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Core
-    use_postgres: bool = Field(default=True, alias="USE_POSTGRES")
     postgres_dsn: Optional[str] = Field(default=None, alias="POSTGRES_DSN")
     postgres_echo: bool = Field(default=False, alias="POSTGRES_ECHO")
     postgres_pool_size: int = Field(default=10, alias="POSTGRES_POOL_SIZE")

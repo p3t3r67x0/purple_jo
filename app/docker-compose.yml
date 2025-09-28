@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: app/Dockerfile
+    container_name: purple-jo-app
+    depends_on:
+      db:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DSN: postgresql+asyncpg://purplejo:purplejo@db:5432/purplejo
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  migrations:
+    build:
+      context: ..
+      dockerfile: app/Dockerfile
+    container_name: purple-jo-migrations
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgresql+asyncpg://purplejo:purplejo@db:5432/purplejo
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    networks:
+      - app-network
+
+  db:
+    image: postgres:15-alpine
+    container_name: purple-jo-db
+    environment:
+      POSTGRES_DB: purplejo
+      POSTGRES_USER: purplejo
+      POSTGRES_PASSWORD: purplejo
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $$POSTGRES_DB -U $$POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local

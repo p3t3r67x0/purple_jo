@@ -2,7 +2,11 @@
 FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    POSTGRES_DSN=postgresql+asyncpg://netscanner:netscanner@db:5433/netscanner
 
 WORKDIR /app
 

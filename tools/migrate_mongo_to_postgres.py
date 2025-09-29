@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
+from importlib import import_module
+
+try:
+    import bootstrap  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
+    bootstrap = import_module("tools.bootstrap")
+
+bootstrap.setup()
+
 import argparse
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
-
 import os
 import sys
+from datetime import datetime, timezone
+from typing import Any, Iterable, Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from sqlalchemy import delete, select
 from sqlmodel.ext.asyncio.session import AsyncSession
-
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
 
 from app.db_postgres import get_session_factory, init_db
 from app.models.postgres import (

@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import re
-import time
+from __future__ import annotations
+
+from importlib import import_module
+
+try:
+    import bootstrap  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
+    bootstrap = import_module("tools.bootstrap")
+
+bootstrap.setup()
+
+import asyncio
 import math
 import multiprocessing
-import asyncio
+import re
 import sys
-import click
+import time
 from datetime import datetime, UTC
-from pathlib import Path
 
-# Add the project root to the Python path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
+import click
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
+
 from app.models.postgres import Domain, Url
 
 

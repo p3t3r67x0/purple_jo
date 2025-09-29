@@ -1,36 +1,34 @@
 #!/usr/bin/env python3
-"""
-Migration script to help transition from MongoDB crawler to PostgreSQL crawler.
+"""Migration helpers for transitioning the crawler to PostgreSQL."""
 
-This script:
-1. Populates the crawl_status table with domains from the main domains table
-2. Marks domains as crawled if they exist in the old MongoDB data
-3. Provides statistics on migration progress
+from __future__ import annotations
 
-Note: This script should be run from the project root directory, not from tools/
-"""
+from importlib import import_module
+
+try:
+    import bootstrap  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
+    bootstrap = import_module("tools.bootstrap")
+
+project_root = bootstrap.setup()
 
 import asyncio
 import logging
-import sys
 import os
+import sys
 from datetime import datetime, UTC
 
 import click
-
-# Add the project root to the Python path for imports
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, project_root)
+from sqlalchemy import func, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 try:
-    from sqlalchemy import text, func
-    from sqlmodel import select
     from app.models.postgres import CrawlStatus, Domain
-    from sqlmodel.ext.asyncio.session import AsyncSession
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-except ImportError as e:
-    print(f"Error: Missing required dependencies. Please run this script from the project root directory.")
-    print(f"Import error: {e}")
+except ImportError as exc:  # pragma: no cover - defensive
+    print("Error: Missing required dependencies. Ensure project dependencies are installed.")
+    print(f"Import error: {exc}")
     print(f"Current working directory: {os.getcwd()}")
     print(f"Project root: {project_root}")
     sys.exit(1)

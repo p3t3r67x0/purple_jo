@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, UTC
 from typing import Optional, TYPE_CHECKING
 
-from sqlalchemy import Column, Index, String, UniqueConstraint
+from sqlalchemy import Column, DateTime, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel
 
@@ -57,6 +57,17 @@ class Domain(SQLModel, table=True):
     )
     header_strict_transport_security: Optional[str] = Field(
         default=None, max_length=255
+    )
+    qrcode: Optional[str] = Field(
+        default=None,
+        sa_column=Column("qrcode", Text(), nullable=True),
+    )
+    image: Optional[str] = Field(default=None, max_length=255)
+    image_scan_failed: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(
+            "image_scan_failed", DateTime(timezone=True), nullable=True
+        ),
     )
 
 

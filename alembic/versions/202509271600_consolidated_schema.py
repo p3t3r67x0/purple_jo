@@ -47,6 +47,8 @@ def upgrade() -> None:
         sa.Column("header_strict_transport_security", sa.String(length=255), nullable=True),
         # QR Code column
         sa.Column("qrcode", sa.Text(), nullable=True),
+        sa.Column("image", sa.String(length=255), nullable=True),
+        sa.Column("image_scan_failed", sa.DateTime(timezone=True), nullable=True),
     )
     
     # Create indexes for domains table

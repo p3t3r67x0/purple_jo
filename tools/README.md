@@ -88,11 +88,11 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 - **Prerequisites:** Plaintext file with one URL per line.
 
 ### import_ip.py
-- **Purpose:** Populate the `subnet_lookups` table with individual IPv4 addresses or expanded CIDR blocks.
+- **Purpose:** Populate the `subnet_lookups` table with IPv4 ranges sourced from plain text lists.
 - **CLI:** `python tools/import_ip.py --input ipv4.txt --postgres-dsn "postgresql+asyncpg://..."`
 - **Details:**
-  - Creates entries in the subnet lookup table and inserts each address.
-  - CIDR lines (e.g. `10.0.0.0/24`) are expanded into host IPs via the standard library `ipaddress` module.
+  - Normalises each entry into a CIDR range, storing `cidr`, `ip_start`, and `ip_end` values alongside a `source` marker.
+  - Accepts individual IPs (`198.51.100.10`) and CIDR blocks (`198.51.100.0/24`), coalescing them into single-row ranges.
 - **Prerequisites:** Input file with one IP or CIDR per line.
 
 ### insert_asn.py
@@ -101,13 +101,13 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 - **Details:** Stores each ASN along with an insertion timestamp; duplicates are skipped.
 
 ### import_records.py
-- **Purpose:** Replay historical DNS observations (JSON lines) into MongoDB.
-- **CLI:** `python tools/import_records.py --input records.jsonl --worker 4 --host mongodb.internal`
+- **Purpose:** Replay historical DNS observations (JSON lines) into the PostgreSQL DNS tables.
+- **CLI:** `python tools/import_records.py --input records.jsonl --postgres-dsn "postgresql+asyncpg://..."`
 - **Details:**
-  - Each line must contain fields like `query_name`, `resp_type`, and `data`.
-  - Inserts or updates the matching domain document with `$addToSet` semantics per record type (`a_record`, `mx_record`, etc.).
-  - Long-running worker processes mutate their shared `records` slice; re-run the script if it terminates early.
-- **Prerequisites:** Structured JSONL export; ensure records are small enough for Mongo’s document size limit.
+  - Parses JSONL rows containing `query_name`, `resp_type`, and `data`, lower-casing values to match the relational schema.
+  - Ensures the associated domain exists, then inserts unique DNS records into `a_records`, `aaaa_records`, `mx_records`, `ns_records`, `soa_records`, or `cname_records`.
+  - Automatically updates the parent domain’s `updated_at` timestamp whenever new data is stored.
+- **Prerequisites:** Structured JSONL export in the resolver output format used across the project.
 
 ### decode_idna.py
 - **Purpose:** Replace punycode hostnames (`xn--…`) with their decoded Unicode equivalents.
@@ -167,10 +167,10 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 
 ### screenshot_scraper.py
 - **Purpose:** Capture full-page screenshots of HTTPS sites and attach the file name to each domain record.
-- **CLI:** `python tools/screenshot_scraper.py --postgres-dsn "postgresql+asyncpg://..."`
+- **CLI:** `python tools/screenshot_scraper.py --postgres-dsn "postgresql+asyncpg://..." [--limit 100]`
 - **Details:**
-  - Iterates over domains lacking `image`/`image_scan_failed`, renders them in headless Chromium, executes inline/external JavaScript, and saves PNGs into `screenshots/`.
-  - Successful runs write the image filename and `updated_at` timestamp; failures get `image_scan_failed`.
+  - Ensures the `image`/`image_scan_failed` columns exist, queries PostgreSQL for domains missing screenshots, and executes inline/external JavaScript before taking PNG captures into `screenshots/`.
+  - Successful runs write the image filename and `updated_at` timestamp; failures store `image_scan_failed`.
 - **Prerequisites:** Chromium + chromedriver, write access to `screenshots/`, and permissive network egress.
 
 ### extract_graph.py

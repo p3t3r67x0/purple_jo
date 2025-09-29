@@ -518,6 +518,55 @@ async def enqueue_geoip_jobs(
     return sent
 
 
+async def _prepare_non_service_mode(
+    settings: WorkerSettings,
+    worker_count: int,
+    purge_queue: bool,
+) -> bool:
+    """Run pre-flight tasks for non-service execution paths.
+
+    Returns ``True`` when the caller should exit early (for example when
+    nothing needs to be processed or all work has been enqueued to
+    RabbitMQ).
+    """
+
+    postgres = PostgresAsync(settings.postgres_dsn)
+    try:
+        total = await count_pending_domains(postgres)
+        click.echo(f"[INFO] total domains pending GeoIP enrichment: {total}")
+
+        if total == 0:
+            click.echo("[INFO] Nothing to enrich")
+            return True
+
+        if settings.rabbitmq_url:
+            log.info(
+                "Publishing GeoIP jobs to RabbitMQ at %s",
+                settings.rabbitmq_url,
+            )
+            jobs = iter_pending_geoip_jobs(postgres, settings.claim_timeout)
+            queued = await enqueue_geoip_jobs(
+                rabbitmq_url=settings.rabbitmq_url,
+                queue_name=settings.queue_name,
+                jobs=jobs,
+                worker_count=worker_count,
+                purge_queue=purge_queue,
+            )
+            log.info(
+                "Queued %d GeoIP jobs onto RabbitMQ queue '%s'",
+                queued,
+                settings.queue_name,
+            )
+            click.echo(
+                "[INFO] Published GeoIP jobs. Start workers with --service"
+            )
+            return True
+
+        return False
+    finally:
+        await postgres.close()
+
+
 @click.command()
 @click.option(
     "--worker", "-w", type=int, default=4, show_default=True,
@@ -612,46 +661,27 @@ def main(
                     click.echo(result)
         return
 
-    postgres = PostgresAsync(postgres_dsn)
-    try:
-        total = asyncio.run(count_pending_domains(postgres))
-        click.echo(f"[INFO] total domains pending GeoIP enrichment: {total}")
+    should_exit = asyncio.run(
+        _prepare_non_service_mode(
+            settings=base_settings,
+            worker_count=worker,
+            purge_queue=purge_queue,
+        )
+    )
 
-        if total == 0:
-            click.echo("[INFO] Nothing to enrich")
-            return
+    if should_exit:
+        return
 
-        if rabbitmq_url:
-            log.info("Publishing GeoIP jobs to RabbitMQ at %s", rabbitmq_url)
-            jobs = iter_pending_geoip_jobs(postgres, claim_timeout)
-            queued = asyncio.run(
-                enqueue_geoip_jobs(
-                    rabbitmq_url=rabbitmq_url,
-                    queue_name=queue_name,
-                    jobs=jobs,
-                    worker_count=worker,
-                    purge_queue=purge_queue,
-                )
-            )
-            log.info("Queued %d GeoIP jobs onto RabbitMQ queue '%s'",
-                     queued, queue_name)
-            click.echo(
-                "[INFO] Published GeoIP jobs. Start workers with --service"
-            )
-            return
+    worker_args = [DirectWorkerSettings(
+        **base_settings.__dict__) for _ in range(worker)]
+    if worker == 1:
+        click.echo(run_worker_direct(worker_args[0]))
+        return
 
-        worker_args = [DirectWorkerSettings(
-            **base_settings.__dict__) for _ in range(worker)]
-        if worker == 1:
-            click.echo(run_worker_direct(worker_args[0]))
-            return
-
-        with multiprocessing.Pool(processes=worker) as pool:
-            log.info("Spawned %d direct worker processes", worker)
-            for result in pool.imap_unordered(run_worker_direct, worker_args):
-                click.echo(result)
-    finally:
-        asyncio.run(postgres.close())
+    with multiprocessing.Pool(processes=worker) as pool:
+        log.info("Spawned %d direct worker processes", worker)
+        for result in pool.imap_unordered(run_worker_direct, worker_args):
+            click.echo(result)
 
 
 if __name__ == "__main__":

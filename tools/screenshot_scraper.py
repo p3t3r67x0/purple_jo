@@ -165,9 +165,31 @@ def initialise_webdriver() -> Optional[webdriver.Chrome]:
     user_data_dir = tempfile.mkdtemp(prefix="chrome-profile-")
     options.add_argument(f"--user-data-dir={user_data_dir}")
 
-    chromedriver_path = shutil.which("chromedriver") or "/snap/bin/chromium"
-    if not chromedriver_path or not Path(chromedriver_path).exists():
-        print("[ERROR] chromedriver binary not found or not executable")
+    checked_paths = []
+    chromedriver_path = shutil.which("chromedriver")
+    if chromedriver_path:
+        checked_paths.append(chromedriver_path)
+        if not Path(chromedriver_path).exists() or not os.access(chromedriver_path, os.X_OK):
+            chromedriver_path = None
+
+    if not chromedriver_path:
+        fallback_paths = [
+            "/snap/bin/chromium.chromedriver",
+            "/usr/lib/chromium-browser/chromedriver",
+            "/usr/lib/chromium/chromedriver",
+        ]
+        for path in fallback_paths:
+            checked_paths.append(path)
+            if Path(path).exists() and os.access(path, os.X_OK):
+                chromedriver_path = path
+                break
+
+    if not chromedriver_path:
+        inspected = ", ".join(checked_paths) if checked_paths else "(no paths inspected)"
+        print(
+            "[ERROR] chromedriver binary not found or not executable. "
+            f"Checked paths: {inspected}"
+        )
         shutil.rmtree(user_data_dir, ignore_errors=True)
         return None
 

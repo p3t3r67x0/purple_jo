@@ -275,25 +275,49 @@ def main(postgres_dsn: Optional[str], limit: Optional[int]) -> None:
 
     click.echo(f"[INFO] Processing {len(candidates)} domains")
 
-    for domain in candidates:
-        domain_id = int(domain["id"])
-        domain_name = domain["name"]
-        click.echo(f"[INFO] Processing {domain_name}")
-
-        driver = initialise_webdriver()
-        if not driver:
-            with psycopg.connect(dsn) as conn:
-                mark_failure(conn, domain_id)
-            continue
-
-        image_name = capture_screenshot(driver, domain_name)
-        cleanup_driver(driver)
-
+    driver = initialise_webdriver()
+    if not driver:
+        click.echo("[ERROR] Unable to initialise WebDriver; marking domains as failed")
         with psycopg.connect(dsn) as conn:
-            if image_name:
-                mark_success(conn, domain_id, image_name)
-            else:
-                mark_failure(conn, domain_id)
+            for domain in candidates:
+                mark_failure(conn, int(domain["id"]))
+        return
+
+    try:
+        with psycopg.connect(dsn) as conn:
+            for domain in candidates:
+                domain_id = int(domain["id"])
+                domain_name = domain["name"]
+                click.echo(f"[INFO] Processing {domain_name}")
+
+                if driver is None:
+                    driver = initialise_webdriver()
+                    if not driver:
+                        click.echo("[ERROR] Unable to recover WebDriver session; marking failure")
+                        mark_failure(conn, domain_id)
+                        continue
+
+                image_name = capture_screenshot(driver, domain_name)
+
+                if getattr(driver, "session_id", None) is None:
+                    cleanup_driver(driver)
+                    driver = None
+
+                if driver is not None:
+                    try:
+                        driver.delete_all_cookies()
+                    except Exception as exc:  # pragma: no cover - defensive cleanup
+                        print(f"[WARNING] Failed to clear cookies: {exc}")
+                        cleanup_driver(driver)
+                        driver = None
+
+                if image_name:
+                    mark_success(conn, domain_id, image_name)
+                else:
+                    mark_failure(conn, domain_id)
+    finally:
+        if driver is not None:
+            cleanup_driver(driver)
 
     click.echo("[INFO] Screenshot processing complete")
 

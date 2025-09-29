@@ -1,9 +1,9 @@
 services:
-  app:
+  api:
     build:
       context: ..
       dockerfile: app/Dockerfile
-    container_name: netscanner-app
+    container_name: netscanner-api
     depends_on:
       db:
         condition: service_healthy

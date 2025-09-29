@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""
-Migration script to add domain_extracted column to urls table.
+"""Migration script to add domain_extracted column to urls table."""
 
-This script adds the domain_extracted column needed for the extract_domains.py tool.
-"""
+from __future__ import annotations
+
+from importlib import import_module
+
+try:
+    import bootstrap  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
+    bootstrap = import_module("tools.bootstrap")
+
+bootstrap.setup()
 
 import asyncio
 import sys
-from pathlib import Path
-
-# Add the project root to the Python path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import click
 from sqlalchemy import text

@@ -9,6 +9,15 @@ names from a queue and performs DNS record extraction.
 
 from __future__ import annotations
 
+from importlib import import_module
+
+try:
+    import bootstrap  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
+    bootstrap = import_module("tools.bootstrap")
+
+bootstrap.setup()
+
 import asyncio
 import logging
 import os
@@ -22,9 +31,6 @@ import aio_pika
 import click
 from aio_pika import DeliveryMode, Message
 from aiormq.exceptions import AMQPConnectionError
-
-# Add the project root to the Python path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models.postgres import (  # noqa: E402
     Domain, ARecord, AAAARecord, NSRecord, MXRecord,

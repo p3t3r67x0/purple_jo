@@ -7,7 +7,15 @@ Maintains the same high-throughput architecture while using the new database bac
 """
 
 from __future__ import annotations
-from app.models.postgres import CrawlStatus, Domain, Url
+
+from importlib import import_module
+
+try:
+    import bootstrap  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
+    bootstrap = import_module("tools.bootstrap")
+
+bootstrap.setup()
 
 import asyncio
 import contextlib
@@ -33,8 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-# Add the project root to the Python path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app.models.postgres import CrawlStatus, Domain, Url
 
 
 log = logging.getLogger(__name__)

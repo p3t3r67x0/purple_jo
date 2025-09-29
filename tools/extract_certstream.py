@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """Certificate Transparency log monitor for PostgreSQL domain extraction."""
 
+from __future__ import annotations
+
+from importlib import import_module
+
+try:
+    import bootstrap  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
+    bootstrap = import_module("tools.bootstrap")
+
+bootstrap.setup()
+
 import asyncio
 import logging
 import os
@@ -15,9 +26,6 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models.postgres import Domain
 

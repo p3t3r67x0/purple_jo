@@ -9,6 +9,15 @@ failure markers on success.
 
 from __future__ import annotations
 
+from importlib import import_module
+
+try:
+    import bootstrap  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
+    bootstrap = import_module("tools.bootstrap")
+
+bootstrap.setup()
+
 import asyncio
 import contextlib
 import json
@@ -32,9 +41,6 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlmodel import select, delete
 from sqlmodel.ext.asyncio.session import AsyncSession
-
-# Add the project root to the Python path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models.postgres import Domain, GeoPoint, ARecord  # noqa: E402
 

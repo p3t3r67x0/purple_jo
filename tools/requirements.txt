@@ -34,7 +34,6 @@ pandas==2.3.2
 propcache==0.3.2
 psycopg[binary]==3.2.1
 pyasn==1.6.2
-pymongo==4.15.0
 pypng==0.20220715.0
 PyQRCode==1.2.1
 PySocks==1.7.1

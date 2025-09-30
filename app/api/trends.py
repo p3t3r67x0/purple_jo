@@ -40,7 +40,9 @@ async def fetch_request_trends(
     """Aggregate request statistics for the trend endpoint."""
 
     bucket_delta = _DATE_BUCKETS[interval]
-    since = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+    now_utc = datetime.now(timezone.utc)
+    since_aware = now_utc - timedelta(minutes=lookback_minutes)
+    since = since_aware.replace(tzinfo=None)
     filters = [RequestStat.created_at >= since]
     if path:
         filters.append(RequestStat.path == path)
@@ -102,7 +104,7 @@ async def fetch_request_trends(
                 .limit(recent_limit)
             )
             recent_result = await session.exec(recent_stmt)
-            for stat in recent_result.all():
+            for stat in recent_result.scalars().all():
                 recent_requests.append(
                     {
                         "path": stat.path,
@@ -121,7 +123,7 @@ async def fetch_request_trends(
         return {
             "interval": interval,
             "lookback_minutes": lookback_minutes,
-            "since": since.isoformat(),
+            "since": since_aware.isoformat(),
             "path_filter": path,
             "bucket_count": timeline_page["total"],
             "total_requests": int(total_requests),

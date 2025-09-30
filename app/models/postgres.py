@@ -73,6 +73,11 @@ class Domain(SQLModel, table=True):
 
 class ARecord(SQLModel, table=True):
     __tablename__ = "a_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_id", "ip_address", name="uq_a_records_domain_id_ip_address"
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     domain_id: int = Field(foreign_key="domains.id", nullable=False)
@@ -85,6 +90,11 @@ class ARecord(SQLModel, table=True):
 
 class AAAARecord(SQLModel, table=True):
     __tablename__ = "aaaa_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_id", "ip_address", name="uq_aaaa_records_domain_id_ip_address"
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     domain_id: int = Field(foreign_key="domains.id", nullable=False)
@@ -97,6 +107,11 @@ class AAAARecord(SQLModel, table=True):
 
 class NSRecord(SQLModel, table=True):
     __tablename__ = "ns_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_id", "value", name="uq_ns_records_domain_id_value"
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     domain_id: int = Field(foreign_key="domains.id", nullable=False)
@@ -106,6 +121,11 @@ class NSRecord(SQLModel, table=True):
 
 class SoaRecord(SQLModel, table=True):
     __tablename__ = "soa_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_id", "value", name="uq_soa_records_domain_id_value"
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     domain_id: int = Field(foreign_key="domains.id", nullable=False)
@@ -115,6 +135,14 @@ class SoaRecord(SQLModel, table=True):
 
 class MXRecord(SQLModel, table=True):
     __tablename__ = "mx_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_id",
+            "exchange",
+            "priority",
+            name="uq_mx_records_domain_id_exchange_priority",
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     domain_id: int = Field(foreign_key="domains.id", nullable=False)
@@ -127,6 +155,11 @@ class MXRecord(SQLModel, table=True):
 
 class CNAMERecord(SQLModel, table=True):
     __tablename__ = "cname_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_id", "target", name="uq_cname_records_domain_id_target"
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     domain_id: int = Field(foreign_key="domains.id", nullable=False)
@@ -138,6 +171,11 @@ class CNAMERecord(SQLModel, table=True):
 
 class TXTRecord(SQLModel, table=True):
     __tablename__ = "txt_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_id", "content", name="uq_txt_records_domain_id_content"
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     domain_id: int = Field(foreign_key="domains.id", nullable=False)
@@ -149,6 +187,11 @@ class TXTRecord(SQLModel, table=True):
 
 class PortService(SQLModel, table=True):
     __tablename__ = "port_services"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_id", "port", name="uq_port_services_domain_id_port"
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     domain_id: int = Field(foreign_key="domains.id", nullable=False)

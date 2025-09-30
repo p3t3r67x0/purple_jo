@@ -67,6 +67,11 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
+        sa.UniqueConstraint(
+            "domain_id",
+            "ip_address",
+            name="uq_a_records_domain_id_ip_address",
+        ),
     )
     op.create_index("ix_a_records_domain_id", "a_records", ["domain_id"], unique=False)
     op.create_index("ix_a_records_ip", "a_records", ["ip_address"], unique=False)
@@ -81,6 +86,11 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
+        sa.UniqueConstraint(
+            "domain_id",
+            "ip_address",
+            name="uq_aaaa_records_domain_id_ip_address",
+        ),
     )
     op.create_index("ix_aaaa_records_domain_id", "aaaa_records", ["domain_id"], unique=False)
     op.create_index("ix_aaaa_records_ip", "aaaa_records", ["ip_address"], unique=False)
@@ -94,6 +104,11 @@ def upgrade() -> None:
         sa.Column("value", sa.String(length=255), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
+        sa.UniqueConstraint(
+            "domain_id",
+            "value",
+            name="uq_ns_records_domain_id_value",
+        ),
     )
     op.create_index("ix_ns_records_domain_id", "ns_records", ["domain_id"], unique=False)
     op.create_index("ix_ns_records_value", "ns_records", ["value"], unique=False)
@@ -107,6 +122,11 @@ def upgrade() -> None:
         sa.Column("value", sa.String(length=255), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
+        sa.UniqueConstraint(
+            "domain_id",
+            "value",
+            name="uq_soa_records_domain_id_value",
+        ),
     )
     op.create_index("ix_soa_records_domain_id", "soa_records", ["domain_id"], unique=False)
     op.create_index("ix_soa_records_value", "soa_records", ["value"], unique=False)
@@ -121,6 +141,12 @@ def upgrade() -> None:
         sa.Column("priority", sa.Integer(), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
+        sa.UniqueConstraint(
+            "domain_id",
+            "exchange",
+            "priority",
+            name="uq_mx_records_domain_id_exchange_priority",
+        ),
     )
     op.create_index("ix_mx_records_domain_id", "mx_records", ["domain_id"], unique=False)
     op.create_index("ix_mx_records_exchange", "mx_records", ["exchange"], unique=False)
@@ -135,6 +161,11 @@ def upgrade() -> None:
         sa.Column("target", sa.String(length=255), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
+        sa.UniqueConstraint(
+            "domain_id",
+            "target",
+            name="uq_cname_records_domain_id_target",
+        ),
     )
     op.create_index("ix_cname_records_domain_id", "cname_records", ["domain_id"], unique=False)
     op.create_index("ix_cname_records_target", "cname_records", ["target"], unique=False)
@@ -148,6 +179,11 @@ def upgrade() -> None:
         sa.Column("content", sa.String(length=1000), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
+        sa.UniqueConstraint(
+            "domain_id",
+            "content",
+            name="uq_txt_records_domain_id_content",
+        ),
     )
     op.create_index("ix_txt_records_domain_id", "txt_records", ["domain_id"], unique=False)
     op.create_index("ix_txt_records_updated_at", "txt_records", ["updated_at"], unique=False)
@@ -162,6 +198,11 @@ def upgrade() -> None:
         sa.Column("service", sa.String(length=255), nullable=True),  # Updated name and length
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
+        sa.UniqueConstraint(
+            "domain_id",
+            "port",
+            name="uq_port_services_domain_id_port",
+        ),
     )
     op.create_index("ix_port_services_domain_id", "port_services", ["domain_id"], unique=False)
     op.create_index("ix_port_services_port", "port_services", ["port"], unique=False)

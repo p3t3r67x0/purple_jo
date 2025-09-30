@@ -577,14 +577,6 @@ async def iter_pending_domains(
             # Find domains that have open ports on the specified ports but no SSL data
             stmt = (
                 select(Domain.name)
-                .join(PortService, Domain.id == PortService.domain_id)
-                .outerjoin(SSLData, Domain.id == SSLData.domain_id)
-                .where(
-                    PortService.port.in_(ports),
-                    PortService.status == "open",
-                    SSLData.id.is_(None)  # No SSL data exists
-                )
-                .distinct()
                 .limit(batch_size)
             )
             
@@ -811,14 +803,6 @@ def main(
             async with session_factory() as session:
                 stmt = (
                     select(Domain.name)
-                    .join(PortService, Domain.id == PortService.domain_id)
-                    .outerjoin(SSLData, Domain.id == SSLData.domain_id)
-                    .where(
-                        PortService.port.in_(port_tuple),
-                        PortService.status == "open",
-                        SSLData.id.is_(None)  # No SSL data exists
-                    )
-                    .distinct()
                 )
                 result = await session.exec(stmt)
                 return len(result.all())

@@ -5,59 +5,15 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import socket
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import List
 
 import asyncpg
 import click
 
 DEFAULT_PORT = 22
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-
-
-def _parse_env_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if "=" not in stripped:
-                continue
-            key, raw_value = stripped.split("=", 1)
-            value = raw_value.strip().strip('"').strip("'")
-            values[key.strip()] = value
-    except FileNotFoundError:
-        return values
-
-    return values
-
-
-def resolve_dsn() -> str:
-    env_value = os.environ.get("POSTGRES_DSN")
-    if env_value:
-        dsn = env_value
-    else:
-        file_values = _parse_env_file(ENV_PATH)
-        dsn = file_values.get("POSTGRES_DSN")
-
-    if not dsn:
-        raise RuntimeError(
-            "POSTGRES_DSN must be set as an environment variable or in the .env file"
-        )
-
-    if dsn.startswith("postgresql+asyncpg://"):
-        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
-    if dsn.startswith("postgresql+psycopg://"):
-        return "postgresql://" + dsn[len("postgresql+psycopg://"):]
-    return dsn
-
-
 def utcnow() -> datetime:
     """Return a naive UTC timestamp compatible with SQLModel columns."""
 
@@ -483,6 +439,7 @@ async def worker(
 
 
 async def run_async(
+    postgres_dsn: str,
     worker_count: int,
     batch: int,
     port: int,
@@ -490,13 +447,11 @@ async def run_async(
     retry_failed: bool,
     limit: int | None = None,
 ) -> None:
-    dsn = resolve_dsn()
-
     min_size = max(1, min(worker_count, 4))
     max_size = max(worker_count * 2, min_size)
 
     async with asyncpg.create_pool(
-        dsn, min_size=min_size, max_size=max_size
+        postgres_dsn, min_size=min_size, max_size=max_size
     ) as pool:
         await ensure_state_table(pool)
 
@@ -519,6 +474,12 @@ async def run_async(
 
 
 @click.command(help=__doc__)
+@click.option(
+    "--postgres-dsn",
+    type=str,
+    required=True,
+    help="PostgreSQL DSN",
+)
 @click.option(
     "--worker",
     "worker_count",
@@ -558,6 +519,7 @@ async def run_async(
     help="Maximum number of domains to process (for testing)",
 )
 def main(
+    postgres_dsn: str,
     worker_count: int,
     batch: int,
     port: int,
@@ -571,7 +533,15 @@ def main(
         f"workers={worker_count} batch={batch} port={port}{limit_str}"
     )
     asyncio.run(
-        run_async(worker_count, batch, port, timeout, retry_failed, limit)
+        run_async(
+            postgres_dsn,
+            worker_count,
+            batch,
+            port,
+            timeout,
+            retry_failed,
+            limit,
+        )
     )
 
 

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 """Capture HTTPS screenshots for domains stored in PostgreSQL."""
 
 from __future__ import annotations
@@ -7,132 +5,106 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import click
-import psycopg
-from psycopg.rows import dict_row
 import requests
 from requests.exceptions import SSLError
 from selenium import webdriver
 from selenium.common.exceptions import (
     JavascriptException,
+    StaleElementReferenceException,
     TimeoutException,
     UnexpectedAlertPresentException,
-    StaleElementReferenceException,
 )
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from sqlalchemy import inspect, text
+from sqlalchemy.engine import Engine
+from sqlmodel import Session, select
 
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+from app.models.postgres import Domain, PortService
+from tools.sqlmodel_helpers import get_engine, resolve_sync_dsn, session_scope
+
 SCREENSHOT_DIR = Path("screenshots")
-
-
-def _parse_env_file(path: Path) -> dict[str, str]:
-    env_vars: dict[str, str] = {}
-    if not path.exists():
-        return env_vars
-
-    with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            env_vars[key.strip()] = value.strip().strip('"\'')
-    return env_vars
-
-
-def resolve_dsn(explicit: Optional[str] = None) -> str:
-    if explicit:
-        dsn = explicit
-    elif "POSTGRES_DSN" in os.environ:
-        dsn = os.environ["POSTGRES_DSN"]
-    else:
-        env_vars = _parse_env_file(ENV_PATH)
-        dsn = env_vars.get("POSTGRES_DSN")
-
-    if not dsn:
-        raise ValueError("POSTGRES_DSN not provided via flag, env var, or .env file")
-
-    if dsn.startswith("postgresql+asyncpg://"):
-        dsn = "postgresql://" + dsn[len("postgresql+asyncpg://") :]
-    elif dsn.startswith("postgresql+psycopg://"):
-        dsn = "postgresql://" + dsn[len("postgresql+psycopg://") :]
-    elif "://" not in dsn:
-        dsn = f"postgresql://{dsn}"
-
-    return dsn
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def ensure_columns(conn: psycopg.Connection) -> None:
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE domains ADD COLUMN IF NOT EXISTS image TEXT")
-        cur.execute(
-            "ALTER TABLE domains ADD COLUMN IF NOT EXISTS image_scan_failed TIMESTAMP WITH TIME ZONE"
+def ensure_columns(engine: Engine) -> None:
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("domains")}
+
+    statements: List[str] = []
+    if "image" not in columns:
+        statements.append("ALTER TABLE domains ADD COLUMN IF NOT EXISTS image TEXT")
+    if "image_scan_failed" not in columns:
+        statements.append(
+            "ALTER TABLE domains ADD COLUMN IF NOT EXISTS image_scan_failed "
+            "TIMESTAMP WITH TIME ZONE"
         )
-    conn.commit()
+
+    if not statements:
+        return
+
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
 
 
-def fetch_candidate_domains(
-    conn: psycopg.Connection, limit: Optional[int]
-) -> List[Dict[str, str]]:
-    query = """
-        SELECT d.id, d.name
-        FROM domains d
-        WHERE d.image IS NULL
-          AND d.image_scan_failed IS NULL
-          AND EXISTS (
-                SELECT 1 FROM port_services ps
-                WHERE ps.domain_id = d.id AND ps.port IN (80, 443)
-          )
-        ORDER BY d.updated_at DESC
-    """
-    params: List[object] = []
+@dataclass
+class CandidateDomain:
+    id: int
+    name: str
+
+
+def fetch_candidate_domains(session: Session, limit: Optional[int]) -> List[CandidateDomain]:
+    statement = (
+        select(Domain.id, Domain.name)
+        .where(Domain.image.is_(None))
+        .where(Domain.image_scan_failed.is_(None))
+        .where(
+            select(PortService.id)
+            .where(PortService.domain_id == Domain.id)
+            .where(PortService.port.in_([80, 443]))
+            .exists()
+        )
+        .order_by(Domain.updated_at.desc())
+    )
+
     if limit is not None:
-        query += " LIMIT %s"
-        params.append(limit)
+        statement = statement.limit(limit)
 
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, params)
-        return list(cur.fetchall())
+    results = session.exec(statement).all()
+    return [CandidateDomain(id=row[0], name=row[1]) for row in results]
 
 
-def mark_success(conn: psycopg.Connection, domain_id: int, image_name: str) -> None:
+def mark_success(session: Session, domain_id: int, image_name: str) -> None:
+    domain = session.get(Domain, domain_id)
+    if not domain:
+        return
+
     now = utcnow()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE domains
-            SET image = %s,
-                image_scan_failed = NULL,
-                updated_at = %s
-            WHERE id = %s
-            """,
-            (image_name, now, domain_id),
-        )
-    conn.commit()
+    domain.image = image_name
+    domain.image_scan_failed = None
+    domain.updated_at = now
+    session.add(domain)
 
 
-def mark_failure(conn: psycopg.Connection, domain_id: int) -> None:
+def mark_failure(session: Session, domain_id: int) -> None:
+    domain = session.get(Domain, domain_id)
+    if not domain:
+        return
+
     now = utcnow()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE domains
-            SET image_scan_failed = %s,
-                updated_at = %s
-            WHERE id = %s
-            """,
-            (now, now, domain_id),
-        )
-    conn.commit()
+    domain.image_scan_failed = now
+    domain.updated_at = now
+    session.add(domain)
 
 
 def request_javascript(url: str) -> str:
@@ -165,7 +137,7 @@ def initialise_webdriver() -> Optional[webdriver.Chrome]:
     user_data_dir = tempfile.mkdtemp(prefix="chrome-profile-")
     options.add_argument(f"--user-data-dir={user_data_dir}")
 
-    checked_paths = []
+    checked_paths: List[str] = []
     chromedriver_path = shutil.which("chromedriver")
     if chromedriver_path:
         checked_paths.append(chromedriver_path)
@@ -198,11 +170,10 @@ def initialise_webdriver() -> Optional[webdriver.Chrome]:
     try:
         driver = webdriver.Chrome(service=service, options=options)
     except Exception as exc:
-        print(f"[ERROR] Failed to initialize WebDriver: {exc}")
+        print(f"[ERROR] Failed to initialise Chrome driver: {exc}")
         shutil.rmtree(user_data_dir, ignore_errors=True)
         return None
 
-    # Attach the temp directory for later cleanup
     driver._screenshot_user_data_dir = user_data_dir  # type: ignore[attr-defined]
     return driver
 
@@ -263,11 +234,13 @@ def capture_screenshot(driver: webdriver.Chrome, domain: str) -> Optional[str]:
 def main(postgres_dsn: Optional[str], limit: Optional[int]) -> None:
     """Capture HTTPS screenshots for domains missing image data."""
 
-    dsn = resolve_dsn(postgres_dsn)
+    dsn = resolve_sync_dsn(postgres_dsn)
+    engine = get_engine(dsn)
 
-    with psycopg.connect(dsn) as conn:
-        ensure_columns(conn)
-        candidates = fetch_candidate_domains(conn, limit)
+    ensure_columns(engine)
+
+    with session_scope(engine=engine) as session:
+        candidates = fetch_candidate_domains(session, limit)
 
     if not candidates:
         click.echo("[INFO] No domains require screenshots")
@@ -278,26 +251,26 @@ def main(postgres_dsn: Optional[str], limit: Optional[int]) -> None:
     driver = initialise_webdriver()
     if not driver:
         click.echo("[ERROR] Unable to initialise WebDriver; marking domains as failed")
-        with psycopg.connect(dsn) as conn:
+        with session_scope(engine=engine) as session:
             for domain in candidates:
-                mark_failure(conn, int(domain["id"]))
+                mark_failure(session, domain.id)
+                session.commit()
         return
 
     try:
-        with psycopg.connect(dsn) as conn:
+        with session_scope(engine=engine) as session:
             for domain in candidates:
-                domain_id = int(domain["id"])
-                domain_name = domain["name"]
-                click.echo(f"[INFO] Processing {domain_name}")
+                click.echo(f"[INFO] Processing {domain.name}")
 
                 if driver is None:
                     driver = initialise_webdriver()
                     if not driver:
                         click.echo("[ERROR] Unable to recover WebDriver session; marking failure")
-                        mark_failure(conn, domain_id)
+                        mark_failure(session, domain.id)
+                        session.commit()
                         continue
 
-                image_name = capture_screenshot(driver, domain_name)
+                image_name = capture_screenshot(driver, domain.name)
 
                 if getattr(driver, "session_id", None) is None:
                     cleanup_driver(driver)
@@ -312,9 +285,10 @@ def main(postgres_dsn: Optional[str], limit: Optional[int]) -> None:
                         driver = None
 
                 if image_name:
-                    mark_success(conn, domain_id, image_name)
+                    mark_success(session, domain.id, image_name)
                 else:
-                    mark_failure(conn, domain_id)
+                    mark_failure(session, domain.id)
+                session.commit()
     finally:
         if driver is not None:
             cleanup_driver(driver)

@@ -104,7 +104,7 @@ async def fetch_request_trends(
                 .limit(recent_limit)
             )
             recent_result = await session.exec(recent_stmt)
-            for stat in recent_result.all():
+            for stat in recent_result.scalars().all():
                 recent_requests.append(
                     {
                         "path": stat.path,

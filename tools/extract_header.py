@@ -19,6 +19,8 @@ from aiormq.exceptions import AMQPConnectionError
 import asyncpg
 import click
 import httpx
+
+from async_sqlmodel_helpers import asyncpg_pool_dsn
 from fake_useragent import UserAgent
 
 
@@ -103,12 +105,7 @@ class HeaderStats:
 
 class PostgresAsync:
     def __init__(self, dsn: str) -> None:
-        # Convert SQLAlchemy DSN to asyncpg format if needed
-        if dsn.startswith("postgresql+asyncpg://"):
-            dsn = "postgresql://" + dsn[len("postgresql+asyncpg://"):]
-        elif dsn.startswith("postgresql+psycopg://"):
-            dsn = "postgresql://" + dsn[len("postgresql+psycopg://"):]
-        self._dsn = dsn
+        self._dsn = asyncpg_pool_dsn(dsn)
         self._pool: Optional[asyncpg.Pool] = None
 
     async def get_pool(self) -> asyncpg.Pool:
@@ -394,15 +391,7 @@ async def iter_pending_domains(
     postgres_dsn: str,
     batch_size: int = 10_000,
 ) -> AsyncIterator[str]:
-    # Convert SQLAlchemy DSN to asyncpg format if needed
-    if postgres_dsn.startswith("postgresql+asyncpg://"):
-        dsn = "postgresql://" + postgres_dsn[len("postgresql+asyncpg://"):]
-    elif postgres_dsn.startswith("postgresql+psycopg://"):
-        dsn = "postgresql://" + postgres_dsn[len("postgresql+psycopg://"):]
-    else:
-        dsn = postgres_dsn
-    
-    pool = await asyncpg.create_pool(dsn)
+    pool = await asyncpg.create_pool(asyncpg_pool_dsn(postgres_dsn))
     try:
         async with pool.acquire() as conn:
             # Ensure the header_scan_state table exists
@@ -630,7 +619,7 @@ def main(
 
     # Count pending domains using PostgreSQL
     async def count_and_process():
-        pool = await asyncpg.create_pool(postgres_dsn)
+        pool = await asyncpg.create_pool(asyncpg_pool_dsn(postgres_dsn))
         try:
             async with pool.acquire() as conn:
                 # Ensure the header_scan_state table exists

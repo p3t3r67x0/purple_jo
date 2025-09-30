@@ -37,6 +37,7 @@ from shared.models.postgres import (  # noqa: E402
     Domain, ARecord, AAAARecord, NSRecord, MXRecord,
     SoaRecord, CNAMERecord
 )
+from async_sqlmodel_helpers import normalise_async_dsn
 
 # Constants
 DEFAULT_PREFETCH = 800
@@ -100,17 +101,10 @@ class PostgresAsync:
     """Async PostgreSQL connection manager."""
     
     def __init__(self, postgres_dsn: str) -> None:
-        # Convert sync postgresql:// URL to async postgresql+asyncpg://
-        if postgres_dsn.startswith("postgresql://"):
-            postgres_dsn = postgres_dsn.replace("postgresql://",
-                                                "postgresql+asyncpg://")
-        elif not postgres_dsn.startswith("postgresql+asyncpg://"):
-            # If no scheme, assume we need asyncpg
-            if "://" not in postgres_dsn:
-                postgres_dsn = f"postgresql+asyncpg://{postgres_dsn}"
+        normalised = normalise_async_dsn(postgres_dsn)
 
         self._engine = create_async_engine(
-            postgres_dsn,
+            normalised,
             echo=False,
             pool_size=20,  # Increased for better concurrency
             max_overflow=50,  # Higher overflow for burst traffic

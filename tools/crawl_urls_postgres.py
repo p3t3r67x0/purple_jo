@@ -42,6 +42,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import CrawlStatus, Domain, Url
+from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
 
 
 log = logging.getLogger(__name__)
@@ -146,21 +147,7 @@ class PostgresAsync:
     """Async PostgreSQL database operations for the crawler."""
 
     def __init__(self, postgres_dsn: str) -> None:
-        # Convert asyncpg DSN to psycopg DSN if needed
-        if postgres_dsn.startswith("postgresql+asyncpg://"):
-            postgres_dsn = postgres_dsn.replace(
-                "postgresql+asyncpg://", "postgresql+psycopg://"
-            )
-        elif postgres_dsn.startswith("postgresql://"):
-            postgres_dsn = postgres_dsn.replace(
-                "postgresql://", "postgresql+psycopg://"
-            )
-        elif not postgres_dsn.startswith("postgresql+psycopg://"):
-            # If no scheme, assume we need psycopg
-            if "://" not in postgres_dsn:
-                postgres_dsn = f"postgresql+psycopg://{postgres_dsn}"
-
-        self.postgres_dsn = postgres_dsn
+        self.postgres_dsn = normalise_async_dsn(postgres_dsn)
         self._engine = None
         self._session_factory = None
 
@@ -754,6 +741,8 @@ def main(
 ) -> None:
     """URL crawler using PostgreSQL backend."""
     configure_logging(log_level)
+
+    postgres_dsn = resolve_async_dsn(postgres_dsn)
 
     if enqueue:
         if not rabbitmq_url:

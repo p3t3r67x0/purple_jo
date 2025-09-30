@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Optional
 
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
@@ -38,6 +39,19 @@ def normalise_async_dsn(dsn: str) -> str:
     if "://" not in dsn:
         return f"postgresql+asyncpg://{dsn}"
     return dsn
+
+
+def asyncpg_pool_dsn(dsn: str) -> str:
+    """Return a DSN compatible with asyncpg based on the provided input."""
+
+    normalised = normalise_async_dsn(dsn)
+    try:
+        url = make_url(normalised)
+    except ArgumentError as exc:  # pragma: no cover - defensive
+        raise RuntimeError("Invalid POSTGRES_DSN configuration") from exc
+
+    drivername = url.drivername.split("+", 1)[0]
+    return str(url.set(drivername=drivername))
 
 
 def resolve_async_dsn(explicit: Optional[str] = None) -> str:
@@ -105,6 +119,7 @@ async def dispose_engine() -> None:
 
 __all__ = [
     "AsyncSession",
+    "asyncpg_pool_dsn",
     "dispose_engine",
     "get_engine",
     "get_session_factory",

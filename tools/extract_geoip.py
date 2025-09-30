@@ -43,22 +43,17 @@ from sqlmodel import select, delete
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import Domain, GeoPoint, ARecord  # noqa: E402
+from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
 
 
 class PostgresAsync:
     """Async PostgreSQL connection manager."""
     
     def __init__(self, dsn: str):
-        # Convert DSN to use asyncpg driver (consistent with other tools)
-        if dsn.startswith("postgresql://"):
-            dsn = dsn.replace("postgresql://", "postgresql+asyncpg://")
-        elif not dsn.startswith("postgresql+asyncpg://"):
-            # If no scheme, assume we need asyncpg
-            if "://" not in dsn:
-                dsn = f"postgresql+asyncpg://{dsn}"
+        normalised = normalise_async_dsn(dsn)
 
         self._engine = create_async_engine(
-            dsn,
+            normalised,
             echo=False,
             pool_size=5,
             max_overflow=10,
@@ -634,8 +629,10 @@ def main(
     prefetch = max(1, prefetch)
     concurrency = max(1, concurrency)
 
+    resolved_dsn = resolve_async_dsn(postgres_dsn)
+
     base_settings = WorkerSettings(
-        postgres_dsn=postgres_dsn,
+        postgres_dsn=resolved_dsn,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,

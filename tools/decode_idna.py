@@ -10,6 +10,8 @@ import click
 
 from idna.core import IDNAError
 
+from async_sqlmodel_helpers import asyncpg_pool_dsn
+
 
 def utcnow() -> datetime:
     """Return a naive UTC timestamp compatible with PostgreSQL columns."""
@@ -18,7 +20,7 @@ def utcnow() -> datetime:
 
 async def create_postgres_pool(dsn: str) -> asyncpg.Pool:
     """Create a PostgreSQL connection pool."""
-    return await asyncpg.create_pool(dsn)
+    return await asyncpg.create_pool(asyncpg_pool_dsn(dsn))
 
 
 async def retrieve_idna_domains(pool: asyncpg.Pool) -> List[Tuple[int, str]]:

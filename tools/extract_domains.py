@@ -27,6 +27,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import Domain, Url
+from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
 
 
 def utcnow() -> datetime:
@@ -37,7 +38,7 @@ def utcnow() -> datetime:
 async def get_postgres_session(postgres_dsn: str) -> AsyncSession:
     """Create a PostgreSQL session."""
     engine = create_async_engine(
-        postgres_dsn,
+        normalise_async_dsn(postgres_dsn),
         echo=False,
         pool_size=5,
         max_overflow=10,
@@ -165,6 +166,8 @@ async def count_unprocessed_urls(postgres_dsn: str) -> int:
 @click.option('--postgres-dsn', required=True, type=str, help='PostgreSQL DSN')
 def main(workers, postgres_dsn):
     """Extract domains from URLs using PostgreSQL backend."""
+    postgres_dsn = resolve_async_dsn(postgres_dsn)
+
     total_docs = asyncio.run(count_unprocessed_urls(postgres_dsn))
     print(f"Found {total_docs} URLs to process")
     

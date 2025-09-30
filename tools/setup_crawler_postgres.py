@@ -24,6 +24,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
+
 try:
     from shared.models.postgres import CrawlStatus, Domain
 except ImportError as exc:  # pragma: no cover - defensive
@@ -45,9 +47,9 @@ def utcnow() -> datetime:
 async def get_session(postgres_dsn: str) -> AsyncSession:
     """Get a database session."""
     from sqlalchemy.ext.asyncio import create_async_engine
-    
+
     engine = create_async_engine(
-        postgres_dsn,
+        normalise_async_dsn(postgres_dsn),
         echo=False,
         pool_size=10,
         max_overflow=20,
@@ -194,6 +196,8 @@ def main(
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    postgres_dsn = resolve_async_dsn(postgres_dsn)
     
     async def run_operations():
         if populate:

@@ -5,7 +5,15 @@ from __future__ import annotations
 from datetime import datetime, UTC
 from typing import Optional, TYPE_CHECKING
 
-from sqlalchemy import Column, DateTime, Index, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    event,
+)
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel
 
@@ -69,6 +77,20 @@ class Domain(SQLModel, table=True):
             "image_scan_failed", DateTime(timezone=True), nullable=True
         ),
     )
+
+
+@event.listens_for(Domain, "before_insert", propagate=True)
+def _lowercase_domain_before_insert(_mapper, _connection, target: Domain) -> None:
+    """Normalise domain names to lowercase before inserting."""
+    if target.name:
+        target.name = target.name.lower()
+
+
+@event.listens_for(Domain, "before_update", propagate=True)
+def _lowercase_domain_before_update(_mapper, _connection, target: Domain) -> None:
+    """Normalise domain names to lowercase before updating."""
+    if target.name:
+        target.name = target.name.lower()
 
 
 class ARecord(SQLModel, table=True):

@@ -11,7 +11,7 @@ from typing import Iterable, Tuple
 
 from sqlmodel import Session, select
 
-from app.models.postgres import SubnetLookup
+from shared.models.postgres import SubnetLookup
 from tools.sqlmodel_helpers import resolve_sync_dsn, session_scope
 
 

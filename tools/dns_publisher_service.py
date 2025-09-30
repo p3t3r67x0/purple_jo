@@ -28,7 +28,7 @@ import click
 from aio_pika import DeliveryMode, Message
 from sqlmodel import select, func
 
-from app.models.postgres import Domain, ARecord  # noqa: E402
+from shared.models.postgres import Domain, ARecord  # noqa: E402
 
 # Import shared components (will create these next)
 from tools.dns_shared import (  # noqa: E402

@@ -33,7 +33,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.postgres import (  # noqa: E402
+from shared.models.postgres import (  # noqa: E402
     Domain, ARecord, AAAARecord, NSRecord, MXRecord,
     SoaRecord, CNAMERecord
 )

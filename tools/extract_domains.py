@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.postgres import Domain, Url
+from shared.models.postgres import Domain, Url
 
 
 def utcnow() -> datetime:

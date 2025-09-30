@@ -26,7 +26,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from app.models.postgres import Domain, PortService
+from shared.models.postgres import Domain, PortService
 from tools.sqlmodel_helpers import get_engine, resolve_sync_dsn, session_scope
 
 SCREENSHOT_DIR = Path("screenshots")

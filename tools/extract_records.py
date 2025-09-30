@@ -46,7 +46,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlmodel import select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.postgres import (  # noqa: E402
+from shared.models.postgres import (  # noqa: E402
     Domain, ARecord, AAAARecord, NSRecord, MXRecord,
     SoaRecord, CNAMERecord, TXTRecord
 )

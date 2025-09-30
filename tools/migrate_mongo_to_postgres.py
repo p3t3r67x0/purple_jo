@@ -23,8 +23,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from sqlalchemy import delete, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.db_postgres import get_session_factory, init_db
-from app.models.postgres import (
+from tools.async_sqlmodel_helpers import get_session_factory, init_db
+from shared.models.postgres import (
     AAAARecord,
     ARecord,
     CNAMERecord,
@@ -38,7 +38,6 @@ from app.models.postgres import (
     SSLSubjectAltName,
     WhoisRecord,
 )
-from app.settings import get_settings
 
 logger = logging.getLogger("mongo_to_postgres")
 
@@ -485,8 +484,6 @@ def configure_logging(level: str) -> None:
 async def async_main() -> None:
     args = parse_args()
     configure_logging(args.log_level.upper())
-    # ensure settings picks up .env before imports use it
-    get_settings()
     await migrate(
         mongo_uri=args.mongo_uri,
         mongo_db=args.mongo_db,

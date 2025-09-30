@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlmodel import select, delete
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.postgres import Domain, GeoPoint, ARecord  # noqa: E402
+from shared.models.postgres import Domain, GeoPoint, ARecord  # noqa: E402
 
 
 class PostgresAsync:

@@ -611,14 +611,6 @@ async def direct_worker(settings: DirectWorkerSettings) -> str:
             # Find domains that need SSL scanning
             stmt = (
                 select(Domain.name)
-                .join(PortService, Domain.id == PortService.domain_id)
-                .outerjoin(SSLData, Domain.id == SSLData.domain_id)
-                .where(
-                    PortService.port.in_(settings.ports),
-                    PortService.status == "open", 
-                    SSLData.id.is_(None)  # No SSL data exists
-                )
-                .distinct()
                 .offset(settings.skip)
                 .limit(settings.limit)
             )

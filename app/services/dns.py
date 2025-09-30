@@ -44,5 +44,11 @@ async def fetch_dns_records(domain: str) -> dict:
         records["txt_record"] = [r.text for r in txt_record]
     except Exception:
         pass
+    
+    try:
+        cname_record = await resolver.query(domain, "CNAME")
+        records["cname_record"] = [r.host for r in cname_record]
+    except Exception:
+        pass
 
     return records

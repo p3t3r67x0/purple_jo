@@ -196,6 +196,8 @@ async def perform_live_scan(
         "ns_record": dns_records.get("ns_record"),
         "mx_record": dns_records.get("mx_record"),
         "soa_record": dns_records.get("soa_record"),
+        "cname_record": dns_records.get("cname_record"),
+        "txt_record": dns_records.get("txt_record"),
         "header": headers,
         "ports": ports_info,
         "whois": whois_info,

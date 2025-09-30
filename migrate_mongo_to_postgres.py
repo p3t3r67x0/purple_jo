@@ -134,7 +134,7 @@ async def migrate_domain_document(
         # Check if domain already exists
         stmt = select(Domain).where(Domain.name == domain_name)
         result = await session.exec(stmt)
-        existing_domain = result.scalars().first()
+        existing_domain = result.first()
 
         # Extract timestamps
         created_at = parse_datetime(mongo_doc.get('created')) or datetime.utcnow()
@@ -284,6 +284,21 @@ async def migrate_dns_records(
                 record = CNAMERecord(
                     domain_id=domain.id,
                     target=cname['target'][:255],
+                    updated_at=updated_at
+                )
+                session.add(record)
+                stats.records_created += 1
+
+    # TXT Records
+    txt_records = mongo_doc.get('txt_record', [])
+    if isinstance(txt_records, list):
+        for txt in txt_records:
+            if txt and isinstance(txt, str):
+                # If you have a TxtRecord model, use it here
+                from app.models.postgres import TxtRecord
+                record = TxtRecord(
+                    domain_id=domain.id,
+                    value=txt[:255],
                     updated_at=updated_at
                 )
                 session.add(record)
@@ -607,6 +622,12 @@ def main(mongo_uri: str, batch_size: int, dry_run: bool, skip_dns: bool, skip_ur
         logger.info("Migration completed successfully!")
     
     asyncio.run(run_migration())
+
+
+# NOTE: When querying Domain objects in FastAPI, always use selectinload for relationships
+# to avoid MissingGreenlet errors due to async lazy loading.
+# Example:
+# stmt = select(Domain).options(selectinload(Domain.txt_records))
 
 
 if __name__ == '__main__':

@@ -21,6 +21,7 @@ from app.models.postgres import (
     GeoPoint,
     MXRecord,
     NSRecord,
+    TXTRecord,
     PortService,
     SSLData,
     SSLSubjectAltName,
@@ -42,6 +43,7 @@ def _domain_relationship_options() -> Sequence:
         selectinload(Domain.soa_records),
         selectinload(Domain.mx_records),
         selectinload(Domain.cname_records),
+        selectinload(Domain.txt_records),
         selectinload(Domain.ports),
         selectinload(Domain.geo),
         selectinload(Domain.whois),
@@ -153,6 +155,7 @@ def _serialize_ssl(ssl: Optional[SSLData]) -> Optional[Dict[str, Any]]:
 
 
 def _serialize_dns_domain(domain: Domain) -> Dict[str, Any]:
+    print(domain)
     payload: Dict[str, Any] = {
         "domain": domain.name,
         "updated": (
@@ -176,7 +179,8 @@ def _serialize_dns_domain(domain: Domain) -> Dict[str, Any]:
             record.ip_address for record in domain.a_records
         ]
     if domain.aaaa_records:
-        payload["aaaa_record"] = [record.ip_address for record in domain.aaaa_records]
+        payload["aaaa_record"] = [
+            record.ip_address for record in domain.aaaa_records]
     if domain.ns_records:
         payload["ns_record"] = [record.value for record in domain.ns_records]
     if domain.soa_records:
@@ -190,7 +194,13 @@ def _serialize_dns_domain(domain: Domain) -> Dict[str, Any]:
             for record in domain.mx_records
         ]
     if domain.cname_records:
-        payload["cname_record"] = [record.target for record in domain.cname_records]
+        payload["cname_record"] = [
+            record.target for record in domain.cname_records
+        ]
+    if domain.txt_records:
+        payload["txt_record"] = [
+            record.content for record in domain.txt_records
+        ]
     if domain.ports:
         payload["ports"] = [
             {
@@ -269,7 +279,8 @@ async def fetch_query_domain(
             for domain_obj in domains
         ]
 
-        total_stmt = select(func.count(func.distinct(Domain.id))).where(filter_expr)
+        total_stmt = select(func.count(
+            func.distinct(Domain.id))).where(filter_expr)
         total = await _scalar(session, total_stmt, default=0)
         return items, total
 
@@ -692,7 +703,8 @@ async def fetch_match_condition(
                 return [scan_result], 1
 
         items = [_serialize_dns_domain(domain_obj) for domain_obj in domains]
-        total_stmt = select(func.count(func.distinct(Domain.id))).where(filter_expr)
+        total_stmt = select(func.count(
+            func.distinct(Domain.id))).where(filter_expr)
         total = await _scalar(session, total_stmt, default=0)
         return items, total
 
@@ -712,7 +724,6 @@ async def extract_graph(
     session: AsyncSession,
 ) -> Dict[str, Any]:
     return await build_domain_graph(session, domain)
-
 
 
 async def _fetch_latest_ipv4_postgres(
@@ -758,7 +769,8 @@ async def _fetch_latest_dns_postgres(
     domains = result.scalars().unique().all()
     items = [_serialize_dns_domain(domain) for domain in domains]
 
-    total_stmt = select(func.count()).select_from(Domain).where(Domain.a_records.any())
+    total_stmt = select(func.count()).select_from(
+        Domain).where(Domain.a_records.any())
     total = await _scalar(session, total_stmt, default=0)
     return items, total
 

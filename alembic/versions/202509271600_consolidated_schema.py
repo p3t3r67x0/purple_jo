@@ -67,11 +67,12 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint(
-            "domain_id",
-            "ip_address",
-            name="uq_a_records_domain_id_ip_address",
-        ),
+    )
+    op.create_index(
+        "ux_a_records_domain_id_ip_address",
+        "a_records",
+        ["domain_id", "ip_address"],
+        unique=True,
     )
     op.create_index("ix_a_records_domain_id", "a_records", ["domain_id"], unique=False)
     op.create_index("ix_a_records_ip", "a_records", ["ip_address"], unique=False)
@@ -86,11 +87,12 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint(
-            "domain_id",
-            "ip_address",
-            name="uq_aaaa_records_domain_id_ip_address",
-        ),
+    )
+    op.create_index(
+        "ux_aaaa_records_domain_id_ip_address",
+        "aaaa_records",
+        ["domain_id", "ip_address"],
+        unique=True,
     )
     op.create_index("ix_aaaa_records_domain_id", "aaaa_records", ["domain_id"], unique=False)
     op.create_index("ix_aaaa_records_ip", "aaaa_records", ["ip_address"], unique=False)
@@ -104,11 +106,12 @@ def upgrade() -> None:
         sa.Column("value", sa.String(length=255), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint(
-            "domain_id",
-            "value",
-            name="uq_ns_records_domain_id_value",
-        ),
+    )
+    op.create_index(
+        "ux_ns_records_domain_id_value",
+        "ns_records",
+        ["domain_id", "value"],
+        unique=True,
     )
     op.create_index("ix_ns_records_domain_id", "ns_records", ["domain_id"], unique=False)
     op.create_index("ix_ns_records_value", "ns_records", ["value"], unique=False)
@@ -122,11 +125,12 @@ def upgrade() -> None:
         sa.Column("value", sa.String(length=255), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint(
-            "domain_id",
-            "value",
-            name="uq_soa_records_domain_id_value",
-        ),
+    )
+    op.create_index(
+        "ux_soa_records_domain_id_value",
+        "soa_records",
+        ["domain_id", "value"],
+        unique=True,
     )
     op.create_index("ix_soa_records_domain_id", "soa_records", ["domain_id"], unique=False)
     op.create_index("ix_soa_records_value", "soa_records", ["value"], unique=False)
@@ -141,12 +145,12 @@ def upgrade() -> None:
         sa.Column("priority", sa.Integer(), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint(
-            "domain_id",
-            "exchange",
-            "priority",
-            name="uq_mx_records_domain_id_exchange_priority",
-        ),
+    )
+    op.create_index(
+        "ux_mx_records_domain_id_exchange_priority",
+        "mx_records",
+        ["domain_id", "exchange", "priority"],
+        unique=True,
     )
     op.create_index("ix_mx_records_domain_id", "mx_records", ["domain_id"], unique=False)
     op.create_index("ix_mx_records_exchange", "mx_records", ["exchange"], unique=False)
@@ -161,11 +165,12 @@ def upgrade() -> None:
         sa.Column("target", sa.String(length=255), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint(
-            "domain_id",
-            "target",
-            name="uq_cname_records_domain_id_target",
-        ),
+    )
+    op.create_index(
+        "ux_cname_records_domain_id_target",
+        "cname_records",
+        ["domain_id", "target"],
+        unique=True,
     )
     op.create_index("ix_cname_records_domain_id", "cname_records", ["domain_id"], unique=False)
     op.create_index("ix_cname_records_target", "cname_records", ["target"], unique=False)
@@ -179,11 +184,12 @@ def upgrade() -> None:
         sa.Column("content", sa.String(length=1000), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["domain_id"], ["domains.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint(
-            "domain_id",
-            "content",
-            name="uq_txt_records_domain_id_content",
-        ),
+    )
+    op.create_index(
+        "ux_txt_records_domain_id_content",
+        "txt_records",
+        ["domain_id", "content"],
+        unique=True,
     )
     op.create_index("ix_txt_records_domain_id", "txt_records", ["domain_id"], unique=False)
     op.create_index("ix_txt_records_updated_at", "txt_records", ["updated_at"], unique=False)
@@ -465,36 +471,43 @@ def downgrade() -> None:
     op.drop_index("ix_port_services_domain_id", table_name="port_services")
     op.drop_table("port_services")
     
+    op.drop_index("ux_txt_records_domain_id_content", table_name="txt_records")
     op.drop_index("ix_txt_records_updated_at", table_name="txt_records")
     op.drop_index("ix_txt_records_domain_id", table_name="txt_records")
     op.drop_table("txt_records")
-    
+
+    op.drop_index("ux_cname_records_domain_id_target", table_name="cname_records")
     op.drop_index("ix_cname_records_updated_at", table_name="cname_records")
     op.drop_index("ix_cname_records_target", table_name="cname_records")
     op.drop_index("ix_cname_records_domain_id", table_name="cname_records")
     op.drop_table("cname_records")
-    
+
+    op.drop_index("ux_mx_records_domain_id_exchange_priority", table_name="mx_records")
     op.drop_index("ix_mx_records_updated_at", table_name="mx_records")
     op.drop_index("ix_mx_records_priority", table_name="mx_records")
     op.drop_index("ix_mx_records_exchange", table_name="mx_records")
     op.drop_index("ix_mx_records_domain_id", table_name="mx_records")
     op.drop_table("mx_records")
-    
+
+    op.drop_index("ux_soa_records_domain_id_value", table_name="soa_records")
     op.drop_index("ix_soa_records_updated_at", table_name="soa_records")
     op.drop_index("ix_soa_records_value", table_name="soa_records")
     op.drop_index("ix_soa_records_domain_id", table_name="soa_records")
     op.drop_table("soa_records")
-    
+
+    op.drop_index("ux_ns_records_domain_id_value", table_name="ns_records")
     op.drop_index("ix_ns_records_updated_at", table_name="ns_records")
     op.drop_index("ix_ns_records_value", table_name="ns_records")
     op.drop_index("ix_ns_records_domain_id", table_name="ns_records")
     op.drop_table("ns_records")
-    
+
+    op.drop_index("ux_aaaa_records_domain_id_ip_address", table_name="aaaa_records")
     op.drop_index("ix_aaaa_records_updated_at", table_name="aaaa_records")
     op.drop_index("ix_aaaa_records_ip", table_name="aaaa_records")
     op.drop_index("ix_aaaa_records_domain_id", table_name="aaaa_records")
     op.drop_table("aaaa_records")
-    
+
+    op.drop_index("ux_a_records_domain_id_ip_address", table_name="a_records")
     op.drop_index("ix_a_records_updated_at", table_name="a_records")
     op.drop_index("ix_a_records_ip", table_name="a_records")
     op.drop_index("ix_a_records_domain_id", table_name="a_records")

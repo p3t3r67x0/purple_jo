@@ -74,8 +74,11 @@ class Domain(SQLModel, table=True):
 class ARecord(SQLModel, table=True):
     __tablename__ = "a_records"
     __table_args__ = (
-        UniqueConstraint(
-            "domain_id", "ip_address", name="uq_a_records_domain_id_ip_address"
+        Index(
+            "ux_a_records_domain_id_ip_address",
+            "domain_id",
+            "ip_address",
+            unique=True,
         ),
     )
 
@@ -91,8 +94,11 @@ class ARecord(SQLModel, table=True):
 class AAAARecord(SQLModel, table=True):
     __tablename__ = "aaaa_records"
     __table_args__ = (
-        UniqueConstraint(
-            "domain_id", "ip_address", name="uq_aaaa_records_domain_id_ip_address"
+        Index(
+            "ux_aaaa_records_domain_id_ip_address",
+            "domain_id",
+            "ip_address",
+            unique=True,
         ),
     )
 
@@ -108,8 +114,11 @@ class AAAARecord(SQLModel, table=True):
 class NSRecord(SQLModel, table=True):
     __tablename__ = "ns_records"
     __table_args__ = (
-        UniqueConstraint(
-            "domain_id", "value", name="uq_ns_records_domain_id_value"
+        Index(
+            "ux_ns_records_domain_id_value",
+            "domain_id",
+            "value",
+            unique=True,
         ),
     )
 
@@ -122,8 +131,11 @@ class NSRecord(SQLModel, table=True):
 class SoaRecord(SQLModel, table=True):
     __tablename__ = "soa_records"
     __table_args__ = (
-        UniqueConstraint(
-            "domain_id", "value", name="uq_soa_records_domain_id_value"
+        Index(
+            "ux_soa_records_domain_id_value",
+            "domain_id",
+            "value",
+            unique=True,
         ),
     )
 
@@ -136,11 +148,12 @@ class SoaRecord(SQLModel, table=True):
 class MXRecord(SQLModel, table=True):
     __tablename__ = "mx_records"
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "ux_mx_records_domain_id_exchange_priority",
             "domain_id",
             "exchange",
             "priority",
-            name="uq_mx_records_domain_id_exchange_priority",
+            unique=True,
         ),
     )
 
@@ -156,8 +169,11 @@ class MXRecord(SQLModel, table=True):
 class CNAMERecord(SQLModel, table=True):
     __tablename__ = "cname_records"
     __table_args__ = (
-        UniqueConstraint(
-            "domain_id", "target", name="uq_cname_records_domain_id_target"
+        Index(
+            "ux_cname_records_domain_id_target",
+            "domain_id",
+            "target",
+            unique=True,
         ),
     )
 
@@ -172,8 +188,11 @@ class CNAMERecord(SQLModel, table=True):
 class TXTRecord(SQLModel, table=True):
     __tablename__ = "txt_records"
     __table_args__ = (
-        UniqueConstraint(
-            "domain_id", "content", name="uq_txt_records_domain_id_content"
+        Index(
+            "ux_txt_records_domain_id_content",
+            "domain_id",
+            "content",
+            unique=True,
         ),
     )
 

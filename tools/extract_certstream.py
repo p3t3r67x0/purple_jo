@@ -27,7 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.postgres import Domain
+from shared.models.postgres import Domain
 
 
 ENV_PATH = Path(__file__).resolve().parents[1] / ".env"

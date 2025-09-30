@@ -41,7 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.postgres import CrawlStatus, Domain, Url
+from shared.models.postgres import CrawlStatus, Domain, Url
 
 
 log = logging.getLogger(__name__)

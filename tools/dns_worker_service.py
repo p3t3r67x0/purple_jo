@@ -32,7 +32,7 @@ import click
 from aio_pika import DeliveryMode, Message
 from aiormq.exceptions import AMQPConnectionError
 
-from app.models.postgres import (  # noqa: E402
+from shared.models.postgres import (  # noqa: E402
     Domain, ARecord, AAAARecord, NSRecord, MXRecord,
     SoaRecord, CNAMERecord
 )

@@ -25,7 +25,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 try:
-    from app.models.postgres import CrawlStatus, Domain
+    from shared.models.postgres import CrawlStatus, Domain
 except ImportError as exc:  # pragma: no cover - defensive
     print("Error: Missing required dependencies. Ensure project dependencies are installed.")
     print(f"Import error: {exc}")

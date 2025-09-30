@@ -11,7 +11,7 @@ from typing import Iterable
 
 from sqlmodel import Session, select
 
-from app.models.postgres import Url
+from shared.models.postgres import Url
 from tools.sqlmodel_helpers import resolve_sync_dsn, session_scope
 
 

@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.postgres import Domain, PortService, SSLData, SSLSubjectAltName
+from shared.models.postgres import Domain, PortService, SSLData, SSLSubjectAltName
 
 
 STOP_SENTINEL = b"__STOP__"

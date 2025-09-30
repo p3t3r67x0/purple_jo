@@ -12,7 +12,7 @@ from typing import Any, Dict
 
 from sqlmodel import Session, select
 
-from app.models.postgres import (
+from shared.models.postgres import (
     AAAARecord,
     ARecord,
     CNAMERecord,

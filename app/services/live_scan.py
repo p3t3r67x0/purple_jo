@@ -23,6 +23,7 @@ from app.models.postgres import (
     SoaRecord,
     SSLData,
     SSLSubjectAltName,
+    TXTRecord,
     WhoisRecord,
 )
 
@@ -307,6 +308,9 @@ async def _persist_live_result_postgres(
         delete(PortService).where(PortService.domain_id == domain.id)
     )
     await session.exec(
+        delete(TXTRecord).where(TXTRecord.domain_id == domain.id)
+    )
+    await session.exec(
         delete(WhoisRecord).where(WhoisRecord.domain_id == domain.id)
     )
     await session.exec(delete(GeoPoint).where(GeoPoint.domain_id == domain.id))
@@ -384,6 +388,24 @@ async def _persist_live_result_postgres(
                 port=port_int,
                 status=entry.get("status"),
                 service=entry.get("service"),
+                updated_at=updated_at,
+            )
+        )
+
+    for target in _unique(result.get("cname_record")):
+        session.add(
+            CNAMERecord(
+                domain_id=domain.id,
+                target=target,
+                updated_at=updated_at,
+            )
+        )
+
+    for content in _unique(result.get("txt_record")):
+        session.add(
+            TXTRecord(
+                domain_id=domain.id,
+                content=content,
                 updated_at=updated_at,
             )
         )

@@ -6,55 +6,13 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
-import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Tuple
 
-import psycopg
+from sqlmodel import Session, select
 
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-
-
-def _parse_env_file(path: Path) -> dict[str, str]:
-    env_vars: dict[str, str] = {}
-    if not path.exists():
-        return env_vars
-
-    with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            env_vars[key.strip()] = value.strip().strip('"\'')
-    return env_vars
-
-
-def resolve_dsn(explicit: str | None = None) -> str:
-    if explicit:
-        dsn = explicit
-    elif "POSTGRES_DSN" in os.environ:
-        dsn = os.environ["POSTGRES_DSN"]
-    else:
-        env_vars = _parse_env_file(ENV_PATH)
-        dsn = env_vars.get("POSTGRES_DSN")
-
-    if not dsn:
-        raise ValueError("POSTGRES_DSN not provided via flag, env var, or .env file")
-
-    if dsn.startswith("postgresql+asyncpg://"):
-        dsn = "postgresql://" + dsn[len("postgresql+asyncpg://") :]
-    elif dsn.startswith("postgresql+psycopg://"):
-        dsn = "postgresql://" + dsn[len("postgresql+psycopg://") :]
-    elif "://" not in dsn:
-        dsn = f"postgresql://{dsn}"
-
-    return dsn
-
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+from app.models.postgres import SubnetLookup
+from tools.sqlmodel_helpers import resolve_sync_dsn, session_scope
 
 
 def load_entries(path: Path) -> Iterable[str]:
@@ -82,30 +40,20 @@ def parse_entry(entry: str) -> Tuple[str, str, str]:
     return cidr, ip_start, ip_end
 
 
-def insert_subnet(conn: psycopg.Connection, cidr: str, ip_start: str, ip_end: str) -> bool:
-    now = utcnow()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO subnet_lookups (cidr, ip_start, ip_end, source, created_at, updated_at)
-            SELECT %s, %s, %s, %s, %s, %s
-            WHERE NOT EXISTS (
-                SELECT 1 FROM subnet_lookups WHERE cidr = %s
-            )
-            """,
-            (
-                cidr,
-                ip_start,
-                ip_end,
-                "import_ip",
-                now,
-                now,
-                cidr,
-            ),
+def insert_subnet(session: Session, cidr: str, ip_start: str, ip_end: str) -> bool:
+    existing = session.exec(select(SubnetLookup.id).where(SubnetLookup.cidr == cidr)).first()
+    if existing:
+        return False
+
+    session.add(
+        SubnetLookup(
+            cidr=cidr,
+            ip_start=ip_start,
+            ip_end=ip_end,
+            source="import_ip",
         )
-        inserted = cur.rowcount == 1
-    conn.commit()
-    return inserted
+    )
+    return True
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -127,7 +75,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    postgres_dsn = resolve_dsn(args.postgres_dsn)
+    postgres_dsn = resolve_sync_dsn(args.postgres_dsn)
 
     entries = list(load_entries(args.input))
     if not entries:
@@ -136,10 +84,11 @@ def main() -> None:
 
     print(f"[INFO] Importing {len(entries)} subnet entries into PostgreSQL")
 
-    with psycopg.connect(postgres_dsn) as conn:
+    with session_scope(dsn=postgres_dsn) as session:
         for entry in entries:
             cidr, ip_start, ip_end = parse_entry(entry)
-            inserted = insert_subnet(conn, cidr, ip_start, ip_end)
+            inserted = insert_subnet(session, cidr, ip_start, ip_end)
+            session.commit()
             if inserted:
                 print(f"INFO: Added subnet {cidr} ({ip_start} - {ip_end})")
             else:

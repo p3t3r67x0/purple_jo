@@ -25,14 +25,15 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import Domain
+from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
 
 
 class PostgresAsync:
     """PostgreSQL async connection manager."""
 
     def __init__(self, dsn: str):
-        self.dsn = dsn
-        self.engine = create_async_engine(dsn)
+        self.dsn = normalise_async_dsn(dsn)
+        self.engine = create_async_engine(self.dsn)
         self.session_factory = async_sessionmaker(
             bind=self.engine,
             class_=AsyncSession,
@@ -140,6 +141,8 @@ def main(postgres_dsn: str, verbose: bool):
         format='[%(levelname)s:%(name)s] %(asctime)s - %(message)s',
         level=log_level
     )
+
+    postgres_dsn = resolve_async_dsn(postgres_dsn)
 
     click.echo("[INFO] Starting Certificate Transparency monitor...")
     click.echo(f"[INFO] PostgreSQL DSN: {postgres_dsn}")

@@ -34,6 +34,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import Domain, PortService, SSLData, SSLSubjectAltName
+from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
 
 
 STOP_SENTINEL = b"__STOP__"
@@ -112,8 +113,8 @@ class ScanStats:
 
 class PostgresAsync:
     def __init__(self, postgres_dsn: str) -> None:
-        self.postgres_dsn = postgres_dsn
-        self.engine = create_async_engine(postgres_dsn)
+        self.postgres_dsn = normalise_async_dsn(postgres_dsn)
+        self.engine = create_async_engine(self.postgres_dsn)
         self.session_factory = async_sessionmaker(
             bind=self.engine,
             class_=AsyncSession,
@@ -683,6 +684,8 @@ def main(
     """PostgreSQL-backed SSL certificate scanner with RabbitMQ support."""
     log_level = logging.DEBUG if verbose else logging.INFO
     configure_logging(log_level)
+
+    postgres_dsn = resolve_async_dsn(postgres_dsn)
 
     # Test database connection before proceeding
     async def test_connection():

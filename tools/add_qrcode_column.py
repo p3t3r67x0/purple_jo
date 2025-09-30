@@ -7,10 +7,12 @@ import asyncio
 
 import asyncpg
 
+from async_sqlmodel_helpers import asyncpg_pool_dsn
+
 
 async def add_qrcode_column(postgres_dsn: str) -> None:
     """Add the qrcode column to the domains table if missing."""
-    conn = await asyncpg.connect(postgres_dsn)
+    conn = await asyncpg.connect(asyncpg_pool_dsn(postgres_dsn))
 
     try:
         exists = await conn.fetchval(

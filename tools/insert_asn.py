@@ -7,6 +7,8 @@ from typing import List
 import asyncpg
 import click
 
+from async_sqlmodel_helpers import asyncpg_pool_dsn
+
 
 def utcnow() -> datetime:
     """Return a naive UTC timestamp compatible with PostgreSQL columns."""
@@ -15,7 +17,7 @@ def utcnow() -> datetime:
 
 async def create_postgres_pool(dsn: str) -> asyncpg.Pool:
     """Create a PostgreSQL connection pool."""
-    return await asyncpg.create_pool(dsn)
+    return await asyncpg.create_pool(asyncpg_pool_dsn(dsn))
 
 
 async def check_asn_table(pool: asyncpg.Pool) -> None:

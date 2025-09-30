@@ -11,6 +11,8 @@ from ipwhois.net import Net
 import asyncpg
 import click
 
+from async_sqlmodel_helpers import asyncpg_pool_dsn
+
 
 BATCH_SIZE = 100  # how many records each worker processes at once
 
@@ -22,7 +24,7 @@ def utcnow() -> datetime:
 
 async def create_postgres_pool(dsn: str) -> asyncpg.Pool:
     """Create a PostgreSQL connection pool."""
-    return await asyncpg.create_pool(dsn)
+    return await asyncpg.create_pool(asyncpg_pool_dsn(dsn))
 
 
 def get_whois(ip: str) -> Optional[Dict[str, Any]]:

@@ -50,6 +50,7 @@ from shared.models.postgres import (  # noqa: E402
     Domain, ARecord, AAAARecord, NSRecord, MXRecord,
     SoaRecord, CNAMERecord, TXTRecord
 )
+from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
 
 
 STOP_SENTINEL = b"__STOP__"
@@ -155,17 +156,10 @@ class DNSStats:
 
 class PostgresAsync:
     def __init__(self, postgres_dsn: str) -> None:
-        # Convert sync postgresql:// URL to async postgresql+asyncpg://
-        if postgres_dsn.startswith("postgresql://"):
-            postgres_dsn = postgres_dsn.replace("postgresql://",
-                                                "postgresql+asyncpg://")
-        elif not postgres_dsn.startswith("postgresql+asyncpg://"):
-            # If no scheme, assume we need asyncpg
-            if "://" not in postgres_dsn:
-                postgres_dsn = f"postgresql+asyncpg://{postgres_dsn}"
+        normalised = normalise_async_dsn(postgres_dsn)
 
         self._engine = create_async_engine(
-            postgres_dsn,
+            normalised,
             echo=False,
             pool_size=50,  # Significantly increased for high concurrency
             max_overflow=100,  # Higher overflow for burst traffic
@@ -914,8 +908,10 @@ def main(
     concurrency = max(1, concurrency)
     prefetch = max(1, prefetch)
 
+    resolved_dsn = resolve_async_dsn(postgres_dsn)
+
     base_settings = WorkerSettings(
-        postgres_dsn=postgres_dsn,
+        postgres_dsn=resolved_dsn,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
@@ -942,7 +938,7 @@ def main(
         return
 
     # Create PostgreSQL connection for counting
-    postgres = PostgresAsync(postgres_dsn)
+    postgres = PostgresAsync(resolved_dsn)
 
     async def count_pending_domains():
         async with await postgres.get_session() as session:

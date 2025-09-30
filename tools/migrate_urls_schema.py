@@ -19,10 +19,12 @@ import click
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
+
 
 async def add_domain_extracted_column(postgres_dsn: str):
     """Add domain_extracted column to urls table."""
-    engine = create_async_engine(postgres_dsn, echo=True)
+    engine = create_async_engine(normalise_async_dsn(postgres_dsn), echo=True)
     
     try:
         # First, check if column exists and add it in a transaction
@@ -73,7 +75,7 @@ async def add_domain_extracted_column(postgres_dsn: str):
 def main(postgres_dsn: str):
     """Add domain_extracted column to urls table."""
     print("Adding domain_extracted column to urls table...")
-    asyncio.run(add_domain_extracted_column(postgres_dsn))
+    asyncio.run(add_domain_extracted_column(resolve_async_dsn(postgres_dsn)))
     print("Migration completed successfully!")
 
 

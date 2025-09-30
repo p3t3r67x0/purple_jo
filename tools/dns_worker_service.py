@@ -43,6 +43,7 @@ from tools.dns_shared import (  # noqa: E402
     configure_logging, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT,
     DEFAULT_PREFETCH
 )
+from async_sqlmodel_helpers import resolve_async_dsn
 
 log = logging.getLogger(__name__)
 STOP_SENTINEL = b"__STOP__"
@@ -217,9 +218,11 @@ def main(
     
     log_level = logging.DEBUG if verbose else logging.INFO
     configure_logging(log_level)
-    
+
+    resolved_dsn = resolve_async_dsn(postgres_dsn)
+
     settings = WorkerServiceSettings(
-        postgres_dsn=postgres_dsn,
+        postgres_dsn=resolved_dsn,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,

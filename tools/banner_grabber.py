@@ -13,6 +13,8 @@ from typing import List
 import asyncpg
 import click
 
+from async_sqlmodel_helpers import asyncpg_pool_dsn
+
 DEFAULT_PORT = 22
 def utcnow() -> datetime:
     """Return a naive UTC timestamp compatible with SQLModel columns."""
@@ -451,7 +453,9 @@ async def run_async(
     max_size = max(worker_count * 2, min_size)
 
     async with asyncpg.create_pool(
-        postgres_dsn, min_size=min_size, max_size=max_size
+        asyncpg_pool_dsn(postgres_dsn),
+        min_size=min_size,
+        max_size=max_size,
     ) as pool:
         await ensure_state_table(pool)
 

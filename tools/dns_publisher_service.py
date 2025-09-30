@@ -34,6 +34,7 @@ from shared.models.postgres import Domain, ARecord  # noqa: E402
 from tools.dns_shared import (  # noqa: E402
     PostgresAsync, configure_logging
 )
+from async_sqlmodel_helpers import resolve_async_dsn
 
 log = logging.getLogger(__name__)
 STOP_SENTINEL = b"__STOP__"
@@ -170,8 +171,10 @@ def main(
     log_level = logging.DEBUG if verbose else logging.INFO
     configure_logging(log_level)
     
+    resolved_dsn = resolve_async_dsn(postgres_dsn)
+
     async def run():
-        publisher = DomainPublisher(postgres_dsn, rabbitmq_url)
+        publisher = DomainPublisher(resolved_dsn, rabbitmq_url)
         
         try:
             # Count pending domains

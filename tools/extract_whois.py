@@ -2,10 +2,13 @@
 
 import multiprocessing
 import os
+import re
 import asyncio
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from ipwhois.net import Net
 from ipwhois.asn import IPASN
@@ -16,6 +19,9 @@ import click
 
 ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 BATCH_SIZE = 100  # how many records each worker processes at once
+
+
+_ENV_VAR_PATTERN = re.compile(r"\$(?:\{([^}]+)\}|([A-Za-z0-9_]+))")
 
 
 def _parse_env_file(path: Path) -> Dict[str, str]:
@@ -33,27 +39,127 @@ def _parse_env_file(path: Path) -> Dict[str, str]:
     return env_vars
 
 
+def _expand_env_vars(value: str, env_values: Dict[str, str]) -> str:
+    """Expand $VAR and ${VAR} references using available environment values."""
+
+    if not value:
+        return value
+
+    def _replace(match: "re.Match[str]") -> str:
+        key = match.group(1) or match.group(2)
+        if key in env_values:
+            return env_values[key]
+        upper_key = key.upper()
+        if upper_key in env_values:
+            return env_values[upper_key]
+        lower_key = key.lower()
+        if lower_key in env_values:
+            return env_values[lower_key]
+        return match.group(0)
+
+    return _ENV_VAR_PATTERN.sub(_replace, value)
+
+
+def _resolve_port_token(token: str, env_values: Dict[str, str]) -> Optional[int]:
+    """Resolve a DSN port token to an integer value."""
+
+    candidates = (
+        token,
+        token.upper(),
+        token.lower(),
+    )
+
+    for candidate in candidates:
+        value = env_values.get(candidate)
+        if value and value.isdigit():
+            return int(value)
+
+    if token.isdigit():
+        return int(token)
+
+    try:
+        return socket.getservbyname(token.lower(), "tcp")
+    except OSError:
+        return None
+
+
+def _normalize_postgres_dsn(dsn: str, env_values: Dict[str, str]) -> str:
+    """Normalize the PostgreSQL DSN by expanding env vars and resolving ports."""
+
+    expanded = _expand_env_vars(dsn, env_values)
+
+    try:
+        parts = urlsplit(expanded)
+    except ValueError:
+        return expanded
+
+    if not parts.netloc:
+        return expanded
+
+    userinfo = ""
+    hostinfo = parts.netloc
+
+    if "@" in hostinfo:
+        userinfo, hostinfo = hostinfo.rsplit("@", 1)
+
+    host = hostinfo
+    port_token: Optional[str] = None
+
+    if hostinfo.startswith("["):
+        if "]" in hostinfo:
+            end = hostinfo.index("]")
+            host = hostinfo[: end + 1]
+            remainder = hostinfo[end + 1 :]
+            if remainder.startswith(":"):
+                port_token = remainder[1:]
+        else:
+            host = hostinfo
+    else:
+        if ":" in hostinfo:
+            host, port_token = hostinfo.rsplit(":", 1)
+
+    if port_token:
+        resolved_port = _resolve_port_token(port_token, env_values)
+        if resolved_port is None:
+            raise ValueError(
+                "Invalid port value in POSTGRES_DSN: "
+                f"{port_token!r}. Provide a numeric port or a known service name."
+            )
+        hostinfo = f"{host}:{resolved_port}"
+    else:
+        hostinfo = host
+
+    if userinfo:
+        netloc = f"{userinfo}@{hostinfo}"
+    else:
+        netloc = hostinfo
+
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def resolve_dsn() -> str:
     """Resolve PostgreSQL DSN from environment or .env file."""
-    # First try environment variables
+
+    file_values = _parse_env_file(ENV_PATH)
+    combined_env: Dict[str, str] = {**file_values, **os.environ}
+
     if "POSTGRES_DSN" in os.environ:
         dsn = os.environ["POSTGRES_DSN"]
     else:
-        # Try to load from .env file
-        env_vars = _parse_env_file(ENV_PATH)
-        dsn = env_vars.get("POSTGRES_DSN")
-        
+        dsn = file_values.get("POSTGRES_DSN")
         if not dsn:
             raise ValueError(
                 "POSTGRES_DSN not found in environment or .env file"
             )
-    
+
+    normalized = _normalize_postgres_dsn(dsn, combined_env)
+
     # Convert SQLAlchemy DSN to asyncpg format
-    if dsn.startswith("postgresql+asyncpg://"):
-        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
-    if dsn.startswith("postgresql+psycopg://"):
-        return "postgresql://" + dsn[len("postgresql+psycopg://"):]
-    return dsn
+    if normalized.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + normalized[len("postgresql+asyncpg://"):]
+    if normalized.startswith("postgresql+psycopg://"):
+        return "postgresql://" + normalized[len("postgresql+psycopg://"):]
+    return normalized
 
 
 def utcnow() -> datetime:

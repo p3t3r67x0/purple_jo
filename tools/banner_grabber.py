@@ -8,125 +8,150 @@ import asyncio
 import socket
 import time
 from datetime import datetime, timezone
-from typing import List
-
-import asyncpg
 import click
 
-from async_sqlmodel_helpers import asyncpg_pool_dsn
+from sqlalchemy import Index, and_, bindparam, literal, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.orm import aliased
+from sqlmodel import Field, SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from async_sqlmodel_helpers import get_engine, get_session_factory
+from shared.models.postgres import ARecord, Domain, PortService
 
 DEFAULT_PORT = 22
+
+
+class BannerScanState(SQLModel, table=True):
+    __tablename__ = "banner_scan_state"
+    __table_args__ = (
+        Index("ix_banner_scan_state_last_failed", "last_failed_at"),
+    )
+
+    domain_id: int = Field(primary_key=True, foreign_key="domains.id")
+    in_progress: bool = Field(default=False, nullable=False)
+    last_attempted_at: datetime | None = Field(default=None)
+    last_failed_at: datetime | None = Field(default=None)
+    failure_reason: str | None = Field(default=None)
+
+
 def utcnow() -> datetime:
     """Return a naive UTC timestamp compatible with SQLModel columns."""
 
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-async def ensure_state_table(pool: asyncpg.Pool) -> None:
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS banner_scan_state (
-                domain_id INTEGER PRIMARY KEY
-                    REFERENCES domains(id) ON DELETE CASCADE,
-                in_progress BOOLEAN NOT NULL DEFAULT FALSE,
-                last_attempted_at TIMESTAMP WITHOUT TIME ZONE,
-                last_failed_at TIMESTAMP WITHOUT TIME ZONE,
-                failure_reason TEXT
+async def ensure_state_table(engine: AsyncEngine) -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda sync_conn: SQLModel.metadata.create_all(
+                sync_conn, tables=[BannerScanState.__table__]
             )
-            """
         )
-        await conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS ix_banner_scan_state_last_failed
-            ON banner_scan_state (last_failed_at)
-            """
-        )
-
-
-def _reset_failed_filter_clause(retry_failed: bool) -> str:
-    if retry_failed:
-        return "TRUE"
-    return "s.last_failed_at IS NULL"
 
 
 async def retrieve_batch(
-    pool: asyncpg.Pool,
+    session_factory: async_sessionmaker[AsyncSession],
     batch_size: int,
     port: int,
     retry_failed: bool,
 ) -> list[dict[str, str | int]]:
     """Claim a batch of domains needing banner scans using SKIP LOCKED."""
 
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            failure_filter = _reset_failed_filter_clause(retry_failed)
-            selections: List[asyncpg.Record] = await conn.fetch(
-                f"""
-                SELECT d.id, d.name
-                FROM domains AS d
-                JOIN port_services AS ps
-                    ON ps.domain_id = d.id AND ps.port = $1
-                LEFT JOIN banner_scan_state AS s
-                    ON s.domain_id = d.id
-                WHERE d.banner IS NULL
-                  AND COALESCE(s.in_progress, FALSE) = FALSE
-                  AND ({failure_filter})
-                  AND EXISTS (
-                      SELECT 1 FROM a_records ar WHERE ar.domain_id = d.id
-                  )
-                ORDER BY d.updated_at DESC
-                LIMIT $2
-                FOR UPDATE OF d SKIP LOCKED
-                """,
-                port,
-                batch_size,
+    state_alias = aliased(BannerScanState)
+    async with session_factory() as session:
+        async with session.begin():
+            failure_filter = (
+                literal(True)
+                if retry_failed
+                else state_alias.last_failed_at.is_(None)
             )
+
+            stmt = (
+                select(Domain.id, Domain.name)
+                .join(
+                    PortService,
+                    and_(
+                        PortService.domain_id == Domain.id,
+                        PortService.port == port,
+                    ),
+                )
+                .outerjoin(state_alias, state_alias.domain_id == Domain.id)
+                .where(Domain.banner.is_(None))
+                .where(
+                    or_(
+                        state_alias.in_progress.is_(False),
+                        state_alias.in_progress.is_(None),
+                    )
+                )
+                .where(failure_filter)
+                .where(
+                    select(ARecord.id)
+                    .where(ARecord.domain_id == Domain.id)
+                    .exists()
+                )
+                .order_by(Domain.updated_at.desc())
+                .limit(batch_size)
+                .with_for_update(of=Domain, skip_locked=True)
+            )
+
+            selections = (await session.exec(stmt)).all()
 
             if not selections:
                 return []
 
-            # Ensure unique IDs to avoid CardinalityViolationError
-            ids = list(set(int(row["id"]) for row in selections))
+            ids = list({int(row[0]) for row in selections})
             now = utcnow()
 
-            await conn.execute(
-                """
-                INSERT INTO banner_scan_state (domain_id, in_progress, last_attempted_at)
-                SELECT id, TRUE, $1
-                FROM unnest($2::int4[]) AS ids(id)
-                ON CONFLICT (domain_id)
-                DO UPDATE SET
-                    in_progress = EXCLUDED.in_progress,
-                    last_attempted_at = EXCLUDED.last_attempted_at
-                """,
-                now,
-                ids,
+            insert_stmt = (
+                insert(BannerScanState)
+                .values(
+                    [
+                        {
+                            "domain_id": domain_id,
+                            "in_progress": True,
+                            "last_attempted_at": now,
+                        }
+                        for domain_id in ids
+                    ]
+                )
+                .on_conflict_do_update(
+                    index_elements=[BannerScanState.domain_id],
+                    set_={
+                        "in_progress": True,
+                        "last_attempted_at": now,
+                    },
+                )
             )
+            await session.exec(insert_stmt)
 
-            ip_rows = await conn.fetch(
-                """
-                SELECT ar.domain_id AS id, ar.ip_address
-                FROM a_records AS ar
-                WHERE ar.domain_id = ANY($1::int4[])
-                ORDER BY ar.domain_id, ar.updated_at DESC, ar.id ASC
-                """,
-                ids,
+            ip_stmt = (
+                select(ARecord.domain_id, ARecord.ip_address)
+                .where(ARecord.domain_id.in_(ids))
+                .order_by(
+                    ARecord.domain_id,
+                    ARecord.updated_at.desc(),
+                    ARecord.id.asc(),
+                )
             )
+            ip_rows = (await session.exec(ip_stmt)).all()
 
     ip_map: dict[int, str] = {}
     for row in ip_rows:
-        domain_id = int(row["id"])
-        ip_address = row["ip_address"]
+        domain_id = int(row[0])
+        ip_address = row[1]
         if domain_id not in ip_map and ip_address:
             ip_map[domain_id] = ip_address
 
     batch: list[dict[str, str | int]] = []
     for row in selections:
-        ip = ip_map.get(int(row["id"]))
+        domain_id = int(row[0])
+        domain_name = str(row[1])
+        ip = ip_map.get(domain_id)
         if not ip:
             continue
-        batch.append({"id": int(row["id"]), "domain": row["name"], "ip": ip})
+        batch.append({"id": domain_id, "domain": domain_name, "ip": ip})
 
     return batch
 
@@ -179,101 +204,8 @@ def grab_banner(ip: str, port: int, timeout: float) -> str | None:
                 pass  # Ignore close errors
 
 
-async def _finalize_state_with_conn(
-    conn: asyncpg.Connection,
-    domain_id: int,
-    *,
-    failed: bool,
-    failure_reason: str | None,
-) -> None:
-    now = utcnow()
-    if failed:
-        trimmed = (failure_reason or "")[:500]
-        await conn.execute(
-            """
-            INSERT INTO banner_scan_state (
-                domain_id,
-                in_progress,
-                last_attempted_at,
-                last_failed_at,
-                failure_reason
-            )
-            VALUES ($1, FALSE, $2, $3, $4)
-            ON CONFLICT (domain_id)
-            DO UPDATE SET
-                in_progress = EXCLUDED.in_progress,
-                last_attempted_at = EXCLUDED.last_attempted_at,
-                last_failed_at = EXCLUDED.last_failed_at,
-                failure_reason = EXCLUDED.failure_reason
-            """,
-            domain_id,
-            now,
-            now,
-            trimmed,
-        )
-    else:
-        await conn.execute(
-            """
-            INSERT INTO banner_scan_state (
-                domain_id,
-                in_progress,
-                last_attempted_at,
-                last_failed_at,
-                failure_reason
-            )
-            VALUES ($1, FALSE, $2, NULL, NULL)
-            ON CONFLICT (domain_id)
-            DO UPDATE SET
-                in_progress = EXCLUDED.in_progress,
-                last_attempted_at = EXCLUDED.last_attempted_at,
-                last_failed_at = NULL,
-                failure_reason = NULL
-            """,
-            domain_id,
-            now,
-        )
-
-
-async def persist_success(
-    pool: asyncpg.Pool,
-    *,
-    domain_id: int,
-    banner: str,
-) -> None:
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            now = utcnow()
-            await conn.execute(
-                """
-                UPDATE domains
-                SET banner = $1,
-                    updated_at = $2
-                WHERE id = $3
-                """,
-                banner,
-                now,
-                domain_id,
-            )
-            await _finalize_state_with_conn(
-                conn, domain_id, failed=False, failure_reason=None
-            )
-
-
-async def persist_failure(
-    pool: asyncpg.Pool,
-    *,
-    domain_id: int,
-    error: str,
-) -> None:
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await _finalize_state_with_conn(
-                conn, domain_id, failed=True, failure_reason=error
-            )
-
-
 async def persist_batch_results(
-    pool: asyncpg.Pool,
+    session_factory: async_sessionmaker[AsyncSession],
     successes: list[tuple[int, str]],
     failures: list[tuple[int, str]],
 ) -> None:
@@ -281,67 +213,81 @@ async def persist_batch_results(
     if not successes and not failures:
         return
 
-    async with pool.acquire() as conn:
-        async with conn.transaction():
+    async with session_factory() as session:
+        async with session.begin():
             now = utcnow()
 
-            # Batch update successful banners
             if successes:
-                await conn.executemany(
-                    """
-                    UPDATE domains
-                    SET banner = $2,
-                        updated_at = $3
-                    WHERE id = $1
-                    """,
-                    [(domain_id, banner, now)
-                     for domain_id, banner in successes]
-                )
-
-                # Batch update success states
-                await conn.executemany(
-                    """
-                    INSERT INTO banner_scan_state (
-                        domain_id, in_progress, last_attempted_at,
-                        last_failed_at, failure_reason
+                params = [
+                    {
+                        "domain_id": domain_id,
+                        "banner": banner,
+                        "updated_at": now,
+                    }
+                    for domain_id, banner in successes
+                ]
+                stmt = (
+                    update(Domain)
+                    .where(Domain.id == bindparam("domain_id"))
+                    .values(
+                        banner=bindparam("banner"),
+                        updated_at=bindparam("updated_at"),
                     )
-                    VALUES ($1, FALSE, $2, NULL, NULL)
-                    ON CONFLICT (domain_id)
-                    DO UPDATE SET
-                        in_progress = FALSE,
-                        last_attempted_at = $2,
-                        last_failed_at = NULL,
-                        failure_reason = NULL
-                    """,
-                    [(domain_id, now) for domain_id, _ in successes]
                 )
+                await session.exec(stmt, params)
 
-            # Batch update failure states
+                state_stmt = insert(BannerScanState).values(
+                    [
+                        {
+                            "domain_id": domain_id,
+                            "in_progress": False,
+                            "last_attempted_at": now,
+                            "last_failed_at": None,
+                            "failure_reason": None,
+                        }
+                        for domain_id, _ in successes
+                    ]
+                )
+                state_stmt = state_stmt.on_conflict_do_update(
+                    index_elements=[BannerScanState.domain_id],
+                    set_={
+                        "in_progress": False,
+                        "last_attempted_at": now,
+                        "last_failed_at": None,
+                        "failure_reason": state_stmt.excluded.failure_reason,
+                    },
+                )
+                await session.exec(state_stmt)
+
             if failures:
-                await conn.executemany(
-                    """
-                    INSERT INTO banner_scan_state (
-                        domain_id, in_progress, last_attempted_at,
-                        last_failed_at, failure_reason
-                    )
-                    VALUES ($1, FALSE, $2, $3, $4)
-                    ON CONFLICT (domain_id)
-                    DO UPDATE SET
-                        in_progress = FALSE,
-                        last_attempted_at = $2,
-                        last_failed_at = $3,
-                        failure_reason = $4
-                    """,
-                    [(domain_id, now, now, error[:500])
-                     for domain_id, error in failures]
+                values = [
+                    {
+                        "domain_id": domain_id,
+                        "in_progress": False,
+                        "last_attempted_at": now,
+                        "last_failed_at": now,
+                        "failure_reason": error[:500],
+                    }
+                    for domain_id, error in failures
+                ]
+                state_stmt = insert(BannerScanState).values(values)
+                state_stmt = state_stmt.on_conflict_do_update(
+                    index_elements=[BannerScanState.domain_id],
+                    set_={
+                        "in_progress": False,
+                        "last_attempted_at": now,
+                        "last_failed_at": now,
+                        "failure_reason": state_stmt.excluded.failure_reason,
+                    },
                 )
+                await session.exec(state_stmt)
 
 
 async def process_banner_batch(
     items: list[dict[str, str | int]],
     port: int,
     timeout: float,
-    pool: asyncpg.Pool,
+    session_factory: async_sessionmaker[AsyncSession],
     semaphore: asyncio.Semaphore,
 ) -> None:
     """Process banner scans concurrently with batch DB operations."""
@@ -378,7 +324,7 @@ async def process_banner_batch(
             )
 
     # Batch persist all results
-    await persist_batch_results(pool, successes, failures)
+    await persist_batch_results(session_factory, successes, failures)
 
     if successes:
         print(f"INFO: stored {len(successes)} successful banners")
@@ -388,7 +334,7 @@ async def process_banner_batch(
 
 async def worker(
     worker_index: int,
-    pool: asyncpg.Pool,
+    session_factory: async_sessionmaker[AsyncSession],
     batch_size: int,
     port: int,
     timeout: float,
@@ -415,7 +361,7 @@ async def worker(
 
         # Retrieve a batch of domains to process
         batch = await retrieve_batch(
-            pool, effective_batch_size, port, retry_failed
+            session_factory, effective_batch_size, port, retry_failed
         )
         if not batch:
             elapsed = time.time() - start_time
@@ -432,7 +378,9 @@ async def worker(
 
         # Process the batch with optimized concurrent scanning
         semaphore = asyncio.Semaphore(concurrent_scans)
-        await process_banner_batch(batch, port, timeout, pool, semaphore)
+        await process_banner_batch(
+            batch, port, timeout, session_factory, semaphore
+        )
 
         batch_time = time.time() - batch_start
         batch_rate = batch_count / batch_time if batch_time > 0 else 0
@@ -449,32 +397,40 @@ async def run_async(
     retry_failed: bool,
     limit: int | None = None,
 ) -> None:
-    min_size = max(1, min(worker_count, 4))
-    max_size = max(worker_count * 2, min_size)
+    engine = get_engine(dsn=postgres_dsn)
+    session_factory = get_session_factory(engine=engine)
 
-    async with asyncpg.create_pool(
-        asyncpg_pool_dsn(postgres_dsn),
-        min_size=min_size,
-        max_size=max_size,
-    ) as pool:
-        await ensure_state_table(pool)
+    await ensure_state_table(engine)
 
-        # If limit is specified, implement simple coordination
+    try:
         if limit:
             print(f"INFO: Processing up to {limit} domains")
-            # For simplicity with limit, use single worker approach
             await worker(
-                1, pool, batch, port, timeout, retry_failed, limit=limit
+                1,
+                session_factory,
+                batch,
+                port,
+                timeout,
+                retry_failed,
+                limit=limit,
             )
         else:
-            # Use multiple workers for unlimited processing
             tasks = [
                 asyncio.create_task(
-                    worker(i + 1, pool, batch, port, timeout, retry_failed)
+                    worker(
+                        i + 1,
+                        session_factory,
+                        batch,
+                        port,
+                        timeout,
+                        retry_failed,
+                    )
                 )
                 for i in range(worker_count)
             ]
             await asyncio.gather(*tasks)
+    finally:
+        await engine.dispose()
 
 
 @click.command(help=__doc__)

@@ -13,7 +13,7 @@ import sys
 
 import click
 
-from sqlalchemy import Index, and_, bindparam, literal, or_, select, update
+from sqlalchemy import Index, and_, bindparam, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -222,21 +222,20 @@ async def persist_batch_results(
             if successes:
                 params = [
                     {
-                        "domain_id_bind": domain_id,
-                        "domain_id": domain_id,
+                        "pk": domain_id,
                         "banner": banner,
                         "updated_at": now,
                     }
                     for domain_id, banner in successes
                 ]
                 stmt = (
-                    update(Domain)
-                    .where(Domain.id == bindparam("domain_id_bind"))
+                    Domain.__table__
+                    .update()
+                    .where(Domain.__table__.c.id == bindparam("pk"))
                     .values(
                         banner=bindparam("banner"),
                         updated_at=bindparam("updated_at"),
                     )
-                    .execution_options(synchronize_session=False)
                 )
                 await session.exec(stmt, params=params)
 

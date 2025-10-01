@@ -329,12 +329,12 @@ class HeaderRuntime:
         await self.db.ensure_header_scan_state()
 
         async with self.db.session() as session:
-            result = await session.exec(
+            result = await session.execute(
                 select(HeaderScanState).where(
                     HeaderScanState.domain_name == domain
                 )
             )
-            state = result.one_or_none()
+            state = result.scalar_one_or_none()
 
             if state is None:
                 state = HeaderScanState(
@@ -477,8 +477,8 @@ async def iter_pending_domains(
                 .order_by(Domain.updated_at.desc())
                 .limit(batch_size)
             )
-            result = await session.exec(stmt)
-            for domain_name in result.all():
+            result = await session.execute(stmt)
+            for domain_name in result.scalars():
                 yield domain_name
     finally:
         await db.close()
@@ -496,7 +496,7 @@ async def direct_worker(settings: DirectWorkerSettings) -> str:
                 .offset(settings.skip)
                 .limit(settings.limit)
             )
-            rows = (await session.exec(stmt)).all()
+            rows = (await session.execute(stmt)).scalars().all()
 
         pending: Set[asyncio.Task[None]] = set()
         semaphore = asyncio.Semaphore(max(1, settings.concurrency))
@@ -669,7 +669,7 @@ def main(
                 count_stmt = select(func.count()).select_from(
                     _pending_domains_select().subquery()
                 )
-                total_docs = (await session.exec(count_stmt)).one()
+                total_docs = (await session.execute(count_stmt)).scalar_one()
 
             click.echo(f"[INFO] total domains to scan: {total_docs}")
 

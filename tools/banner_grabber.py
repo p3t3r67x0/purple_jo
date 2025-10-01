@@ -8,6 +8,9 @@ import asyncio
 import socket
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
 import click
 
 from sqlalchemy import Index, and_, bindparam, literal, or_, select, update
@@ -18,6 +21,12 @@ from sqlmodel import Field, SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from async_sqlmodel_helpers import get_engine, get_session_factory
+
+# Ensure the repository root is on ``sys.path`` so shared modules can be imported
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
 from shared.models.postgres import ARecord, Domain, PortService
 
 DEFAULT_PORT = 22

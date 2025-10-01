@@ -79,13 +79,6 @@ async def retrieve_batch(
 
             stmt = (
                 select(Domain.id, Domain.name)
-                .join(
-                    PortService,
-                    and_(
-                        PortService.domain_id == Domain.id,
-                        PortService.port == port,
-                    ),
-                )
                 .outerjoin(state_alias, state_alias.domain_id == Domain.id)
                 .where(Domain.banner.is_(None))
                 .where(

@@ -22,7 +22,17 @@ from urllib.parse import urlparse
 
 import click
 from motor.motor_asyncio import AsyncIOMotorClient
-from sqlalchemy import text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Index,
+    Integer,
+    MetaData,
+    Table,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import insert
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -44,6 +54,28 @@ from app.models.postgres import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+metadata = MetaData()
+url_data_table = Table(
+    "url_data",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("url", Text, nullable=False, unique=True),
+    Column("domain", Text, nullable=True),
+    Column(
+        "created_at",
+        DateTime(timezone=False),
+        nullable=False,
+        server_default=func.now(),
+    ),
+    Column("domain_extracted", DateTime(timezone=False)),
+    Column("crawl_failed", DateTime(timezone=False)),
+    Column("domain_crawled", DateTime(timezone=False)),
+)
+
+Index("ix_url_data_domain", url_data_table.c.domain)
+Index("ix_url_data_created_at", url_data_table.c.created_at)
 
 
 class MigrationStats:
@@ -487,22 +519,18 @@ async def migrate_dns_collection(
 
 async def create_url_table(session_factory):
     """Create URL table for migrating url_data collection."""
-    async with session_factory() as session:
-        await session.exec(text("""
-            CREATE TABLE IF NOT EXISTS url_data (
-                id SERIAL PRIMARY KEY,
-                url TEXT NOT NULL,
-                domain TEXT,
-                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-                domain_extracted TIMESTAMP,
-                crawl_failed TIMESTAMP,
-                domain_crawled TIMESTAMP,
-                UNIQUE(url)
-            );
-            CREATE INDEX IF NOT EXISTS ix_url_data_domain ON url_data(domain);
-            CREATE INDEX IF NOT EXISTS ix_url_data_created_at ON url_data(created_at);
-        """))
-        await session.commit()
+    engine = getattr(session_factory, "bind", None)
+    if engine is None:
+        engine = session_factory.kw.get("bind")  # type: ignore[attr-defined]
+    if engine is None:
+        raise RuntimeError("Session factory is not bound to an engine")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda sync_conn: metadata.create_all(
+                sync_conn, tables=[url_data_table], checkfirst=True
+            )
+        )
 
 
 async def migrate_url_collection(
@@ -567,16 +595,13 @@ async def migrate_url_collection(
                 
                 if url_records and not dry_run:
                     try:
-                        # Bulk insert using raw SQL for performance
-                        insert_sql = """
-                            INSERT INTO url_data (url, domain, created_at, domain_extracted, crawl_failed, domain_crawled)
-                            VALUES ($1, $2, $3, $4, $5, $6)
-                            ON CONFLICT (url) DO NOTHING
-                        """
-                        
-                        for record in url_records:
-                            await session.exec(text(insert_sql), record)
-                        
+                        # Bulk insert with PostgreSQL upsert semantics to avoid duplicates
+                        stmt = (
+                            insert(url_data_table)
+                            .values(url_records)
+                            .on_conflict_do_nothing(index_elements=[url_data_table.c.url])
+                        )
+                        await session.exec(stmt)
                         await session.commit()
                         migrated_count += len(url_records)
                     except Exception as e:

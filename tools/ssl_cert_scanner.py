@@ -20,7 +20,6 @@ bootstrap.setup()
 import asyncio
 import contextlib
 import logging
-import math
 import multiprocessing
 import os
 import re
@@ -34,12 +33,12 @@ import aio_pika
 from aio_pika import DeliveryMode, Message
 from aiormq.exceptions import AMQPConnectionError
 import click
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy import func
 from sqlmodel import select
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import Domain, PortService, SSLData, SSLSubjectAltName
-from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
+from async_sqlmodel_helpers import resolve_async_dsn
+from tools.dns_shared import PostgresAsync, configure_logging
 
 
 STOP_SENTINEL = b"__STOP__"
@@ -58,18 +57,6 @@ TLS_VERSION_MAP = {
 log = logging.getLogger("ssl_cert_scanner")
 
 
-def configure_logging(level: int) -> None:
-    root_logger = logging.getLogger()
-    if not root_logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-        root_logger.addHandler(handler)
-    root_logger.setLevel(level)
-    for handler in root_logger.handlers:
-        handler.setLevel(level)
-    log.setLevel(level)
-
-
 @dataclass
 class WorkerSettings:
     postgres_dsn: str
@@ -81,12 +68,6 @@ class WorkerSettings:
     ports: Tuple[int, ...]
     log_level: int
     verbose_tls: bool = False
-
-
-@dataclass
-class DirectWorkerSettings(WorkerSettings):
-    skip: int = 0
-    limit: int = 0
 
 
 @dataclass
@@ -116,26 +97,15 @@ class ScanStats:
         )
 
 
-class PostgresAsync:
-    def __init__(self, postgres_dsn: str) -> None:
-        self.postgres_dsn = normalise_async_dsn(postgres_dsn)
-        self.engine = create_async_engine(self.postgres_dsn)
-        self.session_factory = async_sessionmaker(
-            bind=self.engine,
-            class_=AsyncSession,
-            expire_on_commit=False
-        )
-
-    async def get_session(self) -> AsyncSession:
-        """Get a database session."""
-        return self.session_factory()
-
-    async def close(self) -> None:
-        """Close database connections."""
-        try:
-            await self.engine.dispose()
-        except Exception:
-            pass
+@dataclass
+class PublisherSettings:
+    postgres_dsn: str
+    rabbitmq_url: str
+    queue_name: str
+    worker_count: int
+    purge_queue: bool
+    ports: Tuple[int, ...]
+    batch_size: int = 10_000
 
 
 class SSLRuntime:
@@ -310,7 +280,7 @@ class SSLRuntime:
         timestamp: datetime,
     ) -> None:
         """Store successful SSL certificate scan in PostgreSQL."""
-        async with await self.postgres.get_session() as session:
+        async with self.postgres.get_session() as session:
             try:
                 # Find or create domain
                 stmt = select(Domain).where(Domain.name == domain)
@@ -385,7 +355,7 @@ class SSLRuntime:
 
     async def _mark_failed(self, domain: str, timestamp: datetime) -> None:
         """Mark SSL scan as failed for a domain."""
-        async with await self.postgres.get_session() as session:
+        async with self.postgres.get_session() as session:
             try:
                 # Find or create domain
                 stmt = select(Domain).where(Domain.name == domain)
@@ -532,70 +502,41 @@ async def iter_pending_domains(
     ports: Tuple[int, ...],
     batch_size: int = 10_000,
 ) -> AsyncIterator[str]:
-    """Iterate over domains that need SSL scanning."""
-    engine = create_async_engine(postgres_dsn)
-    session_factory = async_sessionmaker(
-        bind=engine,
-        class_=AsyncSession,
-        expire_on_commit=False
-    )
-    
+    """Yield domains that still require SSL scanning."""
+    db = PostgresAsync(postgres_dsn)
+    offset = 0
     try:
-        async with session_factory() as session:
-            # Find domains that have open ports on the specified ports but no SSL data
-            stmt = (
-                select(Domain.name)
-                .limit(batch_size)
-            )
-            
-            result = await session.exec(stmt)
-            domains = result.all()
-            
-            for domain in domains:
+        while True:
+            async with db.get_session() as session:
+                stmt = select(Domain.name).select_from(Domain)
+                stmt = stmt.outerjoin(SSLData, SSLData.domain_id == Domain.id)
+                stmt = stmt.where(SSLData.id.is_(None))
+                if ports:
+                    stmt = stmt.where(
+                        Domain.id.in_(
+                            select(PortService.domain_id).where(
+                                PortService.port.in_(ports)
+                            )
+                        )
+                    )
+
+                stmt = stmt.order_by(Domain.updated_at.desc())
+                stmt = stmt.offset(offset).limit(batch_size)
+
+                rows = (await session.exec(stmt)).all()
+
+            if not rows:
+                break
+
+            for domain in rows:
                 yield domain
+
+            if len(rows) < batch_size:
+                break
+
+            offset += len(rows)
     finally:
-        await engine.dispose()
-
-
-async def direct_worker(settings: DirectWorkerSettings) -> str:
-    runtime = SSLRuntime(settings)
-    engine = create_async_engine(settings.postgres_dsn)
-    session_factory = async_sessionmaker(
-        bind=engine,
-        class_=AsyncSession,
-        expire_on_commit=False
-    )
-    
-    try:
-        async with session_factory() as session:
-            # Find domains that need SSL scanning
-            stmt = (
-                select(Domain.name)
-                .offset(settings.skip)
-                .limit(settings.limit)
-            )
-            
-            result = await session.exec(stmt)
-            domains = result.all()
-
-        pending: Set[asyncio.Task[None]] = set()
-        semaphore = asyncio.Semaphore(max(1, settings.concurrency))
-
-        for domain in domains:
-            async def _process(target: str) -> None:
-                async with semaphore:
-                    await runtime.process_domain(target)
-
-            task = asyncio.create_task(_process(domain))
-            pending.add(task)
-            task.add_done_callback(pending.discard)
-
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        return runtime.stats.summary()
-    finally:
-        await engine.dispose()
-        await runtime.close()
+        await db.close()
 
 
 async def service_worker(settings: WorkerSettings) -> str:
@@ -627,99 +568,75 @@ def run_worker(settings: WorkerSettings) -> str:
         return f"[ERROR] Worker crashed: {exc}"
 
 
-def run_worker_direct(settings: DirectWorkerSettings) -> str:
-    configure_logging(settings.log_level)
-    log.info(
-        "Worker process %s starting (mode=direct, slice=%d:%d, concurrency=%d)",
-        os.getpid(),
-        settings.skip,
-        settings.skip + settings.limit,
-        settings.concurrency,
-    )
+async def count_pending_domains(postgres_dsn: str, ports: Tuple[int, ...]) -> int:
+    """Return the number of domains still requiring scanning."""
+    db = PostgresAsync(postgres_dsn)
     try:
-        summary = asyncio.run(direct_worker(settings))
-        log.info("Worker %s finished: %s", os.getpid(), summary)
-        return f"Worker {os.getpid()} done ({summary})"
-    except Exception as exc:  # pragma: no cover - defensive
-        log.exception("Worker process %s crashed", os.getpid())
-        return f"[ERROR] Worker crashed: {exc}"
+        async with db.get_session() as session:
+            stmt = select(func.count(Domain.id)).select_from(Domain)
+            stmt = stmt.outerjoin(SSLData, SSLData.domain_id == Domain.id)
+            stmt = stmt.where(SSLData.id.is_(None))
+
+            total = await session.scalar(stmt)
+            return int(total or 0)
+    finally:
+        await db.close()
 
 
-@click.command()
+async def publish_pending_domains(settings: PublisherSettings) -> int:
+    """Publish pending domains to RabbitMQ for scanning."""
+    domains = iter_pending_domains(
+        postgres_dsn=settings.postgres_dsn,
+        ports=settings.ports,
+        batch_size=settings.batch_size,
+    )
+    return await enqueue_domains(
+        rabbitmq_url=settings.rabbitmq_url,
+        queue_name=settings.queue_name,
+        domains=domains,
+        worker_count=settings.worker_count,
+        purge_queue=settings.purge_queue,
+    )
+
+
+@click.group()
+def cli() -> None:
+    """TLS certificate scanner microservice helpers."""
+
+
+@cli.command("serve")
 @click.option("--worker", "-w", type=int, default=4, show_default=True, help="Worker processes")
-@click.option(
-    "--postgres-dsn",
-    type=str,
-    required=True,
-    help="PostgreSQL DSN",
-)
+@click.option("--postgres-dsn", type=str, required=True, help="PostgreSQL DSN")
+@click.option("--rabbitmq-url", "-r", type=str, required=True, help="RabbitMQ connection URL")
+@click.option("--queue-name", "-q", type=str, default="ssl_scans", show_default=True,
+              help="RabbitMQ queue name")
+@click.option("--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
+              help="RabbitMQ prefetch per worker")
 @click.option("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY, show_default=True,
               help="Concurrent TLS scans per worker")
 @click.option("--timeout", type=float, default=DEFAULT_TIMEOUT, show_default=True,
               help="TLS handshake timeout in seconds")
 @click.option("--ports", type=str, default="443", show_default=True,
               help="Comma-separated list of ports to scan")
-@click.option("--rabbitmq-url", "-r", type=str, default=None,
-              help="RabbitMQ URL (enables distributed mode)")
-@click.option("--queue-name", "-q", type=str, default="ssl_scans", show_default=True,
-              help="RabbitMQ queue name")
-@click.option("--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
-              help="RabbitMQ prefetch per worker")
-@click.option("--purge-queue/--no-purge-queue", default=True,
-              help="Purge the queue before enqueuing new domains")
-@click.option("--service", is_flag=True,
-              help="Run as a RabbitMQ-consuming TLS scan service")
-@click.option("--log-tls", is_flag=True,
-              help="Log full certificate payloads after each successful scan")
+@click.option("--log-tls", is_flag=True, help="Log certificate payloads for successful scans")
 @click.option("--verbose", is_flag=True, help="Enable verbose debug logging")
-def main(
+def serve(
     worker: int,
     postgres_dsn: str,
+    rabbitmq_url: str,
+    queue_name: str,
+    prefetch: int,
     concurrency: int,
     timeout: float,
     ports: str,
-    rabbitmq_url: Optional[str],
-    queue_name: str,
-    prefetch: int,
-    purge_queue: bool,
-    service: bool,
     log_tls: bool,
     verbose: bool,
 ) -> None:
-    """PostgreSQL-backed SSL certificate scanner with RabbitMQ support."""
+    """Run the SSL scanner microservice as a RabbitMQ worker."""
     log_level = logging.DEBUG if verbose else logging.INFO
     configure_logging(log_level)
 
     postgres_dsn = resolve_async_dsn(postgres_dsn)
-
-    # Test database connection before proceeding
-    async def test_connection():
-        try:
-            engine = create_async_engine(postgres_dsn)
-            session_factory = async_sessionmaker(
-                bind=engine,
-                class_=AsyncSession,
-                expire_on_commit=False
-            )
-            async with session_factory() as session:
-                from sqlmodel import text
-                result = await session.exec(text("SELECT 1"))
-                result.first()
-            await engine.dispose()
-            return True
-        except Exception as exc:
-            click.echo(f"[ERROR] Database connection test failed: {exc}")
-            click.echo(f"[INFO] DSN: {postgres_dsn}")
-            click.echo("[INFO] Please check:")
-            click.echo("  - PostgreSQL server is running")
-            click.echo("  - Database name, host, port are correct")
-            click.echo("  - Username/password are valid")
-            click.echo("  - Network connectivity to database server")
-            return False
-
-    if not asyncio.run(test_connection()):
-        sys.exit(1)
-
     worker = max(1, worker)
     concurrency = max(1, concurrency)
     prefetch = max(1, prefetch)
@@ -737,85 +654,71 @@ def main(
         verbose_tls=log_tls,
     )
 
-    if service:
-        if not rabbitmq_url:
-            raise click.BadParameter("RabbitMQ URL is required when --service is set")
-
-        worker_args = [WorkerSettings(**base_settings.__dict__) for _ in range(worker)]
-        if worker == 1:
-            click.echo(run_worker(worker_args[0]))
-        else:
-            with multiprocessing.Pool(processes=worker) as pool:
-                log.info("Spawned %d worker processes (service mode)", worker)
-                for result in pool.imap_unordered(run_worker, worker_args):
-                    click.echo(result)
+    worker_args = [WorkerSettings(**base_settings.__dict__) for _ in range(worker)]
+    if worker == 1:
+        click.echo(run_worker(worker_args[0]))
         return
 
-    # Count pending domains
-    async def count_pending():
-        engine = create_async_engine(postgres_dsn)
-        session_factory = async_sessionmaker(
-            bind=engine,
-            class_=AsyncSession,
-            expire_on_commit=False
-        )
-        
-        try:
-            async with session_factory() as session:
-                stmt = (
-                    select(Domain.name)
-                )
-                result = await session.exec(stmt)
-                return len(result.all())
-        except Exception as exc:
-            log.error("Failed to connect to PostgreSQL: %s", exc)
-            click.echo(f"[ERROR] Database connection failed: {exc}")
-            click.echo(f"[INFO] PostgreSQL DSN: {postgres_dsn}")
-            click.echo("[INFO] Please check your database connection and DSN")
-            return 0
-        finally:
-            await engine.dispose()
-    
-    total_docs = asyncio.run(count_pending())
-    click.echo(f"[INFO] total domains to scan: {total_docs}")
+    with multiprocessing.Pool(processes=worker) as pool:
+        log.info("Spawned %d worker processes (service mode)", worker)
+        for result in pool.imap_unordered(run_worker, worker_args):
+            click.echo(result)
 
-    if total_docs == 0:
-        click.echo("[INFO] Nothing to scan")
+
+@cli.command("publish")
+@click.option("--postgres-dsn", type=str, required=True, help="PostgreSQL DSN")
+@click.option("--rabbitmq-url", "-r", type=str, required=True, help="RabbitMQ connection URL")
+@click.option("--queue-name", "-q", type=str, default="ssl_scans", show_default=True,
+              help="RabbitMQ queue name")
+@click.option("--ports", type=str, default="443", show_default=True,
+              help="Comma-separated list of ports to scan")
+@click.option("--worker-count", type=int, default=1, show_default=True,
+              help="Number of worker stop signals to enqueue")
+@click.option("--batch-size", type=int, default=10_000, show_default=True,
+              help="Batch size when streaming domains from PostgreSQL")
+@click.option("--purge-queue/--no-purge-queue", default=True,
+              help="Purge the queue before enqueueing new domains")
+@click.option("--verbose", is_flag=True, help="Enable verbose debug logging")
+def publish(
+    postgres_dsn: str,
+    rabbitmq_url: str,
+    queue_name: str,
+    ports: str,
+    worker_count: int,
+    batch_size: int,
+    purge_queue: bool,
+    verbose: bool,
+) -> None:
+    """Publish pending domains to RabbitMQ for batch scanning."""
+    log_level = logging.DEBUG if verbose else logging.INFO
+    configure_logging(log_level)
+
+    postgres_dsn = resolve_async_dsn(postgres_dsn)
+    port_tuple = tuple(sorted({int(p.strip()) for p in ports.split(",") if p.strip()})) or DEFAULT_PORTS
+
+    publisher_settings = PublisherSettings(
+        postgres_dsn=postgres_dsn,
+        rabbitmq_url=rabbitmq_url,
+        queue_name=queue_name,
+        worker_count=max(1, worker_count),
+        purge_queue=purge_queue,
+        ports=port_tuple,
+        batch_size=batch_size,
+    )
+
+    total = asyncio.run(count_pending_domains(postgres_dsn, port_tuple))
+    click.echo(f"[INFO] Found {total} candidate domains for scanning")
+
+    if total == 0:
+        click.echo("[INFO] Nothing to enqueue")
         return
 
-    if rabbitmq_url:
-        domains = iter_pending_domains(postgres_dsn, port_tuple)
-        log.info("Publishing TLS scan jobs to RabbitMQ at %s", rabbitmq_url)
-        published = asyncio.run(
-            enqueue_domains(
-                rabbitmq_url=rabbitmq_url,
-                queue_name=queue_name,
-                domains=domains,
-                worker_count=worker,
-                purge_queue=purge_queue,
-            )
-        )
-        log.info("Queued %d domains onto RabbitMQ queue '%s'", published, queue_name)
-        click.echo("[INFO] Published TLS scan jobs to RabbitMQ. Start workers with --service")
-    else:
-        chunk_size = math.ceil(total_docs / worker)
-        tasks = []
-        start = 0
-        while start < total_docs:
-            limit = min(chunk_size, total_docs - start)
-            settings = DirectWorkerSettings(
-                **base_settings.__dict__,
-                skip=start,
-                limit=limit,
-            )
-            tasks.append(settings)
-            start += limit
-
-        with multiprocessing.Pool(processes=worker) as pool:
-            log.info("Spawned %d direct worker processes", worker)
-            for result in pool.imap_unordered(run_worker_direct, tasks):
-                click.echo(result)
+    published = asyncio.run(publish_pending_domains(publisher_settings))
+    click.echo(
+        f"[INFO] Published {published} domains to RabbitMQ queue '{queue_name}'"
+    )
+    click.echo("[INFO] Workers will receive stop sentinels after the publish batch")
 
 
-if __name__ == "__main__":
-    CLITool(main).run()
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    CLITool(cli).run()

@@ -21,8 +21,9 @@ import asyncio
 import sys
 
 import click
-from sqlalchemy import text
+from sqlalchemy import Column, DateTime, Index, MetaData, Table
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.schema import AddColumn
 
 from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
 
@@ -34,40 +35,38 @@ async def add_domain_extracted_column(postgres_dsn: str):
     try:
         # First, check if column exists and add it in a transaction
         async with engine.begin() as conn:
-            # Check if column already exists
-            check_stmt = text("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'urls' 
-                AND column_name = 'domain_extracted'
-            """)
-            result = await conn.execute(check_stmt)
-            existing = result.fetchone()
-            
-            if existing:
-                print("✅ Column 'domain_extracted' already exists in urls table")
-                column_exists = True
-            else:
-                # Add the column
-                alter_stmt = text("""
-                    ALTER TABLE urls 
-                    ADD COLUMN domain_extracted TIMESTAMP
-                """)
-                await conn.execute(alter_stmt)
-                print("✅ Added domain_extracted column to urls table")
-                column_exists = False
-        
-        # Then, create index outside of transaction (required for CONCURRENTLY)
+            def ensure_column(sync_conn):
+                local_metadata = MetaData()
+                urls_table = Table("urls", local_metadata, autoload_with=sync_conn)
+                if "domain_extracted" in urls_table.c:
+                    return True
+
+                new_column = Column("domain_extracted", DateTime(timezone=False))
+                add_column = AddColumn(urls_table, new_column)
+                sync_conn.execute(add_column)
+                return False
+
+            column_exists = await conn.run_sync(ensure_column)
+
         if not column_exists:
-            async with engine.connect() as conn:
-                # Add index for performance (outside transaction for CONCURRENTLY)
-                index_stmt = text("""
-                    CREATE INDEX IF NOT EXISTS ix_urls_domain_extracted 
-                    ON urls (domain_extracted)
-                """)
-                await conn.execute(index_stmt)
+            async with engine.begin() as conn:
+                def ensure_index(sync_conn):
+                    local_metadata = MetaData()
+                    urls_table = Table("urls", local_metadata, autoload_with=sync_conn)
+                    index = Index(
+                        "ix_urls_domain_extracted",
+                        urls_table.c.domain_extracted,
+                    )
+                    index.create(sync_conn, checkfirst=True)
+
+                await conn.run_sync(ensure_index)
                 print("✅ Created index on domain_extracted column")
-            
+
+        if column_exists:
+            print("✅ Column 'domain_extracted' already exists in urls table")
+        else:
+            print("✅ Added domain_extracted column to urls table")
+    
     except Exception as e:
         print(f"❌ Error adding column: {e}")
         raise

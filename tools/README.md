@@ -33,6 +33,8 @@ export POSTGRES_DSN="postgresql+asyncpg://username:password@localhost/netscanner
 - `RABBITMQ_URL` - RabbitMQ connection for distributed processing (optional)
 - `LOG_LEVEL` - Logging verbosity (default: INFO)
 
+**Service Units:** example systemd service and environment files live under `deploy/systemd/` for the RabbitMQ-backed workers (`ssl_cert_scanner`, `extract_header`, `extract_geoip`). Copy the `.env.example` file, fill in credentials, and install the corresponding `.service` unit to run a microservice continuously.
+
 **Database Requirements:**
 - PostgreSQL 12+ with async support via asyncpg driver
 - Database schema initialized via Alembic migrations (`alembic upgrade head`)
@@ -45,28 +47,28 @@ Some scripts also depend on external binaries or services (for example `masscan`
 
 ## Inventory At A Glance
 
-| Script                      | Category      | Purpose                                                                           |
-| --------------------------- | ------------- | --------------------------------------------------------------------------------- |
-| `banner_grabber.py`         | Enrichment    | Capture SSH banners for domains with open port 22.                                |
-| `crawl_urls.py`             | Crawling      | Fetch root pages for pending domains and store discovered links.                  |
-| `cve_2019_19781_scanner.py` | Security      | Probe Citrix ADC appliances for the CVE-2019-19781 path traversal bug.            |
-| `decode_idna.py`            | Normalisation | Convert punycode (`xn--`) hostnames in PostgreSQL back to Unicode.                |
-| `extract_certstream.py`     | Acquisition   | Subscribe to Certstream and ingest newly seen domains.                            |
-| `extract_domains.py`        | Normalisation | Derive domain names from saved URLs.                                              |
-| `extract_geoip.py`          | Enrichment    | Populate GeoIP fields by looking up A records in a MaxMind database (PostgreSQL). |
-| `extract_graph.py`          | Analysis      | Build a relationship graph between domains via DNS/SSL edges.                     |
-| `extract_header.py`         | Enrichment    | Issue HTTP `HEAD` requests and store response headers.                            |
-| `extract_records.py`        | Enrichment    | Resolve common DNS record types for domains lacking data.                         |
-| `extract_whois.py`          | Enrichment    | Fetch WHOIS/ASN details for `dns` or `ipv4` records.                              |
-| `generate_qrcode.py`        | Reporting     | Generate base64 PNG QR codes for HTTPS URLs (migrated to PostgreSQL).             |
-| `generate_sitemap.py`       | Reporting     | Merge Selenium-discovered URLs with an existing sitemap.                          |
-| `import_domains.py`         | Ingestion     | Seed the URL collection from a plaintext list.                                    |
-| `import_ip.py`              | Ingestion     | Insert IPv4 addresses (or CIDR ranges) into PostgreSQL subnet tables.             |
-| `import_records.py`         | Ingestion     | Replay JSON lines with DNS answers into PostgreSQL DNS tables.                    |
-| `insert_asn.py`             | Ingestion     | Load AS numbers into PostgreSQL ASN tables.                                       |
-| `masscan_scanner.py`        | Security      | Run `masscan` against claimed IPs and persist open-port data.                     |
-| `screenshot_scraper.py`     | Reporting     | Capture Chrome screenshots of HTTPS landing pages.                                |
-| `ssl_cert_scanner.py`       | Enrichment    | Perform TLS handshakes, archive certificate metadata, and test protocol support.  |
+| Script                      | Category      | Purpose                                                                               |
+| --------------------------- | ------------- | ------------------------------------------------------------------------------------- |
+| `banner_grabber.py`         | Enrichment    | Capture SSH banners for domains with open port 22.                                    |
+| `crawl_urls.py`             | Crawling      | Fetch root pages for pending domains and store discovered links.                      |
+| `cve_2019_19781_scanner.py` | Security      | Probe Citrix ADC appliances for the CVE-2019-19781 path traversal bug.                |
+| `decode_idna.py`            | Normalisation | Convert punycode (`xn--`) hostnames in PostgreSQL back to Unicode.                    |
+| `extract_certstream.py`     | Acquisition   | Subscribe to Certstream and ingest newly seen domains.                                |
+| `extract_domains.py`        | Normalisation | Derive domain names from saved URLs.                                                  |
+| `extract_geoip.py`          | Enrichment    | RabbitMQ microservice that enriches domains with MaxMind GeoIP data.                  |
+| `extract_graph.py`          | Analysis      | Build a relationship graph between domains via DNS/SSL edges.                         |
+| `extract_header.py`         | Enrichment    | RabbitMQ microservice that issues HTTP `HEAD` requests and stores response headers.   |
+| `extract_records.py`        | Enrichment    | Resolve common DNS record types for domains lacking data.                             |
+| `extract_whois.py`          | Enrichment    | Fetch WHOIS/ASN details for `dns` or `ipv4` records.                                  |
+| `generate_qrcode.py`        | Reporting     | Generate base64 PNG QR codes for HTTPS URLs (migrated to PostgreSQL).                 |
+| `generate_sitemap.py`       | Reporting     | Merge Selenium-discovered URLs with an existing sitemap.                              |
+| `import_domains.py`         | Ingestion     | Seed the URL collection from a plaintext list.                                        |
+| `import_ip.py`              | Ingestion     | Insert IPv4 addresses (or CIDR ranges) into PostgreSQL subnet tables.                 |
+| `import_records.py`         | Ingestion     | Replay JSON lines with DNS answers into PostgreSQL DNS tables.                        |
+| `insert_asn.py`             | Ingestion     | Load AS numbers into PostgreSQL ASN tables.                                           |
+| `masscan_scanner.py`        | Security      | Run `masscan` against claimed IPs and persist open-port data.                         |
+| `screenshot_scraper.py`     | Reporting     | Capture Chrome screenshots of HTTPS landing pages.                                    |
+| `ssl_cert_scanner.py`       | Enrichment    | RabbitMQ microservice that captures TLS certificates, cipher suites, and TLS support. |
 
 ## Utility Scripts
 
@@ -203,25 +205,24 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 ### extract_header.py
 - **Purpose:** Collect HTTP response headers with redirect awareness and persist the final URL and redirect chain.
 - **CLI:**
-  - Queue jobs to RabbitMQ: `python tools/extract_header.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name header_scans --purge-queue`
-  - Run distributed workers: `python tools/extract_header.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 200 --log-headers`
-  - Direct mode: `python tools/extract_header.py --postgres-dsn "postgresql+asyncpg://..." --worker 4 --concurrency 200`
+  - Publish jobs: `python tools/extract_header.py publish --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker-count 8 --purge-queue`
+  - Run workers: `python tools/extract_header.py serve --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker 4 --concurrency 200 --request-timeout 5`
 - **Details:**
-  - Uses RabbitMQ to distribute header scan jobs; workers share an async HTTP client with redirect following and configurable timeouts.
-  - Stores headers, HTTP status/version, final URL, and optional redirect chain, clearing stale `header_scan_failed` markers on success.
-  - `--log-headers` dumps the captured header map for observability; STOP sentinel messages let service instances exit once queues are drained.
+  - Publisher batches domains that still lack stored headers and enqueues STOP sentinels after the work payload.
+  - Workers share an async httpx client with redirect following, persist headers/status/final URL, and clear `header_scan_failed` markers.
+  - Optional `--log-headers` dumps the header map to the log; see `deploy/systemd/extract_header.service` for a production supervisor.
+  - Hosts that refuse `HEAD` (or fail TLS with the default settings) are logged as warnings; re-run with `--verbose --log-headers` to surface the underlying `httpx` exception before deciding whether to tweak timeouts or disable verification.
 
 ### extract_geoip.py
-- **Purpose:** Enrich A-record domains with GeoIP data from a local MaxMind database using PostgreSQL.
+- **Purpose:** Enrich A-record domains with GeoIP data sourced from a local MaxMind database.
 - **CLI:**
-  - Queue jobs to RabbitMQ: `python tools/extract_geoip.py --postgres-dsn "postgresql+asyncpg://..." --input /path/GeoLite2-City.mmdb --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name geoip_enrichment --purge-queue`
-  - Run distributed workers: `python tools/extract_geoip.py --postgres-dsn "postgresql+asyncpg://..." --input /path/GeoLite2-City.mmdb --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 25`
-  - Direct mode: `python tools/extract_geoip.py --postgres-dsn "postgresql+asyncpg://..." --input /path/GeoLite2-City.mmdb --worker 4 --concurrency 25`
+  - Publish jobs: `python tools/extract_geoip.py publish --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker-count 8 --purge-queue`
+  - Run workers: `python tools/extract_geoip.py serve --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --mmdb-path /var/lib/GeoLite2-City.mmdb --worker 4 --concurrency 25`
 - **Details:**
-  - Uses RabbitMQ (optional) to distribute GeoIP enrichment jobs so workers can scale horizontally; direct mode keeps the same claim loop without a broker.
-  - Workers atomically claim domains via `geo_lookup_started`, write GeoPoint data to separate tables with foreign keys, clear failure markers on success, and record misses under `geo_lookup_failed`.
-  - Supports configurable claim retry windows via `--claim-timeout` and honours the MaxMind City database path supplied via `--input`.
-- **Prerequisites:** A GeoIP2/City `.mmdb` file (GeoLite2 or commercial) accessible on disk.
+  - Publisher batches pending domains directly from PostgreSQL, emits JSON jobs with integer domain IDs plus all discovered A-record IPs, and posts stop sentinels for each worker.
+  - Workers stream jobs from RabbitMQ, resolve GeoIP metadata via `geoip2` in a thread pool, and persist both denormalised fields on `domains` and detailed rows in `geo_points`.
+  - When no match is found, the worker marks the domain as touched so it is not re-queued immediately; verbose logging highlights lookup misses.
+- **Prerequisites:** A GeoIP2/City `.mmdb` file (GeoLite2 or commercial) readable by the worker processes; see `deploy/systemd/extract_geoip.service` for a systemd example.
 
 ### extract_whois.py
 - **Purpose:** Retrieve ASN/WHOIS data for domains with A records using PostgreSQL.
@@ -235,15 +236,14 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
   - Reads database configuration from `POSTGRES_DSN` environment variable or `.env` file.
 
 ### ssl_cert_scanner.py
-- **Purpose:** Perform TLS handshakes, capture certificate metadata, and test supported protocol versions.
+- **Purpose:** Perform TLS handshakes, capture certificate metadata, and record supported cipher/protocol combinations.
 - **CLI:**
-  - Queue jobs to RabbitMQ: `python tools/ssl_cert_scanner.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name ssl_scans --purge-queue`
-  - Run distributed workers: `python tools/ssl_cert_scanner.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 100 --log-tls`
-  - Direct mode: `python tools/ssl_cert_scanner.py --postgres-dsn "postgresql+asyncpg://..." --worker 4 --concurrency 100`
+  - Publish jobs: `python tools/ssl_cert_scanner.py publish --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker-count 8 --purge-queue`
+  - Run workers: `python tools/ssl_cert_scanner.py serve --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker 4 --concurrency 100 --prefetch 400`
 - **Details:**
-  - Uses RabbitMQ to distribute scan jobs; workers reuse async TLS clients and restrict concurrency via semaphores.
-  - Extracts issuer/subject/SAN data, OCSP/CRL endpoints, handshake metadata, and per-protocol acceptance (TLS 1.0–1.3) for each successful scan.
-  - Stores results in ssl_data and ssl_subject_alt_names tables, clears failure markers, and logs summary lines (with optional verbose certificate dumps).
+  - Publisher streams domains needing TLS checks, pushes them to RabbitMQ, and appends stop sentinels so worker pools exit cleanly when the queue drains.
+  - Workers reuse async HTTP/TLS clients, measure handshake success per TLS version, and persist issuer/subject/SAN metadata to `ssl_data` and `ssl_subject_alt_names` tables.
+  - Optional `--log-tls` flag emits the full certificate payload to the logs; see `deploy/systemd/ssl_cert_scanner.service` for a production unit file.
 
 ### masscan_scanner.py
 - **Purpose:** Run the `masscan` binary against batches of claimed IPs and save any open ports.

@@ -59,7 +59,7 @@ class DomainPublisher:
             stmt = select(func.count(Domain.id)).outerjoin(ARecord).where(
                 ARecord.domain_id.is_(None)
             )
-            result = await session.execute(stmt)
+            result = await session.exec(stmt)
             return result.scalar_one_or_none() or 0
             
     async def iter_pending_domains(self, batch_size: int = 10_000) -> AsyncIterator[str]:
@@ -73,7 +73,7 @@ class DomainPublisher:
                     ARecord.domain_id.is_(None)
                 ).offset(offset).limit(batch_size)
 
-                result = await session.execute(stmt)
+                result = await session.exec(stmt)
                 domains = result.scalars().all()
                 
                 if not domains:

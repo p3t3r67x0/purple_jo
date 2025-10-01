@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Distributed GeoIP enrichment backed by RabbitMQ and PostgreSQL.
-
-Jobs can be enqueued onto RabbitMQ for horizontal workers, or processed
-directly without a message broker. Workers claim domains atomically
-via PostgreSQL, set geo_lookup_started to avoid duplication, and clear
-failure markers on success.
-"""
+"""Distributed GeoIP enrichment microservice backed by RabbitMQ and PostgreSQL."""
 
 from __future__ import annotations
 
@@ -41,45 +35,12 @@ from aiormq.exceptions import AMQPConnectionError
 import click
 from geoip2 import database
 from geoip2.errors import AddressNotFoundError
-from sqlalchemy.ext.asyncio import (
-    async_sessionmaker, create_async_engine
-)
+from sqlalchemy import func
 from sqlmodel import select, delete
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import Domain, GeoPoint, ARecord  # noqa: E402
-from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
-
-
-class PostgresAsync:
-    """Async PostgreSQL connection manager."""
-    
-    def __init__(self, dsn: str):
-        normalised = normalise_async_dsn(dsn)
-
-        self._engine = create_async_engine(
-            normalised,
-            echo=False,
-            pool_size=5,
-            max_overflow=10,
-            pool_timeout=30,
-            pool_recycle=3600,
-            pool_pre_ping=True,
-            future=True
-        )
-        self._session_factory = async_sessionmaker(
-            bind=self._engine,
-            expire_on_commit=False,
-            class_=AsyncSession
-        )
-    
-    def get_session(self):
-        """Get async database session."""
-        return self._session_factory()
-    
-    async def close(self):
-        """Close database engine."""
-        await self._engine.dispose()
+from async_sqlmodel_helpers import resolve_async_dsn
+from tools.dns_shared import PostgresAsync, configure_logging
 
 
 STOP_SENTINEL = b"__STOP__"
@@ -125,18 +86,12 @@ class GeoIPStats:
 @dataclass
 class WorkerSettings:
     postgres_dsn: str
-    rabbitmq_url: Optional[str]
+    rabbitmq_url: str
     queue_name: str
     prefetch: int
     concurrency: int
-    claim_timeout: int
     mmdb_path: Path
     log_level: int
-
-
-@dataclass
-class DirectWorkerSettings(WorkerSettings):
-    """Settings for direct (non-RabbitMQ) workers."""
 
 
 @dataclass
@@ -145,18 +100,6 @@ class GeoIPJob:
     ips: Sequence[str]
     message: Optional[aio_pika.IncomingMessage] = None
     stop: bool = False
-
-
-async def build_base_query():
-    """Return the base query for domains missing GeoIP data."""
-    return (
-        select(Domain)
-        .join(ARecord)
-        .where(Domain.country_code.is_(None))
-        .where(~Domain.id.in_(
-            select(GeoPoint.domain_id).where(GeoPoint.domain_id.is_not(None))
-        ))
-    )
 
 
 def _sanitize_coordinates(
@@ -276,45 +219,7 @@ class GeoIPRuntime:
                 await session.commit()
 
 
-async def claim_next_domain(
-    postgres: PostgresAsync, claim_timeout: int
-) -> Optional[Dict[str, Any]]:
-    """Claim the next domain for GeoIP processing."""
-    async with postgres.get_session() as session:
-        # Find domains with A records but no GeoIP data
-        stmt = (
-            select(Domain, ARecord.ip_address)
-            .join(ARecord, Domain.id == ARecord.domain_id)
-            .where(Domain.country_code.is_(None))
-            .where(~Domain.id.in_(
-                select(GeoPoint.domain_id).where(
-                    GeoPoint.domain_id.is_not(None)
-                )
-            ))
-            .limit(1)
-        )
-        
-        result = await session.exec(stmt)
-        row = result.first()
-        
-        if row:
-            domain, ip = row
-            # Get all A records for this domain
-            a_records_stmt = select(ARecord.ip_address).where(
-                ARecord.domain_id == domain.id
-            )
-            a_result = await session.exec(a_records_stmt)
-            ips = [record for record in a_result.all()]
-            
-            return {"id": domain.id, "ips": ips}
-        
-        return None
-
-
 async def get_jobs(settings: WorkerSettings) -> AsyncIterator[GeoIPJob]:
-    if not settings.rabbitmq_url:
-        raise ValueError("RabbitMQ URL is required to consume GeoIP jobs")
-
     connection = await aio_pika.connect_robust(settings.rabbitmq_url)
     try:
         channel = await connection.channel()
@@ -381,35 +286,6 @@ class GeoIPConsumer:
                         await job.message.ack()
 
 
-async def direct_worker(settings: DirectWorkerSettings) -> str:
-    runtime = GeoIPRuntime(settings)
-    try:
-        idle_iterations = 0
-        while True:
-            claimed = await claim_next_domain(
-                runtime.postgres, settings.claim_timeout
-            )
-            if not claimed:
-                idle_iterations += 1
-                if idle_iterations >= 5:
-                    break
-                await asyncio.sleep(1)
-                continue
-
-            idle_iterations = 0
-            domain_id = claimed.get("id")
-            ips = claimed.get("ips") or []
-            if not domain_id:
-                continue
-
-            job = GeoIPJob(domain_id=domain_id, ips=ips)
-            await runtime.process_job(job)
-
-        return runtime.stats.summary()
-    finally:
-        await runtime.close()
-
-
 async def service_worker(settings: WorkerSettings) -> str:
     runtime = GeoIPRuntime(settings)
     try:
@@ -439,48 +315,80 @@ def run_worker(settings: WorkerSettings) -> str:
         return f"[ERROR] Worker crashed: {exc}"
 
 
-def run_worker_direct(settings: DirectWorkerSettings) -> str:
-    configure_logging(settings.log_level)
-    log.info(
-        "Worker process %s starting (mode=direct, timeout=%d min)",
-        os.getpid(),
-        settings.claim_timeout,
-    )
+async def count_pending_domains(postgres_dsn: str) -> int:
+    """Count domains that still require GeoIP enrichment."""
+    db = PostgresAsync(postgres_dsn)
     try:
-        summary = asyncio.run(direct_worker(settings))
-        log.info("Worker %s finished: %s", os.getpid(), summary)
-        return f"Worker {os.getpid()} done ({summary})"
-    except Exception as exc:  # pragma: no cover - defensive
-        log.exception("Worker process %s crashed", os.getpid())
-        return f"[ERROR] Worker crashed: {exc}"
-
-
-async def count_pending_domains(postgres: PostgresAsync) -> int:
-    """Count domains that need GeoIP enrichment."""
-    async with postgres.get_session() as session:
-        stmt = (
-            select(Domain.id)
-            .join(ARecord, Domain.id == ARecord.domain_id)
-            .where(Domain.country_code.is_(None))
-            .where(~Domain.id.in_(
-                select(GeoPoint.domain_id).where(
-                    GeoPoint.domain_id.is_not(None)
-                )
-            ))
-        )
-        result = await session.exec(stmt)
-        return len(result.all())
+        async with db.get_session() as session:
+            stmt = (
+                select(func.count(func.distinct(Domain.id)))
+                .join(ARecord, Domain.id == ARecord.domain_id)
+                .where(Domain.country_code.is_(None))
+                .where(~Domain.id.in_(
+                    select(GeoPoint.domain_id).where(
+                        GeoPoint.domain_id.is_not(None)
+                    )
+                ))
+            )
+            result = await session.exec(stmt)
+            total = result.one()
+            return int(total or 0)
+    finally:
+        await db.close()
 
 
 async def iter_pending_geoip_jobs(
-    postgres: PostgresAsync, claim_timeout: int
+    postgres_dsn: str,
+    batch_size: int = 10_000,
 ) -> AsyncIterator[Dict[str, Any]]:
-    """Iterate over domains that need GeoIP processing."""
-    while True:
-        claimed = await claim_next_domain(postgres, claim_timeout)
-        if not claimed:
-            break
-        yield claimed
+    """Yield pending GeoIP jobs in batches for RabbitMQ publication."""
+    db = PostgresAsync(postgres_dsn)
+    offset = 0
+    try:
+        while True:
+            async with db.get_session() as session:
+                id_stmt = (
+                    select(Domain.id)
+                    .join(ARecord, Domain.id == ARecord.domain_id)
+                    .where(Domain.country_code.is_(None))
+                    .where(~Domain.id.in_(
+                        select(GeoPoint.domain_id).where(
+                            GeoPoint.domain_id.is_not(None)
+                        )
+                    ))
+                    .group_by(Domain.id)
+                    .order_by(Domain.updated_at.desc())
+                    .offset(offset)
+                    .limit(batch_size)
+                )
+                domain_ids = [int(domain_id) for domain_id in (await session.exec(id_stmt)).all()]
+
+            if not domain_ids:
+                break
+
+            async with db.get_session() as session:
+                ip_stmt = (
+                    select(ARecord.domain_id, ARecord.ip_address)
+                    .where(ARecord.domain_id.in_(domain_ids))
+                )
+                rows = (await session.exec(ip_stmt)).all()
+
+            ip_map: Dict[int, list[str]] = {}
+            for domain_id, ip_address in rows:
+                if ip_address:
+                    ip_map.setdefault(domain_id, []).append(ip_address)
+
+            for domain_id in domain_ids:
+                ips = ip_map.get(domain_id)
+                if ips:
+                    yield {"id": domain_id, "ips": ips}
+
+            if len(domain_ids) < batch_size:
+                break
+
+            offset += len(domain_ids)
+    finally:
+        await db.close()
 
 
 async def enqueue_geoip_jobs(
@@ -518,208 +426,147 @@ async def enqueue_geoip_jobs(
     return sent
 
 
-async def _prepare_non_service_mode(
-    settings: WorkerSettings,
-    worker_count: int,
-    purge_queue: bool,
-) -> bool:
-    """Run pre-flight tasks for non-service execution paths.
-
-    Returns ``True`` when the caller should exit early (for example when
-    nothing needs to be processed or all work has been enqueued to
-    RabbitMQ).
-    """
-
-    postgres = PostgresAsync(settings.postgres_dsn)
-    try:
-        total = await count_pending_domains(postgres)
-        click.echo(f"[INFO] total domains pending GeoIP enrichment: {total}")
-
-        if total == 0:
-            click.echo("[INFO] Nothing to enrich")
-            return True
-
-        if settings.rabbitmq_url:
-            log.info(
-                "Publishing GeoIP jobs to RabbitMQ at %s",
-                settings.rabbitmq_url,
-            )
-            jobs = iter_pending_geoip_jobs(postgres, settings.claim_timeout)
-            queued = await enqueue_geoip_jobs(
-                rabbitmq_url=settings.rabbitmq_url,
-                queue_name=settings.queue_name,
-                jobs=jobs,
-                worker_count=worker_count,
-                purge_queue=purge_queue,
-            )
-            log.info(
-                "Queued %d GeoIP jobs onto RabbitMQ queue '%s'",
-                queued,
-                settings.queue_name,
-            )
-            click.echo(
-                "[INFO] Published GeoIP jobs. Start workers with --service"
-            )
-            return True
-
-        return False
-    finally:
-        await postgres.close()
+@dataclass
+class PublisherSettings:
+    postgres_dsn: str
+    rabbitmq_url: str
+    queue_name: str
+    worker_count: int
+    purge_queue: bool
+    batch_size: int = 10_000
 
 
-class GeoIPTool:
-    """CLI coordinator for the GeoIP extraction tool."""
-
-    @classmethod
-    def run(
-        cls,
-        worker: int,
-        postgres_dsn: str,
-        mmdb_path: Path,
-        claim_timeout: int,
-        rabbitmq_url: Optional[str],
-        queue_name: str,
-        prefetch: int,
-        concurrency: int,
-        purge_queue: bool,
-        service: bool,
-        verbose: bool,
-    ) -> None:
-        if not mmdb_path.exists():
-            raise FileNotFoundError(f"GeoIP database not found: {mmdb_path}")
-
-        log_level = logging.DEBUG if verbose else logging.INFO
-        configure_logging(log_level)
-
-        worker = max(1, worker)
-        prefetch = max(1, prefetch)
-        concurrency = max(1, concurrency)
-
-        resolved_dsn = resolve_async_dsn(postgres_dsn)
-
-        base_settings = WorkerSettings(
-            postgres_dsn=resolved_dsn,
-            rabbitmq_url=rabbitmq_url,
-            queue_name=queue_name,
-            prefetch=prefetch,
-            concurrency=concurrency,
-            claim_timeout=claim_timeout,
-            mmdb_path=mmdb_path,
-            log_level=log_level,
-        )
-
-        if service:
-            if not rabbitmq_url:
-                raise click.BadParameter(
-                    "RabbitMQ URL is required when --service is set",
-                )
-
-            worker_args = [WorkerSettings(**base_settings.__dict__)
-                           for _ in range(worker)]
-            if worker == 1:
-                click.echo(run_worker(worker_args[0]))
-                return
-
-            with multiprocessing.Pool(processes=worker) as pool:
-                log.info("Spawned %d worker processes (service mode)", worker)
-                for result in pool.imap_unordered(run_worker, worker_args):
-                    click.echo(result)
-            return
-
-        should_exit = asyncio.run(
-            _prepare_non_service_mode(
-                settings=base_settings,
-                worker_count=worker,
-                purge_queue=purge_queue,
-            )
-        )
-
-        if should_exit:
-            return
-
-        worker_args = [DirectWorkerSettings(
-            **base_settings.__dict__) for _ in range(worker)]
-        if worker == 1:
-            click.echo(run_worker_direct(worker_args[0]))
-            return
-
-        with multiprocessing.Pool(processes=worker) as pool:
-            log.info("Spawned %d direct worker processes", worker)
-            for result in pool.imap_unordered(run_worker_direct, worker_args):
-                click.echo(result)
+async def publish_pending_geoip_jobs(settings: PublisherSettings) -> int:
+    """Publish GeoIP jobs to RabbitMQ."""
+    jobs = iter_pending_geoip_jobs(
+        postgres_dsn=settings.postgres_dsn,
+        batch_size=settings.batch_size,
+    )
+    return await enqueue_geoip_jobs(
+        rabbitmq_url=settings.rabbitmq_url,
+        queue_name=settings.queue_name,
+        jobs=jobs,
+        worker_count=settings.worker_count,
+        purge_queue=settings.purge_queue,
+    )
 
 
-@click.command()
-@click.option(
-    "--worker", "-w", type=int, default=4, show_default=True,
-    help="Worker processes"
-)
-@click.option(
-    "--postgres-dsn", type=str, required=True,
-    help="PostgreSQL connection string"
-)
-@click.option(
-    "--input", "mmdb_path", type=Path, required=True,
-    help="Path to GeoIP2/City mmdb"
-)
-@click.option(
-    "--claim-timeout", type=int, default=30, show_default=True,
-    help="Minutes before an in-progress claim is retried"
-)
-@click.option(
-    "--rabbitmq-url", "-r", type=str, default=None,
-    help="RabbitMQ URL for distributed mode"
-)
-@click.option(
-    "--queue-name", "-q", type=str, default=DEFAULT_QUEUE_NAME,
-    show_default=True, help="RabbitMQ queue name"
-)
-@click.option(
-    "--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
-    help="RabbitMQ prefetch per worker"
-)
-@click.option(
-    "--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY,
-    show_default=True, help="Concurrent GeoIP jobs per worker"
-)
-@click.option(
-    "--purge-queue/--no-purge-queue", default=True,
-    help="Purge queue before enqueuing new jobs"
-)
-@click.option(
-    "--service", is_flag=True,
-    help="Run as a RabbitMQ-consuming GeoIP service"
-)
-@click.option(
-    "--verbose", is_flag=True, help="Enable verbose debug logging"
-)
-def main(
+@click.group()
+def cli() -> None:
+    """GeoIP enrichment microservice commands."""
+
+
+@cli.command("serve")
+@click.option("--worker", "-w", type=int, default=4, show_default=True,
+              help="Worker processes to spawn")
+@click.option("--postgres-dsn", type=str, required=True,
+              help="PostgreSQL DSN")
+@click.option("--rabbitmq-url", "-r", type=str, required=True,
+              help="RabbitMQ connection URL")
+@click.option("--queue-name", "-q", type=str, default=DEFAULT_QUEUE_NAME,
+              show_default=True, help="RabbitMQ queue name")
+@click.option("--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
+              help="RabbitMQ prefetch per worker")
+@click.option("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY,
+              show_default=True, help="Concurrent GeoIP lookups per worker")
+@click.option("--mmdb-path", type=Path, required=True,
+              help="Path to the MaxMind GeoIP2/City database")
+@click.option("--verbose", is_flag=True, help="Enable verbose logging")
+def serve(
     worker: int,
     postgres_dsn: str,
-    mmdb_path: Path,
-    claim_timeout: int,
-    rabbitmq_url: Optional[str],
+    rabbitmq_url: str,
     queue_name: str,
     prefetch: int,
     concurrency: int,
-    purge_queue: bool,
-    service: bool,
+    mmdb_path: Path,
     verbose: bool,
 ) -> None:
-    GeoIPTool.run(
-        worker=worker,
-        postgres_dsn=postgres_dsn,
-        mmdb_path=mmdb_path,
-        claim_timeout=claim_timeout,
+    """Run the GeoIP worker microservice."""
+
+    if not mmdb_path.exists():
+        raise click.BadParameter(f"GeoIP database not found: {mmdb_path}")
+
+    log_level = logging.DEBUG if verbose else logging.INFO
+    configure_logging(log_level)
+
+    resolved_dsn = resolve_async_dsn(postgres_dsn)
+    worker = max(1, worker)
+    prefetch = max(1, prefetch)
+    concurrency = max(1, concurrency)
+
+    base_settings = WorkerSettings(
+        postgres_dsn=resolved_dsn,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
         concurrency=concurrency,
+        mmdb_path=mmdb_path,
+        log_level=log_level,
+    )
+
+    worker_args = [WorkerSettings(**base_settings.__dict__) for _ in range(worker)]
+    if worker == 1:
+        click.echo(run_worker(worker_args[0]))
+        return
+
+    with multiprocessing.Pool(processes=worker) as pool:
+        log.info("Spawned %d worker processes (service mode)", worker)
+        for result in pool.imap_unordered(run_worker, worker_args):
+            click.echo(result)
+
+
+@cli.command("publish")
+@click.option("--postgres-dsn", type=str, required=True,
+              help="PostgreSQL DSN")
+@click.option("--rabbitmq-url", "-r", type=str, required=True,
+              help="RabbitMQ connection URL")
+@click.option("--queue-name", "-q", type=str, default=DEFAULT_QUEUE_NAME,
+              show_default=True, help="RabbitMQ queue name")
+@click.option("--worker-count", type=int, default=4, show_default=True,
+              help="Number of worker stop signals to enqueue")
+@click.option("--batch-size", type=int, default=10_000, show_default=True,
+              help="Batch size when streaming domains from PostgreSQL")
+@click.option("--purge-queue/--no-purge-queue", default=True,
+              help="Purge the queue before enqueueing new jobs")
+@click.option("--verbose", is_flag=True, help="Enable verbose logging")
+def publish(
+    postgres_dsn: str,
+    rabbitmq_url: str,
+    queue_name: str,
+    worker_count: int,
+    batch_size: int,
+    purge_queue: bool,
+    verbose: bool,
+) -> None:
+    """Publish pending GeoIP jobs onto RabbitMQ."""
+
+    log_level = logging.DEBUG if verbose else logging.INFO
+    configure_logging(log_level)
+
+    resolved_dsn = resolve_async_dsn(postgres_dsn)
+
+    total = asyncio.run(count_pending_domains(resolved_dsn))
+    click.echo(f"[INFO] Found {total} domains pending GeoIP enrichment")
+
+    if total == 0:
+        click.echo("[INFO] Nothing to enqueue")
+        return
+
+    publisher_settings = PublisherSettings(
+        postgres_dsn=resolved_dsn,
+        rabbitmq_url=rabbitmq_url,
+        queue_name=queue_name,
+        worker_count=max(1, worker_count),
         purge_queue=purge_queue,
-        service=service,
-        verbose=verbose,
+        batch_size=batch_size,
+    )
+
+    published = asyncio.run(publish_pending_geoip_jobs(publisher_settings))
+    click.echo(
+        f"[INFO] Published {published} GeoIP jobs to RabbitMQ queue '{queue_name}'"
     )
 
 
-if __name__ == "__main__":
-    CLITool(main).run()
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    CLITool(cli).run()

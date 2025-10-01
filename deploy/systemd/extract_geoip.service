@@ -1,0 +1,32 @@
+[Unit]
+Description=Purple Jo GeoIP Enrichment Worker
+After=network-online.target rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/purple_jo/extract_geoip.env
+Environment=QUEUE_NAME=geoip_enrichment
+Environment=WORKER_PROCESSES=4
+Environment=CONCURRENCY=25
+Environment=PREFETCH=200
+Environment=MMDB_PATH=/var/lib/purple_jo/GeoLite2-City.mmdb
+Environment=EXTRA_ARGS=
+WorkingDirectory=/home/awendelk/git/purple_jo
+ExecStart=/home/awendelk/git/purple_jo/venv/bin/python \
+    tools/extract_geoip.py serve \
+    --postgres-dsn ${POSTGRES_DSN} \
+    --rabbitmq-url ${RABBITMQ_URL} \
+    --queue-name ${QUEUE_NAME} \
+    --worker ${WORKER_PROCESSES} \
+    --concurrency ${CONCURRENCY} \
+    --prefetch ${PREFETCH} \
+    --mmdb-path ${MMDB_PATH} \
+    ${EXTRA_ARGS}
+Restart=on-failure
+RestartSec=5
+User=awendelk
+#Group=purple_jo
+
+[Install]
+WantedBy=multi-user.target

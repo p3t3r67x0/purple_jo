@@ -41,8 +41,8 @@ import idna
 from aio_pika import DeliveryMode, Message
 from aio_pika.exceptions import AMQPConnectionError
 from bs4 import BeautifulSoup
-from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -511,17 +511,15 @@ class CrawlRuntime:
         async with await self.postgres.get_session() as session:
             try:
                 # Try to claim the domain atomically
-                stmt = text("""
-                    INSERT INTO crawl_status (domain_name, created_at, updated_at)
-                    VALUES (:domain, :now, :now)
-                    ON CONFLICT (domain_name) DO NOTHING
-                    RETURNING id
-                """)
-                result = await session.execute(stmt, {
-                    "domain": domain,
-                    "now": utcnow()
-                })
-                claimed = result.fetchone() is not None
+                now = utcnow()
+                stmt = (
+                    insert(CrawlStatus)
+                    .values(domain_name=domain, created_at=now, updated_at=now)
+                    .on_conflict_do_nothing(index_elements=["domain_name"])
+                    .returning(CrawlStatus.id)
+                )
+                result = await session.exec(stmt)
+                claimed = result.scalar_one_or_none() is not None
                 await session.commit()
                 return claimed
             except Exception as exc:

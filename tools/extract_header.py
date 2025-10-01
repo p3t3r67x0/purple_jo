@@ -11,7 +11,6 @@ except ModuleNotFoundError:
 import asyncio
 import contextlib
 import logging
-import math
 import multiprocessing
 import os
 from pathlib import Path
@@ -31,9 +30,10 @@ from async_sqlmodel_helpers import resolve_async_dsn
 from fake_useragent import UserAgent
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.sql import Select
 from sqlmodel import Field, SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 # Ensure the repository root is on ``sys.path`` so shared modules can be imported
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +48,7 @@ DEFAULT_PREFETCH = 400
 DEFAULT_CONCURRENCY = 200
 DEFAULT_TIMEOUT = 5.0
 DEFAULT_SCHEMES: Tuple[str, ...] = ("http", "https")
+DEFAULT_QUEUE_NAME = "header_scans"
 log = logging.getLogger("extract_header")
 
 
@@ -79,7 +80,7 @@ def build_user_agent() -> str:
 @dataclass
 class WorkerSettings:
     postgres_dsn: str
-    rabbitmq_url: Optional[str]
+    rabbitmq_url: str
     queue_name: str
     prefetch: int
     concurrency: int
@@ -90,9 +91,13 @@ class WorkerSettings:
 
 
 @dataclass
-class DirectWorkerSettings(WorkerSettings):
-    skip: int = 0
-    limit: int = 0
+class PublisherSettings:
+    postgres_dsn: str
+    rabbitmq_url: str
+    queue_name: str
+    worker_count: int
+    purge_queue: bool
+    batch_size: int = 10_000
 
 
 @dataclass
@@ -323,7 +328,7 @@ class HeaderRuntime:
                     set_={"updated_at": timestamp},
                 )
 
-            await session.execute(statement)
+            await session.exec(statement)
             await session.commit()
 
     async def _mark_failed(self, domain: str) -> None:
@@ -331,7 +336,7 @@ class HeaderRuntime:
         await self.db.ensure_header_scan_state()
 
         async with self.db.session() as session:
-            result = await session.execute(
+            result = await session.exec(
                 select(HeaderScanState).where(
                     HeaderScanState.domain_name == domain
                 )
@@ -410,9 +415,6 @@ class HeaderConsumer:
 
 
 async def get_domains(settings: WorkerSettings) -> AsyncIterator[HeaderJob]:
-    if not settings.rabbitmq_url:
-        raise ValueError("RabbitMQ URL is required to consume header jobs")
-
     connection = await aio_pika.connect_robust(settings.rabbitmq_url)
     try:
         channel = await connection.channel()
@@ -466,213 +468,73 @@ async def enqueue_domains(
     return sent
 
 
+async def count_pending_domains(postgres_dsn: str) -> int:
+    """Return the number of domains pending header extraction."""
+    db = PostgresAsync(postgres_dsn)
+    try:
+        await db.ensure_header_scan_state()
+        async with db.session() as session:
+            pending_alias = _pending_domains_select().subquery()
+            stmt = select(func.count()).select_from(pending_alias)
+            result = await session.exec(stmt)
+            total = result.scalar()
+            return int(total or 0)
+    finally:
+        await db.close()
+
+
+async def publish_pending_domains(settings: PublisherSettings) -> int:
+    """Publish pending header-scan jobs to RabbitMQ."""
+    domains = iter_pending_domains(
+        postgres_dsn=settings.postgres_dsn,
+        batch_size=settings.batch_size,
+    )
+    return await enqueue_domains(
+        rabbitmq_url=settings.rabbitmq_url,
+        queue_name=settings.queue_name,
+        domains=domains,
+        worker_count=settings.worker_count,
+        purge_queue=settings.purge_queue,
+    )
+
+
 async def iter_pending_domains(
     postgres_dsn: str,
     batch_size: int = 10_000,
 ) -> AsyncIterator[str]:
     db = PostgresAsync(postgres_dsn)
+    offset = 0
     try:
         await db.ensure_header_scan_state()
-        async with db.session() as session:
-            stmt = (
-                _pending_domains_select()
-                .order_by(Domain.updated_at.desc())
-                .limit(batch_size)
-            )
-            result = await session.execute(stmt)
-            for domain_name in result.scalars():
+        while True:
+            async with db.session() as session:
+                stmt = (
+                    _pending_domains_select()
+                    .order_by(Domain.updated_at.desc())
+                    .offset(offset)
+                    .limit(batch_size)
+                )
+                result = await session.exec(stmt)
+                domains = result.scalars().all()
+
+            if not domains:
+                break
+
+            for domain_name in domains:
                 yield domain_name
+
+            if len(domains) < batch_size:
+                break
+
+            offset += len(domains)
     finally:
         await db.close()
-
-
-async def direct_worker(settings: DirectWorkerSettings) -> str:
-    runtime = HeaderRuntime(settings)
-    try:
-        await runtime.db.ensure_header_scan_state()
-
-        async with runtime.db.session() as session:
-            stmt = (
-                _pending_domains_select()
-                .order_by(Domain.updated_at.desc())
-                .offset(settings.skip)
-                .limit(settings.limit)
-            )
-            rows = (await session.execute(stmt)).scalars().all()
-
-        pending: Set[asyncio.Task[None]] = set()
-        semaphore = asyncio.Semaphore(max(1, settings.concurrency))
-
-        for domain in rows:
-            if not domain:
-                continue
-
-            async def _process(target: str) -> None:
-                async with semaphore:
-                    await runtime.process_domain(target)
-
-            task = asyncio.create_task(_process(domain))
-            pending.add(task)
-            task.add_done_callback(pending.discard)
-
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        return runtime.stats.summary()
-    finally:
-        await runtime.close()
-
-
-class HeaderTool:
-    """Coordinate CLI interactions for header extraction."""
-
-    @classmethod
-    def run(
-        cls,
-        postgres_dsn: str,
-        worker: int,
-        concurrency: int,
-        request_timeout: float,
-        rabbitmq_url: Optional[str],
-        queue_name: str,
-        prefetch: int,
-        purge_queue: bool,
-        service: bool,
-        log_headers: bool,
-        verbose: bool,
-    ) -> None:
-        log_level = logging.DEBUG if verbose else logging.INFO
-        configure_logging(log_level)
-
-        worker = max(1, worker)
-        concurrency = max(1, concurrency)
-        prefetch = max(1, prefetch)
-
-        base_settings = WorkerSettings(
-            postgres_dsn=postgres_dsn,
-            rabbitmq_url=rabbitmq_url,
-            queue_name=queue_name,
-            prefetch=prefetch,
-            concurrency=concurrency,
-            request_timeout=request_timeout,
-            log_level=log_level,
-            verbose_headers=log_headers,
-        )
-
-        if service:
-            cls._run_service_mode(worker, base_settings, rabbitmq_url)
-            return
-
-        asyncio.run(
-            cls._count_and_process(
-                postgres_dsn=postgres_dsn,
-                worker=worker,
-                base_settings=base_settings,
-                rabbitmq_url=rabbitmq_url,
-                queue_name=queue_name,
-                purge_queue=purge_queue,
-            )
-        )
-
-    @classmethod
-    def _run_service_mode(
-        cls,
-        worker: int,
-        base_settings: WorkerSettings,
-        rabbitmq_url: Optional[str],
-    ) -> None:
-        if not rabbitmq_url:
-            raise click.BadParameter(
-                "RabbitMQ URL is required when --service is set",
-            )
-
-        worker_args = [
-            WorkerSettings(**base_settings.__dict__) for _ in range(worker)
-        ]
-        if worker == 1:
-            click.echo(run_worker(worker_args[0]))
-            return
-
-        with multiprocessing.Pool(processes=worker) as pool:
-            log.info("Spawned %d worker processes (service mode)", worker)
-            for result in pool.imap_unordered(run_worker, worker_args):
-                click.echo(result)
-
-    @classmethod
-    async def _count_and_process(
-        cls,
-        postgres_dsn: str,
-        worker: int,
-        base_settings: WorkerSettings,
-        rabbitmq_url: Optional[str],
-        queue_name: str,
-        purge_queue: bool,
-    ) -> None:
-        db = PostgresAsync(postgres_dsn)
-        try:
-            await db.ensure_header_scan_state()
-            async with db.session() as session:
-                count_stmt = select(func.count()).select_from(
-                    _pending_domains_select().subquery()
-                )
-                total_docs = (await session.execute(count_stmt)).scalar_one()
-
-            click.echo(f"[INFO] total domains to scan: {total_docs}")
-
-            if total_docs == 0:
-                click.echo("[INFO] Nothing to scan")
-                return
-
-            if rabbitmq_url:
-                domains = iter_pending_domains(postgres_dsn)
-                log.info(
-                    "Publishing header jobs to RabbitMQ at %s",
-                    rabbitmq_url,
-                )
-                published = await enqueue_domains(
-                    rabbitmq_url=rabbitmq_url,
-                    queue_name=queue_name,
-                    domains=domains,
-                    worker_count=worker,
-                    purge_queue=purge_queue,
-                )
-                log.info(
-                    "Queued %d domains onto RabbitMQ queue '%s'",
-                    published,
-                    queue_name,
-                )
-                click.echo(
-                    "[INFO] Published header jobs to RabbitMQ. "
-                    "Start workers with --service",
-                )
-                return
-
-            chunk_size = math.ceil(total_docs / worker)
-            tasks: List[DirectWorkerSettings] = []
-            start = 0
-            while start < total_docs:
-                limit = min(chunk_size, total_docs - start)
-                settings = DirectWorkerSettings(
-                    **base_settings.__dict__,
-                    skip=start,
-                    limit=limit,
-                )
-                tasks.append(settings)
-                start += limit
-
-            with multiprocessing.Pool(processes=worker) as process_pool:
-                log.info("Spawned %d direct worker processes", worker)
-                results = process_pool.imap_unordered(
-                    run_worker_direct, tasks
-                )
-                for result in results:
-                    click.echo(result)
-        finally:
-            await db.close()
 
 
 async def service_worker(settings: WorkerSettings) -> str:
     runtime = HeaderRuntime(settings)
     try:
+        await runtime.db.ensure_header_scan_state()
         consumer = HeaderConsumer(settings, runtime)
         await consumer.consume()
         return runtime.stats.summary()
@@ -699,95 +561,130 @@ def run_worker(settings: WorkerSettings) -> str:
         return f"[ERROR] Worker crashed: {exc}"
 
 
-def run_worker_direct(settings: DirectWorkerSettings) -> str:
-    configure_logging(settings.log_level)
-    log.info(
-        "Worker process %s starting (mode=direct, slice=%d:%d, "
-        "concurrency=%d)",
-        os.getpid(),
-        settings.skip,
-        settings.skip + settings.limit,
-        settings.concurrency,
-    )
-    try:
-        summary = asyncio.run(direct_worker(settings))
-        log.info("Worker %s finished: %s", os.getpid(), summary)
-        return f"Worker {os.getpid()} done ({summary})"
-    except Exception as exc:  # pragma: no cover - defensive
-        log.exception("Worker process %s crashed", os.getpid())
-        return f"[ERROR] Worker crashed: {exc}"
+@click.group()
+def cli() -> None:
+    """HTTP header extraction microservice commands."""
 
 
-@click.command()
-@click.option(
-    "--postgres-dsn", type=str, required=True, help="PostgreSQL DSN"
-)
-@click.option(
-    "--worker", "-w", type=int, default=4, show_default=True,
-    help="Worker processes"
-)
-@click.option(
-    "--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY,
-    show_default=True, help="Concurrent requests per worker"
-)
-@click.option(
-    "--request-timeout", type=float, default=DEFAULT_TIMEOUT,
-    show_default=True, help="HTTP request timeout in seconds"
-)
-@click.option(
-    "--rabbitmq-url", "-r", type=str, default=None,
-    help="RabbitMQ URL (enables distributed mode)"
-)
-@click.option(
-    "--queue-name", "-q", type=str, default="header_scans",
-    show_default=True, help="RabbitMQ queue name"
-)
-@click.option(
-    "--prefetch", type=int, default=DEFAULT_PREFETCH, show_default=True,
-    help="RabbitMQ prefetch per worker"
-)
-@click.option(
-    "--purge-queue/--no-purge-queue", default=True,
-    help="Purge the queue before enqueuing new domains"
-)
-@click.option(
-    "--service", is_flag=True,
-    help="Run as a RabbitMQ-consuming header extraction service"
-)
-@click.option(
-    "--log-headers", is_flag=True,
-    help="Log full headers after each successful fetch"
-)
-@click.option(
-    "--verbose", is_flag=True, help="Enable verbose debug logging"
-)
-def main(
-    postgres_dsn: str,
+@cli.command("serve")
+@click.option("--worker", "-w", type=int, default=4, show_default=True,
+              help="Worker processes to spawn")
+@click.option("--postgres-dsn", type=str, required=True,
+              help="PostgreSQL DSN")
+@click.option("--rabbitmq-url", "-r", type=str, required=True,
+              help="RabbitMQ connection URL")
+@click.option("--queue-name", "-q", type=str, default=DEFAULT_QUEUE_NAME,
+              show_default=True, help="RabbitMQ queue name")
+@click.option("--prefetch", type=int, default=DEFAULT_PREFETCH,
+              show_default=True, help="RabbitMQ prefetch per worker")
+@click.option("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY,
+              show_default=True, help="Concurrent header requests per worker")
+@click.option("--request-timeout", type=float, default=DEFAULT_TIMEOUT,
+              show_default=True, help="HTTP request timeout in seconds")
+@click.option("--schemes", type=str, default=",".join(DEFAULT_SCHEMES),
+              show_default=True, help="Comma-separated list of URL schemes to try")
+@click.option("--log-headers", is_flag=True, help="Log full headers after success")
+@click.option("--verbose", is_flag=True, help="Enable verbose logging")
+def serve(
     worker: int,
-    concurrency: int,
-    request_timeout: float,
-    rabbitmq_url: Optional[str],
+    postgres_dsn: str,
+    rabbitmq_url: str,
     queue_name: str,
     prefetch: int,
-    purge_queue: bool,
-    service: bool,
+    concurrency: int,
+    request_timeout: float,
+    schemes: str,
     log_headers: bool,
     verbose: bool,
 ) -> None:
-    HeaderTool.run(
-        postgres_dsn=postgres_dsn,
-        worker=worker,
-        concurrency=concurrency,
-        request_timeout=request_timeout,
+    """Run header extraction workers that consume from RabbitMQ."""
+
+    log_level = logging.DEBUG if verbose else logging.INFO
+    configure_logging(log_level)
+
+    resolved_dsn = resolve_async_dsn(postgres_dsn)
+    worker = max(1, worker)
+    prefetch = max(1, prefetch)
+    concurrency = max(1, concurrency)
+
+    scheme_tuple = tuple(
+        entry.strip() for entry in schemes.split(",") if entry.strip()
+    ) or DEFAULT_SCHEMES
+
+    base_settings = WorkerSettings(
+        postgres_dsn=resolved_dsn,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
+        concurrency=concurrency,
+        request_timeout=request_timeout,
+        log_level=log_level,
+        schemes=scheme_tuple,
+        verbose_headers=log_headers,
+    )
+
+    worker_args = [WorkerSettings(**base_settings.__dict__) for _ in range(worker)]
+    if worker == 1:
+        click.echo(run_worker(worker_args[0]))
+        return
+
+    with multiprocessing.Pool(processes=worker) as pool:
+        log.info("Spawned %d worker processes (service mode)", worker)
+        for result in pool.imap_unordered(run_worker, worker_args):
+            click.echo(result)
+
+
+@cli.command("publish")
+@click.option("--postgres-dsn", type=str, required=True,
+              help="PostgreSQL DSN")
+@click.option("--rabbitmq-url", "-r", type=str, required=True,
+              help="RabbitMQ connection URL")
+@click.option("--queue-name", "-q", type=str, default=DEFAULT_QUEUE_NAME,
+              show_default=True, help="RabbitMQ queue name")
+@click.option("--worker-count", type=int, default=4, show_default=True,
+              help="Number of worker stop signals to enqueue")
+@click.option("--batch-size", type=int, default=10_000, show_default=True,
+              help="Batch size when streaming domains from PostgreSQL")
+@click.option("--purge-queue/--no-purge-queue", default=True,
+              help="Purge the queue before enqueueing new jobs")
+@click.option("--verbose", is_flag=True, help="Enable verbose logging")
+def publish(
+    postgres_dsn: str,
+    rabbitmq_url: str,
+    queue_name: str,
+    worker_count: int,
+    batch_size: int,
+    purge_queue: bool,
+    verbose: bool,
+) -> None:
+    """Publish pending header extraction jobs to RabbitMQ."""
+
+    log_level = logging.DEBUG if verbose else logging.INFO
+    configure_logging(log_level)
+
+    resolved_dsn = resolve_async_dsn(postgres_dsn)
+
+    total = asyncio.run(count_pending_domains(resolved_dsn))
+    click.echo(f"[INFO] Found {total} domains pending header scans")
+
+    if total == 0:
+        click.echo("[INFO] Nothing to enqueue")
+        return
+
+    publisher_settings = PublisherSettings(
+        postgres_dsn=resolved_dsn,
+        rabbitmq_url=rabbitmq_url,
+        queue_name=queue_name,
+        worker_count=max(1, worker_count),
         purge_queue=purge_queue,
-        service=service,
-        log_headers=log_headers,
-        verbose=verbose,
+        batch_size=batch_size,
+    )
+
+    published = asyncio.run(publish_pending_domains(publisher_settings))
+    click.echo(
+        f"[INFO] Published {published} domains to RabbitMQ queue '{queue_name}'"
     )
 
 
-if __name__ == "__main__":
-    CLITool(main).run()
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    CLITool(cli).run()

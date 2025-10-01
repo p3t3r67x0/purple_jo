@@ -24,7 +24,7 @@ import sys
 from datetime import datetime, UTC
 
 import click
-from sqlalchemy import func, text
+from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -32,7 +32,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
 
 try:
-    from shared.models.postgres import CrawlStatus, Domain
+from shared.models.postgres import CrawlStatus, Domain, Url
 except ImportError as exc:  # pragma: no cover - defensive
     print("Error: Missing required dependencies. Ensure project dependencies are installed.")
     print(f"Import error: {exc}")
@@ -145,8 +145,8 @@ async def show_statistics(postgres_dsn: str) -> None:
         pending_count = await session.scalar(pending_stmt)
         
         # Count URLs
-        url_count_result = await session.execute(text("SELECT COUNT(*) FROM urls"))
-        url_count = url_count_result.scalar()
+        url_count_stmt = select(func.count(Url.id))
+        url_count = await session.scalar(url_count_stmt)
         
         print("\n=== Crawl Statistics ===")
         print(f"Total domains: {total_domains}")
@@ -167,13 +167,15 @@ async def reset_crawl_status(postgres_dsn: str) -> None:
     
     async with await get_session(postgres_dsn) as session:
         # Update all crawl_status records to remove crawl timestamps
-        stmt = text("""
-            UPDATE crawl_status 
-            SET domain_crawled = NULL, 
-                crawl_failed = NULL, 
-                updated_at = :now
-        """)
-        await session.execute(stmt, {"now": utcnow()})
+        stmt = (
+            update(CrawlStatus)
+            .values(
+                domain_crawled=None,
+                crawl_failed=None,
+                updated_at=utcnow(),
+            )
+        )
+        await session.exec(stmt)
         await session.commit()
         
         log.info(f"Reset crawl status for all domains")

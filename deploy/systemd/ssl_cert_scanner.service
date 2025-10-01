@@ -1,0 +1,34 @@
+[Unit]
+Description=Purple Jo SSL Certificate Scanner Worker
+After=network-online.target rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/purple_jo/ssl_cert_scanner.env
+Environment=QUEUE_NAME=ssl_scans
+Environment=WORKER_PROCESSES=4
+Environment=CONCURRENCY=100
+Environment=PREFETCH=400
+Environment=TIMEOUT=5.0
+Environment=PORTS=443
+Environment=SSL_SCANNER_EXTRA_ARGS=
+WorkingDirectory=/home/awendelk/git/purple_jo
+ExecStart=/home/awendelk/git/purple_jo/venv/bin/python \
+    tools/ssl_cert_scanner.py serve \
+    --postgres-dsn ${POSTGRES_DSN} \
+    --rabbitmq-url ${RABBITMQ_URL} \
+    --queue-name ${QUEUE_NAME} \
+    --worker ${WORKER_PROCESSES} \
+    --concurrency ${CONCURRENCY} \
+    --prefetch ${PREFETCH} \
+    --timeout ${TIMEOUT} \
+    --ports ${PORTS} \
+    ${SSL_SCANNER_EXTRA_ARGS}
+Restart=on-failure
+RestartSec=5
+User=awendelk
+#Group=purple_jo
+
+[Install]
+WantedBy=multi-user.target

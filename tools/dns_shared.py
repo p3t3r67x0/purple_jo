@@ -5,6 +5,23 @@ Common components used by both the DNS worker service and publisher service.
 """
 
 from __future__ import annotations
+from async_sqlmodel_helpers import normalise_async_dsn
+from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlmodel import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from dns.resolver import NoAnswer, NoNameservers, NXDOMAIN
+from dns.name import EmptyLabel, LabelTooLong
+from dns.exception import DNSException, Timeout
+from dns import resolver
+from typing import AsyncIterator, Dict, List, Optional, Set, Tuple
+from datetime import datetime, UTC
+from dataclasses import dataclass
+from contextlib import asynccontextmanager
+import sys
+import os
+import logging
+import asyncio
 
 from importlib import import_module
 
@@ -15,29 +32,11 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
 
 bootstrap.setup()
 
-import asyncio
-import logging
-import os
-import sys
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import datetime, UTC
-from typing import AsyncIterator, Dict, List, Optional, Set, Tuple
-
-from dns import resolver
-from dns.exception import DNSException, Timeout
-from dns.name import EmptyLabel, LabelTooLong
-from dns.resolver import NoAnswer, NoNameservers, NXDOMAIN
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy.exc import IntegrityError
-from sqlmodel import select
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import (  # noqa: E402
     Domain, ARecord, AAAARecord, NSRecord, MXRecord,
-    SoaRecord, CNAMERecord
+    SoaRecord, CNAMERecord, TXTRecord
 )
-from async_sqlmodel_helpers import normalise_async_dsn
 
 # Constants
 DEFAULT_PREFETCH = 800
@@ -51,6 +50,7 @@ DNS_RECORD_TYPES: Tuple[Tuple[str, str], ...] = (
     ("MX", "mx_record"),
     ("SOA", "soa_record"),
     ("CNAME", "cname_record"),
+    ("TXT", "txt_record")
 )
 
 
@@ -77,13 +77,13 @@ class WorkerSettings:
     log_records: bool = False
 
 
-@dataclass 
+@dataclass
 class WorkerStats:
     """Statistics tracking for DNS workers."""
     processed: int = 0
     successful: int = 0
     failed: int = 0
-    
+
     def record(self, success: bool) -> None:
         """Record a processed domain."""
         self.processed += 1
@@ -91,15 +91,16 @@ class WorkerStats:
             self.successful += 1
         else:
             self.failed += 1
-            
+
     def __str__(self) -> str:
-        success_rate = (self.successful / self.processed * 100) if self.processed else 0
+        success_rate = (self.successful / self.processed *
+                        100) if self.processed else 0
         return f"Processed: {self.processed}, Success: {self.successful}, Failed: {self.failed}, Rate: {success_rate:.1f}%"
 
 
 class PostgresAsync:
     """Async PostgreSQL connection manager."""
-    
+
     def __init__(self, postgres_dsn: str) -> None:
         normalised = normalise_async_dsn(postgres_dsn)
 
@@ -122,6 +123,7 @@ class PostgresAsync:
         self._session_factory = async_sessionmaker(
             bind=self._engine,
             expire_on_commit=False,
+            class_=AsyncSession,
         )
 
     @asynccontextmanager
@@ -137,7 +139,7 @@ class PostgresAsync:
 
 class DNSRuntime:
     """DNS resolution runtime with PostgreSQL storage."""
-    
+
     def __init__(self, settings: WorkerSettings):
         self.settings = settings
         self.postgres = PostgresAsync(settings.postgres_dsn)
@@ -153,15 +155,15 @@ class DNSRuntime:
         # Skip obviously invalid domains
         if not domain or len(domain) < 3 or len(domain) > 253:
             return True
-        
+
         # Skip domains with invalid characters
         if any(c in domain for c in ['<', '>', '"', '`', ' ', '\t']):
             return True
-            
+
         # Skip localhost and IP addresses
         if domain in ('localhost', '127.0.0.1', '::1'):
             return True
-            
+
         # Skip domains that are likely to be invalid
         invalid_patterns = [
             'xn--', 'www.www.', '-.', '.-', '..',
@@ -169,7 +171,7 @@ class DNSRuntime:
         ]
         if any(pattern in domain for pattern in invalid_patterns):
             return True
-            
+
         return False
 
     async def process_domain(self, domain: str) -> bool:
@@ -200,11 +202,11 @@ class DNSRuntime:
             self._resolve_record(domain, record_type)
             for record_type, _ in DNS_RECORD_TYPES
         ]
-        
+
         try:
             # Resolve all DNS record types concurrently
             results_list = await asyncio.gather(*tasks, return_exceptions=True)
-            
+
             results: Dict[str, List[object]] = {}
             for i, (_, field_name) in enumerate(DNS_RECORD_TYPES):
                 result = results_list[i]
@@ -214,10 +216,11 @@ class DNSRuntime:
                     results[field_name] = []
                 else:
                     results[field_name] = result or []
-                    
+
             return results
         except Exception as e:
-            logging.getLogger(__name__).error("Failed to resolve DNS records for %s: %s", domain, e)
+            logging.getLogger(__name__).error(
+                "Failed to resolve DNS records for %s: %s", domain, e)
             return {field_name: [] for _, field_name in DNS_RECORD_TYPES}
 
     async def _resolve_record(self, domain: str,
@@ -234,7 +237,7 @@ class DNSRuntime:
                 self._resolver.lifetime = timeout
                 # Use Google DNS for better reliability
                 self._resolver.nameservers = ['8.8.8.8', '8.8.4.4']
-            
+
             res = self._resolver
 
             try:
@@ -242,7 +245,8 @@ class DNSRuntime:
             except (Timeout, LabelTooLong, NoNameservers, EmptyLabel, NoAnswer, NXDOMAIN):
                 return result
             except DNSException as e:
-                logging.getLogger(__name__).debug("DNS error for %s %s: %s", domain, record_type, e)
+                logging.getLogger(__name__).debug(
+                    "DNS error for %s %s: %s", domain, record_type, e)
                 return result
 
             for item in answers:
@@ -251,7 +255,8 @@ class DNSRuntime:
                 elif record_type == "NS":
                     result.append(item.target.to_unicode().strip(".").lower())
                 elif record_type == "CNAME":
-                    result.append({"target": item.target.to_unicode().strip(".").lower()})
+                    result.append(
+                        {"target": item.target.to_unicode().strip(".").lower()})
                 elif record_type == "MX":
                     result.append({
                         "exchange": item.exchange.to_unicode().lower().strip("."),
@@ -284,9 +289,9 @@ class DNSRuntime:
             try:
                 # Find or create domain
                 stmt = select(Domain).where(Domain.name == domain)
-                result = await session.execute(stmt)
+                result = await session.exec(stmt)
                 domain_obj = result.scalar_one_or_none()
-                
+
                 if not domain_obj:
                     domain_obj = Domain(
                         name=domain,
@@ -300,7 +305,7 @@ class DNSRuntime:
                         # Handle unique constraint violation from another process
                         await session.rollback()
                         # Retry select to get domain inserted by another process
-                        result = await session.execute(stmt)
+                        result = await session.exec(stmt)
                         domain_obj = result.scalar_one_or_none()
                         if domain_obj is None:
                             raise  # If not found, re-raise original error
@@ -309,11 +314,11 @@ class DNSRuntime:
                 else:
                     domain_obj.updated_at = timestamp
                     session.add(domain_obj)
-                
+
                 # Store DNS records
                 await self._store_dns_records(session, domain_obj.id, records)
                 await session.commit()
-                
+
             except Exception as e:
                 await session.rollback()
                 logging.getLogger(__name__).error("Failed to store records for domain %s: %s",
@@ -334,7 +339,8 @@ class DNSRuntime:
         mx_records = []
         soa_records = []
         cname_records = []
-        
+        txt_records = []
+
         for record_type, record_list in records.items():
             if not record_list:
                 continue
@@ -384,19 +390,25 @@ class DNSRuntime:
                         soa_str = str(soa).strip()
                         if soa_str:
                             soa_records.append(SoaRecord(
-                                domain_id=domain_id, 
+                                domain_id=domain_id,
                                 value=soa_str
                             ))
             elif record_type == "cname_record":
                 cname_records.extend([
-                    CNAMERecord(domain_id=domain_id, target=str(cname.get('target')).strip())
+                    CNAMERecord(domain_id=domain_id, target=str(
+                        cname.get('target')).strip())
                     for cname in record_list
                     if (
                         (isinstance(cname, dict) and cname.get('target') is not None and str(cname.get('target')).strip()) or
                         (not isinstance(cname, dict) and str(cname).strip())
                     )
                 ])
-        
+            elif record_type == "txt_record":
+                txt_records.extend([
+                    TXTRecord(domain_id=domain_id, value=str(txt).strip())
+                    for txt in record_list if txt is not None and str(txt).strip()
+                ])
+
         # Bulk add all records at once
         if a_records:
             session.add_all(a_records)
@@ -410,6 +422,8 @@ class DNSRuntime:
             session.add_all(soa_records)
         if cname_records:
             session.add_all(cname_records)
+        if txt_records:
+            session.add_all(txt_records)
 
     async def _mark_failed(self, domain: str, timestamp: datetime) -> None:
         """Mark a domain as having failed DNS lookup."""
@@ -417,9 +431,9 @@ class DNSRuntime:
             try:
                 # Find or create domain
                 stmt = select(Domain).where(Domain.name == domain)
-                result = await session.execute(stmt)
+                result = await session.exec(stmt)
                 domain_obj = result.scalar_one_or_none()
-                
+
                 if not domain_obj:
                     domain_obj = Domain(
                         name=domain,
@@ -433,7 +447,7 @@ class DNSRuntime:
                         # Handle unique constraint violation from another process
                         await session.rollback()
                         # Retry select for domain from another process
-                        result = await session.execute(stmt)
+                        result = await session.exec(stmt)
                         domain_obj = result.scalar_one_or_none()
                         if domain_obj is None:
                             raise  # If not found, re-raise original error
@@ -442,7 +456,7 @@ class DNSRuntime:
                 else:
                     domain_obj.updated_at = timestamp
                     session.add(domain_obj)
-                
+
                 await session.commit()
             except Exception as e:
                 await session.rollback()

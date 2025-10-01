@@ -1,0 +1,34 @@
+[Unit]
+Description=Purple Jo HTTP Header Extraction Worker
+After=network-online.target rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/purple_jo/extract_header.env
+Environment=QUEUE_NAME=http_headers
+Environment=WORKER_PROCESSES=4
+Environment=CONCURRENCY=200
+Environment=PREFETCH=400
+Environment=REQUEST_TIMEOUT=5.0
+Environment=SCHEMES=http,https
+Environment=EXTRA_ARGS=
+WorkingDirectory=/home/awendelk/git/purple_jo
+ExecStart=/home/awendelk/git/purple_jo/venv/bin/python \
+    tools/extract_header.py serve \
+    --postgres-dsn ${POSTGRES_DSN} \
+    --rabbitmq-url ${RABBITMQ_URL} \
+    --queue-name ${QUEUE_NAME} \
+    --worker ${WORKER_PROCESSES} \
+    --concurrency ${CONCURRENCY} \
+    --prefetch ${PREFETCH} \
+    --request-timeout ${REQUEST_TIMEOUT} \
+    --schemes ${SCHEMES} \
+    ${EXTRA_ARGS}
+Restart=on-failure
+RestartSec=5
+User=awendelk
+#Group=purple_jo
+
+[Install]
+WantedBy=multi-user.target

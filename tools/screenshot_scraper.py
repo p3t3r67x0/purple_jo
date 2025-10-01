@@ -27,7 +27,8 @@ from selenium.common.exceptions import (
 )
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from sqlalchemy import inspect, text
+from sqlalchemy import Column, DateTime, MetaData, Table, Text, inspect
+from sqlalchemy.schema import AddColumn
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
@@ -45,21 +46,31 @@ def ensure_columns(engine: Engine) -> None:
     inspector = inspect(engine)
     columns = {column["name"] for column in inspector.get_columns("domains")}
 
-    statements: List[str] = []
+    metadata = MetaData()
+    domains_table = Table("domains", metadata)
+
+    operations: List[AddColumn] = []
     if "image" not in columns:
-        statements.append("ALTER TABLE domains ADD COLUMN IF NOT EXISTS image TEXT")
+        operations.append(
+            AddColumn(
+                domains_table,
+                Column("image", Text(), nullable=True),
+            )
+        )
     if "image_scan_failed" not in columns:
-        statements.append(
-            "ALTER TABLE domains ADD COLUMN IF NOT EXISTS image_scan_failed "
-            "TIMESTAMP WITH TIME ZONE"
+        operations.append(
+            AddColumn(
+                domains_table,
+                Column("image_scan_failed", DateTime(timezone=True), nullable=True),
+            )
         )
 
-    if not statements:
+    if not operations:
         return
 
     with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
+        for operation in operations:
+            connection.execute(operation)
 
 
 @dataclass

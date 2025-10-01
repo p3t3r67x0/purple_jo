@@ -567,6 +567,88 @@ async def _prepare_non_service_mode(
         await postgres.close()
 
 
+class GeoIPTool:
+    """CLI coordinator for the GeoIP extraction tool."""
+
+    @classmethod
+    def run(
+        cls,
+        worker: int,
+        postgres_dsn: str,
+        mmdb_path: Path,
+        claim_timeout: int,
+        rabbitmq_url: Optional[str],
+        queue_name: str,
+        prefetch: int,
+        concurrency: int,
+        purge_queue: bool,
+        service: bool,
+        verbose: bool,
+    ) -> None:
+        if not mmdb_path.exists():
+            raise FileNotFoundError(f"GeoIP database not found: {mmdb_path}")
+
+        log_level = logging.DEBUG if verbose else logging.INFO
+        configure_logging(log_level)
+
+        worker = max(1, worker)
+        prefetch = max(1, prefetch)
+        concurrency = max(1, concurrency)
+
+        resolved_dsn = resolve_async_dsn(postgres_dsn)
+
+        base_settings = WorkerSettings(
+            postgres_dsn=resolved_dsn,
+            rabbitmq_url=rabbitmq_url,
+            queue_name=queue_name,
+            prefetch=prefetch,
+            concurrency=concurrency,
+            claim_timeout=claim_timeout,
+            mmdb_path=mmdb_path,
+            log_level=log_level,
+        )
+
+        if service:
+            if not rabbitmq_url:
+                raise click.BadParameter(
+                    "RabbitMQ URL is required when --service is set",
+                )
+
+            worker_args = [WorkerSettings(**base_settings.__dict__)
+                           for _ in range(worker)]
+            if worker == 1:
+                click.echo(run_worker(worker_args[0]))
+                return
+
+            with multiprocessing.Pool(processes=worker) as pool:
+                log.info("Spawned %d worker processes (service mode)", worker)
+                for result in pool.imap_unordered(run_worker, worker_args):
+                    click.echo(result)
+            return
+
+        should_exit = asyncio.run(
+            _prepare_non_service_mode(
+                settings=base_settings,
+                worker_count=worker,
+                purge_queue=purge_queue,
+            )
+        )
+
+        if should_exit:
+            return
+
+        worker_args = [DirectWorkerSettings(
+            **base_settings.__dict__) for _ in range(worker)]
+        if worker == 1:
+            click.echo(run_worker_direct(worker_args[0]))
+            return
+
+        with multiprocessing.Pool(processes=worker) as pool:
+            log.info("Spawned %d direct worker processes", worker)
+            for result in pool.imap_unordered(run_worker_direct, worker_args):
+                click.echo(result)
+
+
 @click.command()
 @click.option(
     "--worker", "-w", type=int, default=4, show_default=True,
@@ -624,66 +706,19 @@ def main(
     service: bool,
     verbose: bool,
 ) -> None:
-    if not mmdb_path.exists():
-        raise FileNotFoundError(f"GeoIP database not found: {mmdb_path}")
-
-    log_level = logging.DEBUG if verbose else logging.INFO
-    configure_logging(log_level)
-
-    worker = max(1, worker)
-    prefetch = max(1, prefetch)
-    concurrency = max(1, concurrency)
-
-    resolved_dsn = resolve_async_dsn(postgres_dsn)
-
-    base_settings = WorkerSettings(
-        postgres_dsn=resolved_dsn,
+    GeoIPTool.run(
+        worker=worker,
+        postgres_dsn=postgres_dsn,
+        mmdb_path=mmdb_path,
+        claim_timeout=claim_timeout,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
         concurrency=concurrency,
-        claim_timeout=claim_timeout,
-        mmdb_path=mmdb_path,
-        log_level=log_level,
+        purge_queue=purge_queue,
+        service=service,
+        verbose=verbose,
     )
-
-    if service:
-        if not rabbitmq_url:
-            raise click.BadParameter(
-                "RabbitMQ URL is required when --service is set")
-
-        worker_args = [WorkerSettings(**base_settings.__dict__)
-                       for _ in range(worker)]
-        if worker == 1:
-            click.echo(run_worker(worker_args[0]))
-        else:
-            with multiprocessing.Pool(processes=worker) as pool:
-                log.info("Spawned %d worker processes (service mode)", worker)
-                for result in pool.imap_unordered(run_worker, worker_args):
-                    click.echo(result)
-        return
-
-    should_exit = asyncio.run(
-        _prepare_non_service_mode(
-            settings=base_settings,
-            worker_count=worker,
-            purge_queue=purge_queue,
-        )
-    )
-
-    if should_exit:
-        return
-
-    worker_args = [DirectWorkerSettings(
-        **base_settings.__dict__) for _ in range(worker)]
-    if worker == 1:
-        click.echo(run_worker_direct(worker_args[0]))
-        return
-
-    with multiprocessing.Pool(processes=worker) as pool:
-        log.info("Spawned %d direct worker processes", worker)
-        for result in pool.imap_unordered(run_worker_direct, worker_args):
-            click.echo(result)
 
 
 if __name__ == "__main__":

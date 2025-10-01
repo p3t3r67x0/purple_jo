@@ -190,6 +190,44 @@ class DNSWorkerService:
         log.info("DNS worker service %s stopped", self.settings.worker_id)
 
 
+class DNSWorkerServiceRunner:
+    """CLI facade for starting the DNS worker service."""
+
+    @classmethod
+    async def run(
+        cls,
+        postgres_dsn: str,
+        rabbitmq_url: str,
+        queue_name: str,
+        prefetch: int,
+        concurrency: int,
+        dns_timeout: float,
+        worker_id: str,
+        log_records: bool,
+        verbose: bool,
+    ) -> None:
+        """Configure and execute the DNS worker service."""
+
+        log_level = logging.DEBUG if verbose else logging.INFO
+        configure_logging(log_level)
+
+        resolved_dsn = resolve_async_dsn(postgres_dsn)
+
+        settings = WorkerServiceSettings(
+            postgres_dsn=resolved_dsn,
+            rabbitmq_url=rabbitmq_url,
+            queue_name=queue_name,
+            prefetch=prefetch,
+            concurrency=concurrency,
+            dns_timeout=dns_timeout,
+            worker_id=worker_id,
+            log_records=log_records,
+        )
+
+        service = DNSWorkerService(settings)
+        await service.run()
+
+
 @click.command()
 @click.option("--postgres-dsn", "-p", type=str, required=True,
               help="PostgreSQL connection string")
@@ -220,27 +258,21 @@ def main(
     verbose: bool,
 ) -> None:
     """DNS Worker Service - Process DNS resolution jobs from RabbitMQ."""
-    
-    log_level = logging.DEBUG if verbose else logging.INFO
-    configure_logging(log_level)
 
-    resolved_dsn = resolve_async_dsn(postgres_dsn)
-
-    settings = WorkerServiceSettings(
-        postgres_dsn=resolved_dsn,
-        rabbitmq_url=rabbitmq_url,
-        queue_name=queue_name,
-        prefetch=prefetch,
-        concurrency=concurrency,
-        dns_timeout=dns_timeout,
-        worker_id=worker_id,
-        log_records=log_records
-    )
-    
-    service = DNSWorkerService(settings)
-    
     try:
-        asyncio.run(service.run())
+        asyncio.run(
+            DNSWorkerServiceRunner.run(
+                postgres_dsn=postgres_dsn,
+                rabbitmq_url=rabbitmq_url,
+                queue_name=queue_name,
+                prefetch=prefetch,
+                concurrency=concurrency,
+                dns_timeout=dns_timeout,
+                worker_id=worker_id,
+                log_records=log_records,
+                verbose=verbose,
+            )
+        )
     except KeyboardInterrupt:
         log.info("Service interrupted by user")
     except Exception as e:

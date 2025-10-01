@@ -218,6 +218,25 @@ async def initialize_database(postgres_dsn: str) -> None:
         await pool.close()
 
 
+class WhoisExtractionTool:
+    """Coordinate CLI execution for WHOIS extraction."""
+
+    @classmethod
+    def run(cls, postgres_dsn: str, workers: int, batch_size: int) -> None:
+        click.echo("[INFO] Starting WHOIS fetcher")
+        click.echo(f"[INFO] Workers: {workers}, Batch size: {batch_size}")
+
+        asyncio.run(initialize_database(postgres_dsn))
+
+        with multiprocessing.Pool(processes=workers) as pool:
+            pool.starmap(
+                worker,
+                [(postgres_dsn, batch_size)] * workers,
+            )
+
+        click.echo("[INFO] All workers finished")
+
+
 @click.command()
 @click.option(
     "--postgres-dsn",
@@ -239,22 +258,10 @@ async def initialize_database(postgres_dsn: str) -> None:
 )
 def main(postgres_dsn: str, workers: int, batch_size: int):
     """WHOIS extraction tool with PostgreSQL backend.
-    
+
     Fetches WHOIS information for domains with A records.
     """
-    click.echo("[INFO] Starting WHOIS fetcher")
-    click.echo(f"[INFO] Workers: {workers}, Batch size: {batch_size}")
-    
-    # Initialize database schema first
-    asyncio.run(initialize_database(postgres_dsn))
-    
-    with multiprocessing.Pool(processes=workers) as pool:
-        pool.starmap(
-            worker,
-            [(postgres_dsn, batch_size)] * workers
-        )
-    
-    click.echo("[INFO] All workers finished")
+    WhoisExtractionTool.run(postgres_dsn, workers, batch_size)
 
 
 if __name__ == "__main__":

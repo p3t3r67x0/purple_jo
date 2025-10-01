@@ -145,6 +145,55 @@ class DomainPublisher:
         await self.postgres.close()
 
 
+class DomainPublisherService:
+    """Orchestrate CLI handling for the domain publisher."""
+
+    @classmethod
+    async def run(
+        cls,
+        postgres_dsn: str,
+        rabbitmq_url: str,
+        queue_name: str,
+        batch_size: int,
+        worker_count: int,
+        purge_queue: bool,
+        count_only: bool,
+        verbose: bool,
+    ) -> None:
+        """Execute the domain publisher workflow."""
+
+        log_level = logging.DEBUG if verbose else logging.INFO
+        configure_logging(log_level)
+
+        resolved_dsn = resolve_async_dsn(postgres_dsn)
+        publisher = DomainPublisher(resolved_dsn, rabbitmq_url)
+
+        try:
+            # Count pending domains
+            total_domains = await publisher.count_pending_domains()
+            click.echo(f"[INFO] Total domains to process: {total_domains}")
+
+            if total_domains == 0:
+                click.echo("[INFO] No domains to process")
+                return
+
+            if count_only:
+                click.echo("[INFO] Count-only mode, not publishing")
+                return
+
+            # Publish domains
+            published = await publisher.publish_domains(
+                queue_name=queue_name,
+                batch_size=batch_size,
+                worker_count=worker_count,
+                purge_queue=purge_queue,
+            )
+
+            click.echo(f"[INFO] Successfully published {published} domains")
+        finally:
+            await publisher.cleanup()
+
+
 @click.command()
 @click.option("--postgres-dsn", "-p", type=str, required=True,
               help="PostgreSQL connection string")
@@ -172,43 +221,20 @@ def main(
     verbose: bool,
 ) -> None:
     """Domain Publisher Service - Queue domains for DNS processing."""
-    
-    log_level = logging.DEBUG if verbose else logging.INFO
-    configure_logging(log_level)
-    
-    resolved_dsn = resolve_async_dsn(postgres_dsn)
 
-    async def run():
-        publisher = DomainPublisher(resolved_dsn, rabbitmq_url)
-        
-        try:
-            # Count pending domains
-            total_domains = await publisher.count_pending_domains()
-            click.echo(f"[INFO] Total domains to process: {total_domains}")
-            
-            if total_domains == 0:
-                click.echo("[INFO] No domains to process")
-                return
-                
-            if count_only:
-                click.echo("[INFO] Count-only mode, not publishing")
-                return
-                
-            # Publish domains
-            published = await publisher.publish_domains(
+    try:
+        asyncio.run(
+            DomainPublisherService.run(
+                postgres_dsn=postgres_dsn,
+                rabbitmq_url=rabbitmq_url,
                 queue_name=queue_name,
                 batch_size=batch_size,
                 worker_count=worker_count,
-                purge_queue=purge_queue
+                purge_queue=purge_queue,
+                count_only=count_only,
+                verbose=verbose,
             )
-            
-            click.echo(f"[INFO] Successfully published {published} domains")
-            
-        finally:
-            await publisher.cleanup()
-    
-    try:
-        asyncio.run(run())
+        )
     except KeyboardInterrupt:
         log.info("Publisher interrupted by user")
     except Exception as e:

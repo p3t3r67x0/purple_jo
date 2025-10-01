@@ -522,6 +522,154 @@ async def direct_worker(settings: DirectWorkerSettings) -> str:
         await runtime.close()
 
 
+class HeaderTool:
+    """Coordinate CLI interactions for header extraction."""
+
+    @classmethod
+    def run(
+        cls,
+        postgres_dsn: str,
+        worker: int,
+        concurrency: int,
+        request_timeout: float,
+        rabbitmq_url: Optional[str],
+        queue_name: str,
+        prefetch: int,
+        purge_queue: bool,
+        service: bool,
+        log_headers: bool,
+        verbose: bool,
+    ) -> None:
+        log_level = logging.DEBUG if verbose else logging.INFO
+        configure_logging(log_level)
+
+        worker = max(1, worker)
+        concurrency = max(1, concurrency)
+        prefetch = max(1, prefetch)
+
+        base_settings = WorkerSettings(
+            postgres_dsn=postgres_dsn,
+            rabbitmq_url=rabbitmq_url,
+            queue_name=queue_name,
+            prefetch=prefetch,
+            concurrency=concurrency,
+            request_timeout=request_timeout,
+            log_level=log_level,
+            verbose_headers=log_headers,
+        )
+
+        if service:
+            cls._run_service_mode(worker, base_settings, rabbitmq_url)
+            return
+
+        asyncio.run(
+            cls._count_and_process(
+                postgres_dsn=postgres_dsn,
+                worker=worker,
+                base_settings=base_settings,
+                rabbitmq_url=rabbitmq_url,
+                queue_name=queue_name,
+                purge_queue=purge_queue,
+            )
+        )
+
+    @classmethod
+    def _run_service_mode(
+        cls,
+        worker: int,
+        base_settings: WorkerSettings,
+        rabbitmq_url: Optional[str],
+    ) -> None:
+        if not rabbitmq_url:
+            raise click.BadParameter(
+                "RabbitMQ URL is required when --service is set",
+            )
+
+        worker_args = [
+            WorkerSettings(**base_settings.__dict__) for _ in range(worker)
+        ]
+        if worker == 1:
+            click.echo(run_worker(worker_args[0]))
+            return
+
+        with multiprocessing.Pool(processes=worker) as pool:
+            log.info("Spawned %d worker processes (service mode)", worker)
+            for result in pool.imap_unordered(run_worker, worker_args):
+                click.echo(result)
+
+    @classmethod
+    async def _count_and_process(
+        cls,
+        postgres_dsn: str,
+        worker: int,
+        base_settings: WorkerSettings,
+        rabbitmq_url: Optional[str],
+        queue_name: str,
+        purge_queue: bool,
+    ) -> None:
+        db = PostgresAsync(postgres_dsn)
+        try:
+            await db.ensure_header_scan_state()
+            async with db.session() as session:
+                count_stmt = select(func.count()).select_from(
+                    _pending_domains_select().subquery()
+                )
+                total_docs = (await session.execute(count_stmt)).scalar_one()
+
+            click.echo(f"[INFO] total domains to scan: {total_docs}")
+
+            if total_docs == 0:
+                click.echo("[INFO] Nothing to scan")
+                return
+
+            if rabbitmq_url:
+                domains = iter_pending_domains(postgres_dsn)
+                log.info(
+                    "Publishing header jobs to RabbitMQ at %s",
+                    rabbitmq_url,
+                )
+                published = await enqueue_domains(
+                    rabbitmq_url=rabbitmq_url,
+                    queue_name=queue_name,
+                    domains=domains,
+                    worker_count=worker,
+                    purge_queue=purge_queue,
+                )
+                log.info(
+                    "Queued %d domains onto RabbitMQ queue '%s'",
+                    published,
+                    queue_name,
+                )
+                click.echo(
+                    "[INFO] Published header jobs to RabbitMQ. "
+                    "Start workers with --service",
+                )
+                return
+
+            chunk_size = math.ceil(total_docs / worker)
+            tasks: List[DirectWorkerSettings] = []
+            start = 0
+            while start < total_docs:
+                limit = min(chunk_size, total_docs - start)
+                settings = DirectWorkerSettings(
+                    **base_settings.__dict__,
+                    skip=start,
+                    limit=limit,
+                )
+                tasks.append(settings)
+                start += limit
+
+            with multiprocessing.Pool(processes=worker) as process_pool:
+                log.info("Spawned %d direct worker processes", worker)
+                results = process_pool.imap_unordered(
+                    run_worker_direct, tasks
+                )
+                for result in results:
+                    click.echo(result)
+        finally:
+            await db.close()
+
+
 async def service_worker(settings: WorkerSettings) -> str:
     runtime = HeaderRuntime(settings)
     try:
@@ -626,104 +774,19 @@ def main(
     log_headers: bool,
     verbose: bool,
 ) -> None:
-    log_level = logging.DEBUG if verbose else logging.INFO
-    configure_logging(log_level)
-
-    worker = max(1, worker)
-    concurrency = max(1, concurrency)
-    prefetch = max(1, prefetch)
-    
-    base_settings = WorkerSettings(
+    HeaderTool.run(
         postgres_dsn=postgres_dsn,
+        worker=worker,
+        concurrency=concurrency,
+        request_timeout=request_timeout,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
-        concurrency=concurrency,
-        request_timeout=request_timeout,
-        log_level=log_level,
-        verbose_headers=log_headers,
+        purge_queue=purge_queue,
+        service=service,
+        log_headers=log_headers,
+        verbose=verbose,
     )
-
-    if service:
-        if not rabbitmq_url:
-            raise click.BadParameter(
-                "RabbitMQ URL is required when --service is set"
-            )
-
-        worker_args = [
-            WorkerSettings(**base_settings.__dict__) for _ in range(worker)
-        ]
-        if worker == 1:
-            click.echo(run_worker(worker_args[0]))
-        else:
-            with multiprocessing.Pool(processes=worker) as pool:
-                log.info("Spawned %d worker processes (service mode)", worker)
-                for result in pool.imap_unordered(run_worker, worker_args):
-                    click.echo(result)
-        return
-
-    # Count pending domains using PostgreSQL
-    async def count_and_process():
-        db = PostgresAsync(postgres_dsn)
-        try:
-            await db.ensure_header_scan_state()
-            async with db.session() as session:
-                count_stmt = select(func.count()).select_from(
-                    _pending_domains_select().subquery()
-                )
-                total_docs = (await session.execute(count_stmt)).scalar_one()
-
-            click.echo(f"[INFO] total domains to scan: {total_docs}")
-
-            if total_docs == 0:
-                click.echo("[INFO] Nothing to scan")
-                return
-
-            if rabbitmq_url:
-                domains = iter_pending_domains(postgres_dsn)
-                log.info(
-                    "Publishing header jobs to RabbitMQ at %s", rabbitmq_url
-                )
-                published = await enqueue_domains(
-                    rabbitmq_url=rabbitmq_url,
-                    queue_name=queue_name,
-                    domains=domains,
-                    worker_count=worker,
-                    purge_queue=purge_queue,
-                )
-                log.info(
-                    "Queued %d domains onto RabbitMQ queue '%s'",
-                    published, queue_name
-                )
-                click.echo(
-                    "[INFO] Published header jobs to RabbitMQ. "
-                    "Start workers with --service"
-                )
-            else:
-                chunk_size = math.ceil(total_docs / worker)
-                tasks = []
-                start = 0
-                while start < total_docs:
-                    limit = min(chunk_size, total_docs - start)
-                    settings = DirectWorkerSettings(
-                        **base_settings.__dict__,
-                        skip=start,
-                        limit=limit,
-                    )
-                    tasks.append(settings)
-                    start += limit
-
-                with multiprocessing.Pool(processes=worker) as process_pool:
-                    log.info("Spawned %d direct worker processes", worker)
-                    results = process_pool.imap_unordered(
-                        run_worker_direct, tasks
-                    )
-                    for result in results:
-                        click.echo(result)
-        finally:
-            await db.close()
-    
-    asyncio.run(count_and_process())
 
 
 if __name__ == "__main__":

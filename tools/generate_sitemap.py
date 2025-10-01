@@ -2,6 +2,11 @@
 
 import argparse
 
+try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
+
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import JavascriptException
@@ -92,4 +97,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    CLITool(main).run()

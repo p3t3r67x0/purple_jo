@@ -14,6 +14,11 @@ dns_worker_service.py instead of this coordinator script.
 
 from __future__ import annotations
 
+try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
+
 from importlib import import_module
 
 try:
@@ -1019,4 +1024,4 @@ def run_separate_services():
 
 
 if __name__ == "__main__":
-    main()
+    CLITool(main).run()

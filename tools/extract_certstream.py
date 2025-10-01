@@ -6,6 +6,11 @@ from __future__ import annotations
 from importlib import import_module
 
 try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
+
+try:
     import bootstrap  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
     bootstrap = import_module("tools.bootstrap")
@@ -162,4 +167,4 @@ def main(postgres_dsn: str, verbose: bool):
 
 
 if __name__ == '__main__':
-    main()
+    CLITool(main).run()

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
 import sys
 import json
 import contextlib
@@ -332,4 +336,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    CLITool(main).run()

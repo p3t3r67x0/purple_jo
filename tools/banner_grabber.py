@@ -4,14 +4,27 @@
 
 from __future__ import annotations
 
+try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
+
 import asyncio
+import logging
 import socket
 import time
 from datetime import datetime, timezone
+from importlib import import_module
 from pathlib import Path
-import sys
 
 import click
+
+try:  # pragma: no cover - alias for direct script execution
+    import bootstrap  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for module execution
+    bootstrap = import_module("tools.bootstrap")
+
+bootstrap.setup()
 
 from sqlalchemy import Index, and_, bindparam, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert
@@ -20,14 +33,12 @@ from sqlalchemy.orm import aliased
 from sqlmodel import Field, SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from async_sqlmodel_helpers import get_engine, get_session_factory
-
-# Ensure the repository root is on ``sys.path`` so shared modules can be imported
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.append(str(REPO_ROOT))
+from tools.async_sqlmodel_helpers import get_engine, get_session_factory
 
 from shared.models.postgres import ARecord, Domain, PortService
+
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PORT = 22
 
@@ -195,8 +206,8 @@ def grab_banner(ip: str, port: int, timeout: float) -> str | None:
         return None  # Silent timeout - very common
     except (ConnectionRefusedError, OSError):
         return None  # Silent connection errors - also common
-    except Exception as exc:
-        print(f"ERROR: unexpected error {ip}:{port} -> {exc}")
+    except Exception:
+        LOGGER.exception("Unexpected error grabbing banner from %s:%s", ip, port)
         return None
     finally:
         if sock:
@@ -320,7 +331,7 @@ async def process_banner_batch(
         domain_id, domain, ip, banner = result
         if banner:
             successes.append((domain_id, banner))
-            print(f"INFO: grabbed banner for {domain} ({ip})")
+            LOGGER.info("Grabbed banner for %s (%s)", domain, ip)
         else:
             failures.append(
                 (domain_id, f"No banner response from {ip}:{port}")
@@ -330,9 +341,9 @@ async def process_banner_batch(
     await persist_batch_results(session_factory, successes, failures)
 
     if successes:
-        print(f"INFO: stored {len(successes)} successful banners")
+        LOGGER.info("Stored %d successful banners", len(successes))
     if failures:
-        print(f"INFO: recorded {len(failures)} failed attempts")
+        LOGGER.info("Recorded %d failed attempts", len(failures))
 
 
 async def worker(
@@ -353,7 +364,7 @@ async def worker(
     while True:
         # Check limit before retrieving next batch
         if limit and processed_count >= limit:
-            print(f"[{label}] reached limit of {limit} domains")
+            LOGGER.info("%s reached limit of %d domains", label, limit)
             break
 
         # Adjust batch size if we're approaching the limit
@@ -369,14 +380,19 @@ async def worker(
         if not batch:
             elapsed = time.time() - start_time
             rate = processed_count / elapsed if elapsed > 0 else 0
-            print(f"[{label}] completed {processed_count} domains "
-                  f"in {elapsed:.2f}s ({rate:.1f}/sec)")
+            LOGGER.info(
+                "%s completed %d domains in %.2fs (%.1f/sec)",
+                label,
+                processed_count,
+                elapsed,
+                rate,
+            )
             break
 
         batch_count = len(batch)
         processed_count += batch_count
 
-        print(f"[{label}] processing {batch_count} domains")
+        LOGGER.info("%s processing %d domains", label, batch_count)
         batch_start = time.time()
 
         # Process the batch with optimized concurrent scanning
@@ -387,53 +403,82 @@ async def worker(
 
         batch_time = time.time() - batch_start
         batch_rate = batch_count / batch_time if batch_time > 0 else 0
-        print(f"[{label}] batch completed: {batch_count} domains "
-              f"in {batch_time:.2f}s ({batch_rate:.1f}/sec)")
+        LOGGER.info(
+            "%s batch completed: %d domains in %.2fs (%.1f/sec)",
+            label,
+            batch_count,
+            batch_time,
+            batch_rate,
+        )
 
 
-async def run_async(
-    postgres_dsn: str,
-    worker_count: int,
-    batch: int,
-    port: int,
-    timeout: float,
-    retry_failed: bool,
-    limit: int | None = None,
-) -> None:
-    engine = get_engine(dsn=postgres_dsn)
-    session_factory = get_session_factory(engine=engine)
+class BannerGrabberTool:
+    """CLI orchestration wrapper around the banner grabber workflow."""
 
-    await ensure_state_table(engine)
+    def __init__(
+        self,
+        postgres_dsn: str,
+        worker_count: int,
+        batch: int,
+        port: int,
+        timeout: float,
+        retry_failed: bool,
+        limit: int | None,
+    ) -> None:
+        self.postgres_dsn = postgres_dsn
+        self.worker_count = worker_count
+        self.batch = batch
+        self.port = port
+        self.timeout = timeout
+        self.retry_failed = retry_failed
+        self.limit = limit
 
-    try:
-        if limit:
-            print(f"INFO: Processing up to {limit} domains")
-            await worker(
-                1,
-                session_factory,
-                batch,
-                port,
-                timeout,
-                retry_failed,
-                limit=limit,
-            )
-        else:
-            tasks = [
-                asyncio.create_task(
-                    worker(
-                        i + 1,
-                        session_factory,
-                        batch,
-                        port,
-                        timeout,
-                        retry_failed,
-                    )
+    async def _run_async(self) -> None:
+        engine = get_engine(dsn=self.postgres_dsn)
+        session_factory = get_session_factory(engine=engine)
+
+        await ensure_state_table(engine)
+
+        try:
+            if self.limit is not None:
+                LOGGER.info("Processing up to %d domains", self.limit)
+                await worker(
+                    1,
+                    session_factory,
+                    self.batch,
+                    self.port,
+                    self.timeout,
+                    self.retry_failed,
+                    limit=self.limit,
                 )
-                for i in range(worker_count)
-            ]
-            await asyncio.gather(*tasks)
-    finally:
-        await engine.dispose()
+            else:
+                tasks = [
+                    asyncio.create_task(
+                        worker(
+                            index + 1,
+                            session_factory,
+                            self.batch,
+                            self.port,
+                            self.timeout,
+                            self.retry_failed,
+                        )
+                    )
+                    for index in range(self.worker_count)
+                ]
+                await asyncio.gather(*tasks)
+        finally:
+            await engine.dispose()
+
+    def run(self) -> None:
+        limit_str = f" limit={self.limit}" if self.limit is not None else ""
+        LOGGER.info(
+            "Starting banner grabber | workers=%d batch=%d port=%d%s",
+            self.worker_count,
+            self.batch,
+            self.port,
+            limit_str,
+        )
+        asyncio.run(self._run_async())
 
 
 @click.command(help=__doc__)
@@ -490,23 +535,16 @@ def main(
     retry_failed: bool,
     limit: int | None,
 ) -> None:
-    limit_str = f" limit={limit}" if limit else ""
-    print(
-        "INFO: starting banner grabber | "
-        f"workers={worker_count} batch={batch} port={port}{limit_str}"
-    )
-    asyncio.run(
-        run_async(
-            postgres_dsn,
-            worker_count,
-            batch,
-            port,
-            timeout,
-            retry_failed,
-            limit,
-        )
-    )
+    BannerGrabberTool(
+        postgres_dsn=postgres_dsn,
+        worker_count=worker_count,
+        batch=batch,
+        port=port,
+        timeout=timeout,
+        retry_failed=retry_failed,
+        limit=limit,
+    ).run()
 
 
 if __name__ == "__main__":
-    main()
+    CLITool(main).run()

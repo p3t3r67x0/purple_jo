@@ -9,6 +9,11 @@ import click
 
 from async_sqlmodel_helpers import asyncpg_pool_dsn
 
+try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
+
 
 def utcnow() -> datetime:
     """Return a naive UTC timestamp compatible with PostgreSQL columns."""
@@ -131,4 +136,4 @@ def main(input: str, postgres_dsn: str):
 
 
 if __name__ == '__main__':
-    main()
+    CLITool(main).run()

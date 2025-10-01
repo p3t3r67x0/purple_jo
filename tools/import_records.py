@@ -4,6 +4,11 @@
 
 from __future__ import annotations
 
+try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
+
 import argparse
 import json
 from datetime import datetime, timezone
@@ -250,4 +255,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    CLITool(main).run()

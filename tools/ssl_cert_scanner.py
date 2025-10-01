@@ -23,7 +23,6 @@ import ssl
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import AsyncIterator, Dict, List, Optional, Set, Tuple
 
 import aio_pika
@@ -35,6 +34,8 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import Domain, PortService, SSLData, SSLSubjectAltName
+
+from postgres_helpers import load_postgres_dsn
 
 
 STOP_SENTINEL = b"__STOP__"
@@ -51,43 +52,6 @@ TLS_VERSION_MAP = {
 
 
 log = logging.getLogger("ssl_cert_scanner")
-
-
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-
-
-def _parse_env_file(path: Path) -> dict:
-    """Parse a .env file and return key-value pairs."""
-    env_vars = {}
-    if not path.exists():
-        return env_vars
-
-    with open(path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                env_vars[key.strip()] = value.strip().strip('"\'')
-    return env_vars
-
-
-def resolve_dsn() -> str:
-    """Resolve PostgreSQL DSN from environment or .env file."""
-    # First try environment variables
-    if "POSTGRES_DSN" in os.environ:
-        dsn = os.environ["POSTGRES_DSN"]
-    else:
-        # Try to load from .env file
-        env_vars = _parse_env_file(ENV_PATH)
-        dsn = env_vars.get("POSTGRES_DSN")
-
-        if not dsn:
-            raise ValueError(
-                "POSTGRES_DSN not found in environment or .env file"
-            )
-
-    # Return the DSN as-is since we're using SQLModel/SQLAlchemy
-    return dsn
 
 
 def configure_logging(level: int) -> None:
@@ -679,7 +643,13 @@ def run_worker_direct(settings: DirectWorkerSettings) -> str:
 
 @click.command()
 @click.option("--worker", "-w", type=int, default=4, show_default=True, help="Worker processes")
-@click.option("--postgres-dsn", type=str, default=None, help="PostgreSQL DSN (uses settings if not provided)")
+@click.option(
+    "--postgres-dsn",
+    type=str,
+    envvar="POSTGRES_DSN",
+    show_envvar=True,
+    help="PostgreSQL DSN (or set POSTGRES_DSN env var)",
+)
 @click.option("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY, show_default=True,
               help="Concurrent TLS scans per worker")
 @click.option("--timeout", type=float, default=DEFAULT_TIMEOUT, show_default=True,
@@ -701,7 +671,7 @@ def run_worker_direct(settings: DirectWorkerSettings) -> str:
 @click.option("--verbose", is_flag=True, help="Enable verbose debug logging")
 def main(
     worker: int,
-    postgres_dsn: Optional[str],
+    postgres_dsn: str | None,
     concurrency: int,
     timeout: float,
     ports: str,
@@ -717,24 +687,12 @@ def main(
     log_level = logging.DEBUG if verbose else logging.INFO
     configure_logging(log_level)
 
-    # Use settings or .env file if no explicit DSN provided
-    if not postgres_dsn:
-        try:
-            postgres_dsn = resolve_dsn()
-        except ValueError as exc:
-            click.echo(f"[ERROR] {exc}")
-            click.echo("[INFO] Please set POSTGRES_DSN in environment or .env file")
-            click.echo("[INFO] Example: POSTGRES_DSN=postgresql+asyncpg://"
-                       "user:pass@localhost:5432/dbname")
-            sys.exit(1)
-        except Exception as exc:
-            click.echo(f"[ERROR] Could not resolve PostgreSQL DSN: {exc}")
-            sys.exit(1)
-
     # Test database connection before proceeding
+    resolved_dsn = load_postgres_dsn(postgres_dsn)
+
     async def test_connection():
         try:
-            engine = create_async_engine(postgres_dsn)
+            engine = create_async_engine(resolved_dsn)
             session_factory = async_sessionmaker(
                 bind=engine,
                 class_=AsyncSession,
@@ -748,7 +706,7 @@ def main(
             return True
         except Exception as exc:
             click.echo(f"[ERROR] Database connection test failed: {exc}")
-            click.echo(f"[INFO] DSN: {postgres_dsn}")
+            click.echo(f"[INFO] DSN: {resolved_dsn}")
             click.echo("[INFO] Please check:")
             click.echo("  - PostgreSQL server is running")
             click.echo("  - Database name, host, port are correct")
@@ -765,7 +723,7 @@ def main(
     port_tuple = tuple(sorted({int(p.strip()) for p in ports.split(",") if p.strip()})) or DEFAULT_PORTS
 
     base_settings = WorkerSettings(
-        postgres_dsn=postgres_dsn,
+        postgres_dsn=resolved_dsn,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
@@ -792,7 +750,7 @@ def main(
 
     # Count pending domains
     async def count_pending():
-        engine = create_async_engine(postgres_dsn)
+        engine = create_async_engine(resolved_dsn)
         session_factory = async_sessionmaker(
             bind=engine,
             class_=AsyncSession,
@@ -809,7 +767,7 @@ def main(
         except Exception as exc:
             log.error("Failed to connect to PostgreSQL: %s", exc)
             click.echo(f"[ERROR] Database connection failed: {exc}")
-            click.echo(f"[INFO] PostgreSQL DSN: {postgres_dsn}")
+            click.echo(f"[INFO] PostgreSQL DSN: {resolved_dsn}")
             click.echo("[INFO] Please check your database connection and DSN")
             return 0
         finally:
@@ -823,7 +781,7 @@ def main(
         return
 
     if rabbitmq_url:
-        domains = iter_pending_domains(postgres_dsn, port_tuple)
+        domains = iter_pending_domains(resolved_dsn, port_tuple)
         log.info("Publishing TLS scan jobs to RabbitMQ at %s", rabbitmq_url)
         published = asyncio.run(
             enqueue_domains(

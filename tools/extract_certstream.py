@@ -14,11 +14,8 @@ bootstrap.setup()
 
 import asyncio
 import logging
-import os
 import sys
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
 
 import certstream
 import click
@@ -29,41 +26,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from shared.models.postgres import Domain
 
-
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-
-
-def _parse_env_file(path: Path) -> dict:
-    """Parse a .env file and return key-value pairs."""
-    env_vars = {}
-    if not path.exists():
-        return env_vars
-
-    with open(path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                env_vars[key.strip()] = value.strip().strip('"\'')
-    return env_vars
-
-
-def resolve_dsn() -> str:
-    """Resolve PostgreSQL DSN from environment or .env file."""
-    # First try environment variables
-    if "POSTGRES_DSN" in os.environ:
-        dsn = os.environ["POSTGRES_DSN"]
-    else:
-        # Try to load from .env file
-        env_vars = _parse_env_file(ENV_PATH)
-        dsn = env_vars.get("POSTGRES_DSN")
-
-        if not dsn:
-            raise ValueError(
-                "POSTGRES_DSN not found in environment or .env file"
-            )
-
-    return dsn
+from postgres_helpers import load_postgres_dsn
 
 
 class PostgresAsync:
@@ -164,14 +127,15 @@ def create_callback(postgres_dsn: str):
     '--postgres-dsn',
     help='PostgreSQL DSN (e.g., postgresql+asyncpg://user:pass@host/db)',
     type=str,
-    default=None
+    envvar='POSTGRES_DSN',
+    show_envvar=True,
 )
 @click.option(
     '--verbose', '-v',
     is_flag=True,
     help='Enable verbose logging'
 )
-def main(postgres_dsn: Optional[str], verbose: bool):
+def main(postgres_dsn: str | None, verbose: bool):
     """Certificate Transparency log monitor for PostgreSQL."""
     # Configure logging
     log_level = logging.DEBUG if verbose else logging.INFO
@@ -180,26 +144,12 @@ def main(postgres_dsn: Optional[str], verbose: bool):
         level=log_level
     )
 
-    # Use settings or .env file if no explicit DSN provided
-    if not postgres_dsn:
-        try:
-            postgres_dsn = resolve_dsn()
-        except ValueError as exc:
-            click.echo(f"[ERROR] {exc}")
-            click.echo("[INFO] Please set POSTGRES_DSN in environment or "
-                       ".env file")
-            click.echo("[INFO] Example: POSTGRES_DSN=postgresql+asyncpg://"
-                       "user:pass@localhost:5432/dbname")
-            sys.exit(1)
-        except Exception as exc:
-            click.echo(f"[ERROR] Could not resolve PostgreSQL DSN: {exc}")
-            sys.exit(1)
+    resolved_dsn = load_postgres_dsn(postgres_dsn)
 
     click.echo("[INFO] Starting Certificate Transparency monitor...")
-    click.echo(f"[INFO] PostgreSQL DSN: {postgres_dsn}")
     
     # Create callback with PostgreSQL connection
-    callback = create_callback(postgres_dsn)
+    callback = create_callback(resolved_dsn)
     
     try:
         certstream.listen_for_events(

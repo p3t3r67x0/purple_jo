@@ -7,53 +7,13 @@ import os
 import subprocess
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import List, Dict, Any
 
 import asyncpg
 import asyncio
 import click
 
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-
-
-def _parse_env_file(path: Path) -> Dict[str, str]:
-    """Parse environment variables from .env file."""
-    env_vars = {}
-    if not path.exists():
-        return env_vars
-    
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                env_vars[key.strip()] = value.strip().strip('"\'')
-    return env_vars
-
-
-def resolve_dsn() -> str:
-    """Resolve PostgreSQL DSN from environment or .env file."""
-    env_value = os.environ.get("POSTGRES_DSN")
-    if env_value:
-        dsn = env_value
-    else:
-        file_values = _parse_env_file(ENV_PATH)
-        dsn = file_values.get("POSTGRES_DSN")
-
-    if not dsn:
-        raise RuntimeError(
-            "POSTGRES_DSN must be set as an environment variable "
-            "or in .env file"
-        )
-
-    # Convert SQLAlchemy DSN to asyncpg format
-    if dsn.startswith("postgresql+asyncpg://"):
-        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
-    if dsn.startswith("postgresql+psycopg://"):
-        return "postgresql://" + dsn[len("postgresql+psycopg://"):]
-    return dsn
-
+from postgres_helpers import load_postgres_dsn, normalise_asyncpg_dsn
 
 def utcnow() -> datetime:
     """Return a naive UTC timestamp compatible with PostgreSQL columns."""
@@ -337,13 +297,25 @@ def worker(postgres_dsn: str, ports: str, rate: int, batch_size: int):
     default=5000,
     help="Masscan scan rate (packets per second)"
 )
-def main(workers: int, input_file: str, batch: int, rate: int):
+@click.option(
+    "--postgres-dsn",
+    type=str,
+    envvar="POSTGRES_DSN",
+    show_envvar=True,
+    help="PostgreSQL DSN (or set POSTGRES_DSN env var)",
+)
+def main(
+    workers: int,
+    input_file: str,
+    batch: int,
+    rate: int,
+    postgres_dsn: str | None,
+):
     """Masscan scanner tool with PostgreSQL backend.
     
     Scans domains from the database using masscan and stores results.
     """
     ports = load_ports(input_file)
-    postgres_dsn = resolve_dsn()
 
     click.echo(f"[INFO] Ports loaded: {ports}")
     click.echo(
@@ -351,10 +323,12 @@ def main(workers: int, input_file: str, batch: int, rate: int):
         f"batch size {batch}, rate {rate}"
     )
 
+    dsn = normalise_asyncpg_dsn(load_postgres_dsn(postgres_dsn))
+
     with multiprocessing.Pool(processes=workers) as pool:
         pool.starmap(
             worker,
-            [(postgres_dsn, ports, rate, batch)] * workers
+            [(dsn, ports, rate, batch)] * workers
         )
 
     click.echo("[INFO] All workers finished")

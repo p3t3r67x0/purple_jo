@@ -1,54 +1,13 @@
 #!/usr/bin/env python3
 
 import asyncio
-import os
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import List
 
 import asyncpg
 import click
 
-
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-
-
-def _parse_env_file(path: Path) -> dict:
-    """Parse a .env file and return key-value pairs."""
-    env_vars = {}
-    if not path.exists():
-        return env_vars
-
-    with open(path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                env_vars[key.strip()] = value.strip().strip('"\'')
-    return env_vars
-
-
-def resolve_dsn() -> str:
-    """Resolve PostgreSQL DSN from environment or .env file."""
-    # First try environment variables
-    if "POSTGRES_DSN" in os.environ:
-        dsn = os.environ["POSTGRES_DSN"]
-    else:
-        # Try to load from .env file
-        env_vars = _parse_env_file(ENV_PATH)
-        dsn = env_vars.get("POSTGRES_DSN")
-
-        if not dsn:
-            raise ValueError(
-                "POSTGRES_DSN not found in environment or .env file"
-            )
-
-    # Convert SQLAlchemy DSN to asyncpg format
-    if dsn.startswith("postgresql+asyncpg://"):
-        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
-    if dsn.startswith("postgresql+psycopg://"):
-        return "postgresql://" + dsn[len("postgresql+psycopg://"):]
-    return dsn
+from postgres_helpers import load_postgres_dsn, normalise_asyncpg_dsn
 
 
 def utcnow() -> datetime:
@@ -152,19 +111,26 @@ async def process_asns(postgres_dsn: str, input_file: str) -> None:
     required=True,
     help="Input file containing CIDR/ASN pairs (e.g., '1.0.0.0/24 13335')"
 )
-def main(input: str):
+@click.option(
+    "--postgres-dsn",
+    type=str,
+    envvar="POSTGRES_DSN",
+    show_envvar=True,
+    help="PostgreSQL DSN (or set POSTGRES_DSN env var)",
+)
+def main(input: str, postgres_dsn: str | None):
     """ASN insertion tool with PostgreSQL backend.
 
     Loads CIDR/ASN pairs from a text file and inserts them into PostgreSQL.
     Each line should contain a CIDR block and ASN number separated by
     whitespace. Lines starting with ';' are treated as comments and skipped.
     """
-    postgres_dsn = resolve_dsn()
-
     click.echo("[INFO] Starting ASN insertion")
     click.echo(f"[INFO] Input file: {input}")
 
-    asyncio.run(process_asns(postgres_dsn, input))
+    dsn = normalise_asyncpg_dsn(load_postgres_dsn(postgres_dsn))
+
+    asyncio.run(process_asns(dsn, input))
 
 
 if __name__ == '__main__':

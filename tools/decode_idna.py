@@ -2,9 +2,7 @@
 
 import asyncio
 import idna
-import os
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import List, Tuple
 
 import asyncpg
@@ -12,46 +10,7 @@ import click
 
 from idna.core import IDNAError
 
-
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-
-
-def _parse_env_file(path: Path) -> dict:
-    """Parse a .env file and return key-value pairs."""
-    env_vars = {}
-    if not path.exists():
-        return env_vars
-
-    with open(path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                env_vars[key.strip()] = value.strip().strip('"\'')
-    return env_vars
-
-
-def resolve_dsn() -> str:
-    """Resolve PostgreSQL DSN from environment or .env file."""
-    # First try environment variables
-    if "POSTGRES_DSN" in os.environ:
-        dsn = os.environ["POSTGRES_DSN"]
-    else:
-        # Try to load from .env file
-        env_vars = _parse_env_file(ENV_PATH)
-        dsn = env_vars.get("POSTGRES_DSN")
-
-        if not dsn:
-            raise ValueError(
-                "POSTGRES_DSN not found in environment or .env file"
-            )
-
-    # Convert SQLAlchemy DSN to asyncpg format
-    if dsn.startswith("postgresql+asyncpg://"):
-        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
-    if dsn.startswith("postgresql+psycopg://"):
-        return "postgresql://" + dsn[len("postgresql+psycopg://"):]
-    return dsn
+from postgres_helpers import load_postgres_dsn, normalise_asyncpg_dsn
 
 
 def utcnow() -> datetime:
@@ -140,17 +99,24 @@ async def process_idna_domains(postgres_dsn: str) -> None:
 
 
 @click.command()
-def main():
+@click.option(
+    "--postgres-dsn",
+    type=str,
+    envvar="POSTGRES_DSN",
+    show_envvar=True,
+    help="PostgreSQL DSN (or set POSTGRES_DSN env var)",
+)
+def main(postgres_dsn: str | None):
     """IDNA decoder tool with PostgreSQL backend.
 
     Finds domains with IDNA encoding (containing 'xn--') and decodes them
     to their Unicode representation, updating the database accordingly.
     """
-    postgres_dsn = resolve_dsn()
-
     click.echo("[INFO] Starting IDNA domain decoding")
 
-    asyncio.run(process_idna_domains(postgres_dsn))
+    dsn = normalise_asyncpg_dsn(load_postgres_dsn(postgres_dsn))
+
+    asyncio.run(process_idna_domains(dsn))
 
 
 if __name__ == '__main__':

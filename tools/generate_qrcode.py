@@ -3,55 +3,16 @@
 import pyqrcode
 import multiprocessing
 import asyncio
-import os
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import asyncpg
 import click
 
+from postgres_helpers import load_postgres_dsn, normalise_asyncpg_dsn
 
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+
 BATCH_SIZE = 100  # how many records each worker processes at once
-
-
-def _parse_env_file(path: Path) -> Dict[str, str]:
-    """Parse a .env file and return key-value pairs."""
-    env_vars = {}
-    if not path.exists():
-        return env_vars
-    
-    with open(path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                env_vars[key.strip()] = value.strip().strip('"\'')
-    return env_vars
-
-
-def resolve_dsn() -> str:
-    """Resolve PostgreSQL DSN from environment or .env file."""
-    # First try environment variables
-    if "POSTGRES_DSN" in os.environ:
-        dsn = os.environ["POSTGRES_DSN"]
-    else:
-        # Try to load from .env file
-        env_vars = _parse_env_file(ENV_PATH)
-        dsn = env_vars.get("POSTGRES_DSN")
-        
-        if not dsn:
-            raise ValueError(
-                "POSTGRES_DSN not found in environment or .env file"
-            )
-    
-    # Convert SQLAlchemy DSN to asyncpg format
-    if dsn.startswith("postgresql+asyncpg://"):
-        return "postgresql://" + dsn[len("postgresql+asyncpg://"):]
-    if dsn.startswith("postgresql+psycopg://"):
-        return "postgresql://" + dsn[len("postgresql+psycopg://"):]
-    return dsn
 
 
 def utcnow() -> datetime:
@@ -193,18 +154,25 @@ async def get_domain_count(postgres_dsn: str) -> int:
     default=4,
     help="Number of worker processes to run"
 )
-def main(workers: int):
+@click.option(
+    "--postgres-dsn",
+    type=str,
+    envvar="POSTGRES_DSN",
+    show_envvar=True,
+    help="PostgreSQL DSN (or set POSTGRES_DSN env var)",
+)
+def main(workers: int, postgres_dsn: str | None):
     """QR code generation tool with PostgreSQL backend.
     
     Generates QR codes for domains that don't have them yet.
     """
-    postgres_dsn = resolve_dsn()
-    
     click.echo("[INFO] Starting QR code generator")
     click.echo(f"[INFO] Workers: {workers}")
     
     # Get total count of domains that need QR codes
-    total_domains = asyncio.run(get_domain_count(postgres_dsn))
+    dsn = normalise_asyncpg_dsn(load_postgres_dsn(postgres_dsn))
+
+    total_domains = asyncio.run(get_domain_count(dsn))
     if total_domains == 0:
         click.echo("[INFO] No domains need QR codes")
         return
@@ -228,7 +196,7 @@ def main(workers: int):
             
         j = multiprocessing.Process(
             target=worker,
-            args=(postgres_dsn, skip, limit)
+            args=(dsn, skip, limit)
         )
         jobs.append(j)
         j.start()

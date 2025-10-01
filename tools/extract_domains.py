@@ -35,135 +35,152 @@ from shared.models.postgres import Domain, Url
 from async_sqlmodel_helpers import normalise_async_dsn, resolve_async_dsn
 
 
-def utcnow() -> datetime:
-    """Return current UTC datetime without timezone info."""
-    return datetime.now(UTC).replace(tzinfo=None)
+class DomainExtractor:
+    """Extract domains from URLs and persist them to PostgreSQL."""
 
+    @staticmethod
+    def utcnow() -> datetime:
+        """Return current UTC datetime without timezone info."""
 
-async def get_postgres_session(postgres_dsn: str) -> AsyncSession:
-    """Create a PostgreSQL session."""
-    engine = create_async_engine(
-        normalise_async_dsn(postgres_dsn),
-        echo=False,
-        pool_size=5,
-        max_overflow=10,
-    )
-    session_factory = async_sessionmaker(
-        bind=engine,
-        expire_on_commit=False,
-        class_=AsyncSession,
-    )
-    return session_factory()
+        return datetime.now(UTC).replace(tzinfo=None)
 
+    @classmethod
+    async def get_postgres_session(cls, postgres_dsn: str) -> AsyncSession:
+        """Create a PostgreSQL session."""
 
-def match_ipv4(ipv4):
-    return re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ipv4)
+        engine = create_async_engine(
+            normalise_async_dsn(postgres_dsn),
+            echo=False,
+            pool_size=5,
+            max_overflow=10,
+        )
+        session_factory = async_sessionmaker(
+            bind=engine,
+            expire_on_commit=False,
+            class_=AsyncSession,
+        )
+        return session_factory()
 
+    @staticmethod
+    def match_ipv4(ipv4: str):
+        return re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ipv4)
 
-def find_domain(domain):
-    return re.search(
-        r'([\w\-.]{1,63}|[\w\-.]{1,63}[^\x00-\x7F\w-]{1,63})\.([\w\-.]{2,})|'
-        r'(([\w\d-]{1,63}|[\d\w-]*[^\x00-\x7F\w-]{1,63}))\.?'
-        r'([\w\d]{1,63}|[\d\w\-.]*[^\x00-\x7F\-.]{1,63})\.'
-        r'([a-z\.]{2,}|[\w]*[^\x00-\x7F\.]{2,})',
-        domain
-    )
+    @staticmethod
+    def find_domain(domain: str):
+        return re.search(
+            r'([\w\-.]{1,63}|[\w\-.]{1,63}[^\x00-\x7F\w-]{1,63})\.([\w\-.]{2,})|'
+            r'(([\w\d-]{1,63}|[\d\w-]*[^\x00-\x7F\w-]{1,63}))\.?'
+            r'([\w\d]{1,63}|[\d\w\-.]*[^\x00-\x7F\-.]{1,63})\.'
+            r'([a-z\.]{2,}|[\w]*[^\x00-\x7F\.]{2,})',
+            domain,
+        )
 
+    @classmethod
+    async def retrieve_urls(
+        cls,
+        session: AsyncSession,
+        skip: int,
+        limit: int,
+    ):
+        """Retrieve URLs that haven't had domains extracted yet."""
 
-async def retrieve_urls(session: AsyncSession, skip: int, limit: int):
-    """Retrieve URLs that haven't had domains extracted yet."""
-    stmt = (
-        select(Url)
-        .where(Url.domain_extracted.is_(None))
-        .order_by(Url.id.desc())
-        .offset(skip)
-        .limit(limit)
-    )
-    result = await session.exec(stmt)
-    return result.all()
-
-
-async def update_url(session: AsyncSession, url_id: int):
-    """Mark URL as having domain extracted."""
-    stmt = select(Url).where(Url.id == url_id)
-    result = await session.exec(stmt)
-    url = result.first()
-    if url:
-        url.domain_extracted = utcnow()
-        session.add(url)
-        await session.commit()
-
-
-async def add_domains(session: AsyncSession, url_id: int, domain: str):
-    """Add domain and mark URL as processed."""
-    await update_url(session, url_id)
-    try:
-        # Check if domain already exists
-        stmt = select(Domain).where(Domain.name == domain.lower())
+        stmt = (
+            select(Url)
+            .where(Url.domain_extracted.is_(None))
+            .order_by(Url.id.desc())
+            .offset(skip)
+            .limit(limit)
+        )
         result = await session.exec(stmt)
-        existing_domain = result.first()
-        
-        if not existing_domain:
-            # Create new domain
-            new_domain = Domain(
-                name=domain.lower(),
-                created_at=utcnow(),
-                updated_at=utcnow()
-            )
-            session.add(new_domain)
+        return result.all()
+
+    @classmethod
+    async def update_url(cls, session: AsyncSession, url_id: int) -> None:
+        """Mark URL as having domain extracted."""
+
+        stmt = select(Url).where(Url.id == url_id)
+        result = await session.exec(stmt)
+        url = result.first()
+        if url:
+            url.domain_extracted = cls.utcnow()
+            session.add(url)
             await session.commit()
-            print(f"INFO: added domain {domain} with id {new_domain.id}")
-        else:
-            print(f"INFO: domain {domain} already exists")
-    except IntegrityError as e:
-        await session.rollback()
-        print(f"Duplicate domain {domain}: {e}")
-    except Exception as e:
-        await session.rollback()
-        print(f"Error adding domain {domain}: {e}")
-        time.sleep(1)
 
+    @classmethod
+    async def add_domains(cls, session: AsyncSession, url_id: int, domain: str) -> None:
+        """Add domain and mark URL as processed."""
 
-async def worker_async(postgres_dsn: str, skip: int, limit: int):
-    """Async worker to process URLs and extract domains."""
-    session = await get_postgres_session(postgres_dsn)
-    
-    try:
-        urls = await retrieve_urls(session, skip, limit)
-        for url in urls:
-            try:
-                domain = find_domain(url.url)
-                if domain is not None and not match_ipv4(domain.group(0)):
-                    print(f"INFO: processing {url.url}")
-                    await add_domains(session, url.id, domain.group(0))
-            except ValueError:
-                continue
-            except Exception as e:
-                print(f"ERROR processing {url.url}: {e}")
-                continue
-    except Exception as e:
-        print(f"ERROR in batch {skip}:{skip+limit}: {e}")
-    finally:
-        await session.close()
-    return f"Worker {skip}:{skip+limit} done"
+        await cls.update_url(session, url_id)
+        try:
+            # Check if domain already exists
+            stmt = select(Domain).where(Domain.name == domain.lower())
+            result = await session.exec(stmt)
+            existing_domain = result.first()
 
+            if not existing_domain:
+                # Create new domain
+                new_domain = Domain(
+                    name=domain.lower(),
+                    created_at=cls.utcnow(),
+                    updated_at=cls.utcnow(),
+                )
+                session.add(new_domain)
+                await session.commit()
+                print(f"INFO: added domain {domain} with id {new_domain.id}")
+            else:
+                print(f"INFO: domain {domain} already exists")
+        except IntegrityError as exc:
+            await session.rollback()
+            print(f"Duplicate domain {domain}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            print(f"Error adding domain {domain}: {exc}")
+            time.sleep(1)
 
-def worker(task):
-    """Synchronous wrapper for the async worker."""
-    postgres_dsn, skip, limit = task
-    return asyncio.run(worker_async(postgres_dsn, skip, limit))
+    @classmethod
+    async def worker_async(cls, postgres_dsn: str, skip: int, limit: int) -> str:
+        """Async worker to process URLs and extract domains."""
 
+        session = await cls.get_postgres_session(postgres_dsn)
 
-async def count_unprocessed_urls(postgres_dsn: str) -> int:
-    """Count URLs that haven't had domains extracted."""
-    session = await get_postgres_session(postgres_dsn)
-    try:
-        stmt = select(Url).where(Url.domain_extracted.is_(None))
-        result = await session.exec(stmt)
-        urls = result.all()
-        return len(urls)
-    finally:
-        await session.close()
+        try:
+            urls = await cls.retrieve_urls(session, skip, limit)
+            for url in urls:
+                try:
+                    domain = cls.find_domain(url.url)
+                    if domain is not None and not cls.match_ipv4(domain.group(0)):
+                        print(f"INFO: processing {url.url}")
+                        await cls.add_domains(session, url.id, domain.group(0))
+                except ValueError:
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    print(f"ERROR processing {url.url}: {exc}")
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR in batch {skip}:{skip+limit}: {exc}")
+        finally:
+            await session.close()
+        return f"Worker {skip}:{skip+limit} done"
+
+    @classmethod
+    def worker(cls, task):
+        """Synchronous wrapper for the async worker."""
+
+        postgres_dsn, skip, limit = task
+        return asyncio.run(cls.worker_async(postgres_dsn, skip, limit))
+
+    @classmethod
+    async def count_unprocessed_urls(cls, postgres_dsn: str) -> int:
+        """Count URLs that haven't had domains extracted."""
+
+        session = await cls.get_postgres_session(postgres_dsn)
+        try:
+            stmt = select(Url).where(Url.domain_extracted.is_(None))
+            result = await session.exec(stmt)
+            urls = result.all()
+            return len(urls)
+        finally:
+            await session.close()
 
 
 @click.command()
@@ -173,9 +190,9 @@ def main(workers, postgres_dsn):
     """Extract domains from URLs using PostgreSQL backend."""
     postgres_dsn = resolve_async_dsn(postgres_dsn)
 
-    total_docs = asyncio.run(count_unprocessed_urls(postgres_dsn))
+    total_docs = asyncio.run(DomainExtractor.count_unprocessed_urls(postgres_dsn))
     print(f"Found {total_docs} URLs to process")
-    
+
     if total_docs == 0:
         print("No URLs to process")
         return
@@ -185,7 +202,7 @@ def main(workers, postgres_dsn):
              for i in range(workers)]
 
     with multiprocessing.Pool(processes=workers) as pool:
-        for result in pool.imap_unordered(worker, tasks):
+        for result in pool.imap_unordered(DomainExtractor.worker, tasks):
             print(result)
 
 

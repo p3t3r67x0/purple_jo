@@ -151,6 +151,51 @@ async def get_domain_count(postgres_dsn: str) -> int:
         await pool.close()
 
 
+class QRCodeGenerationTool:
+    """Coordinate QR code generation for domains."""
+
+    @classmethod
+    def run(cls, workers: int, postgres_dsn: str) -> None:
+        click.echo("[INFO] Starting QR code generator")
+        click.echo(f"[INFO] Workers: {workers}")
+
+        total_domains = asyncio.run(get_domain_count(postgres_dsn))
+        if total_domains == 0:
+            click.echo("[INFO] No domains need QR codes")
+            return
+
+        click.echo(f"[INFO] Found {total_domains} domains needing QR codes")
+
+        batch_size = max(1, total_domains // workers)
+        jobs: List[multiprocessing.Process] = []
+
+        for i in range(workers):
+            skip = i * batch_size
+            limit = batch_size
+
+            if i == workers - 1:
+                limit = max(0, total_domains - skip)
+
+            if limit <= 0:
+                break
+
+            job = multiprocessing.Process(
+                target=worker,
+                args=(postgres_dsn, skip, limit),
+            )
+            jobs.append(job)
+            job.start()
+            click.echo(
+                f"[INFO] Started worker {i+1} (skip={skip}, limit={limit})"
+            )
+
+        for job in jobs:
+            job.join()
+            click.echo(f'[INFO] Worker finished with exitcode = {job.exitcode}')
+
+        click.echo("[INFO] All workers finished")
+
+
 @click.command()
 @click.option(
     "--workers",
@@ -166,48 +211,10 @@ async def get_domain_count(postgres_dsn: str) -> int:
 )
 def main(workers: int, postgres_dsn: str):
     """QR code generation tool with PostgreSQL backend.
-    
+
     Generates QR codes for domains that don't have them yet.
     """
-    click.echo("[INFO] Starting QR code generator")
-    click.echo(f"[INFO] Workers: {workers}")
-    
-    # Get total count of domains that need QR codes
-    total_domains = asyncio.run(get_domain_count(postgres_dsn))
-    if total_domains == 0:
-        click.echo("[INFO] No domains need QR codes")
-        return
-    
-    click.echo(f"[INFO] Found {total_domains} domains needing QR codes")
-    
-    # Calculate work distribution
-    batch_size = max(1, total_domains // workers)
-    
-    jobs = []
-    for i in range(workers):
-        skip = i * batch_size
-        limit = batch_size
-        
-        # Last worker gets any remaining domains
-        if i == workers - 1:
-            limit = max(0, total_domains - skip)
-        
-        if limit <= 0:
-            break
-            
-        j = multiprocessing.Process(
-            target=worker,
-            args=(postgres_dsn, skip, limit)
-        )
-        jobs.append(j)
-        j.start()
-        click.echo(f"[INFO] Started worker {i+1} (skip={skip}, limit={limit})")
-
-    for j in jobs:
-        j.join()
-        click.echo(f'[INFO] Worker finished with exitcode = {j.exitcode}')
-    
-    click.echo("[INFO] All workers finished")
+    QRCodeGenerationTool.run(workers, postgres_dsn)
 
 
 if __name__ == "__main__":

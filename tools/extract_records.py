@@ -872,6 +872,165 @@ def run_worker_direct(settings: DirectWorkerSettings) -> str:
         return f"[ERROR] Worker crashed: {exc}"
 
 
+class DNSRecordsTool:
+    """Coordinate CLI operations for DNS record extraction."""
+
+    @classmethod
+    def run(
+        cls,
+        worker: int,
+        postgres_dsn: str,
+        concurrency: int,
+        dns_timeout: float,
+        rabbitmq_url: Optional[str],
+        queue_name: str,
+        prefetch: int,
+        purge_queue: bool,
+        service: bool,
+        log_records: bool,
+        verbose: bool,
+    ) -> None:
+        log_level = logging.DEBUG if verbose else logging.INFO
+        configure_logging(log_level)
+
+        worker = max(1, worker)
+        concurrency = max(1, concurrency)
+        prefetch = max(1, prefetch)
+
+        resolved_dsn = resolve_async_dsn(postgres_dsn)
+
+        base_settings = WorkerSettings(
+            postgres_dsn=resolved_dsn,
+            rabbitmq_url=rabbitmq_url,
+            queue_name=queue_name,
+            prefetch=prefetch,
+            concurrency=concurrency,
+            dns_timeout=dns_timeout,
+            log_level=log_level,
+            verbose_records=log_records,
+        )
+
+        if service:
+            cls._run_service_mode(worker, base_settings, rabbitmq_url)
+            return
+
+        postgres = PostgresAsync(resolved_dsn)
+        total_docs = asyncio.run(cls._count_pending_domains(postgres))
+        click.echo(f"[INFO] total domains to resolve: {total_docs}")
+
+        if total_docs == 0:
+            click.echo("[INFO] Nothing to resolve")
+            return
+
+        if rabbitmq_url:
+            cls._run_rabbitmq_mode(
+                worker=worker,
+                postgres=postgres,
+                base_settings=base_settings,
+                rabbitmq_url=rabbitmq_url,
+                queue_name=queue_name,
+                purge_queue=purge_queue,
+            )
+            return
+
+        cls._run_direct_mode(
+            worker=worker,
+            base_settings=base_settings,
+            total_docs=total_docs,
+        )
+
+    @classmethod
+    def _run_service_mode(
+        cls,
+        worker: int,
+        base_settings: WorkerSettings,
+        rabbitmq_url: Optional[str],
+    ) -> None:
+        if not rabbitmq_url:
+            raise click.BadParameter(
+                "RabbitMQ URL is required when --service is set",
+            )
+
+        worker_args = [WorkerSettings(**base_settings.__dict__)
+                       for _ in range(worker)]
+        if worker == 1:
+            click.echo(run_worker(worker_args[0]))
+            return
+
+        with multiprocessing.Pool(processes=worker) as pool:
+            log.info("Spawned %d worker processes (service mode)", worker)
+            for result in pool.imap_unordered(run_worker, worker_args):
+                click.echo(result)
+
+    @classmethod
+    async def _count_pending_domains(cls, postgres: PostgresAsync) -> int:
+        async with await postgres.get_session() as session:
+            stmt = select(func.count(Domain.id)).outerjoin(ARecord).where(
+                ARecord.domain_id.is_(None)
+            )
+            result = await session.exec(stmt)
+            return result.first()
+
+    @classmethod
+    def _run_rabbitmq_mode(
+        cls,
+        worker: int,
+        postgres: PostgresAsync,
+        base_settings: WorkerSettings,
+        rabbitmq_url: str,
+        queue_name: str,
+        purge_queue: bool,
+    ) -> None:
+        domains = iter_pending_domains(postgres)
+        log.info("Publishing DNS jobs to RabbitMQ at %s", rabbitmq_url)
+        published = asyncio.run(
+            enqueue_domains(
+                rabbitmq_url=rabbitmq_url,
+                queue_name=queue_name,
+                domains=domains,
+                worker_count=worker,
+                purge_queue=purge_queue,
+            )
+        )
+        log.info(
+            "Queued %d domains onto RabbitMQ queue '%s'",
+            published,
+            queue_name,
+        )
+
+        worker_args = [WorkerSettings(**base_settings.__dict__)
+                       for _ in range(worker)]
+        with multiprocessing.Pool(processes=worker) as pool:
+            log.info("Spawned %d worker processes", worker)
+            for result in pool.imap_unordered(run_worker, worker_args):
+                click.echo(result)
+
+    @classmethod
+    def _run_direct_mode(
+        cls,
+        worker: int,
+        base_settings: WorkerSettings,
+        total_docs: int,
+    ) -> None:
+        chunk_size = math.ceil(total_docs / worker)
+        tasks: List[DirectWorkerSettings] = []
+        start = 0
+        while start < total_docs:
+            limit = min(chunk_size, total_docs - start)
+            settings = DirectWorkerSettings(
+                **base_settings.__dict__,
+                skip=start,
+                limit=limit,
+            )
+            tasks.append(settings)
+            start += limit
+
+        with multiprocessing.Pool(processes=worker) as pool:
+            log.info("Spawned %d direct worker processes", worker)
+            for result in pool.imap_unordered(run_worker_direct, tasks):
+                click.echo(result)
+
+
 @click.command()
 @click.option("--worker", "-w", type=int, default=4, show_default=True, help="Worker processes")
 @click.option("--postgres-dsn", "-p", type=str, required=True,
@@ -906,101 +1065,19 @@ def main(
     log_records: bool,
     verbose: bool,
 ) -> None:
-    log_level = logging.DEBUG if verbose else logging.INFO
-    configure_logging(log_level)
-
-    worker = max(1, worker)
-    concurrency = max(1, concurrency)
-    prefetch = max(1, prefetch)
-
-    resolved_dsn = resolve_async_dsn(postgres_dsn)
-
-    base_settings = WorkerSettings(
-        postgres_dsn=resolved_dsn,
+    DNSRecordsTool.run(
+        worker=worker,
+        postgres_dsn=postgres_dsn,
+        concurrency=concurrency,
+        dns_timeout=dns_timeout,
         rabbitmq_url=rabbitmq_url,
         queue_name=queue_name,
         prefetch=prefetch,
-        concurrency=concurrency,
-        dns_timeout=dns_timeout,
-        log_level=log_level,
-        verbose_records=log_records,
+        purge_queue=purge_queue,
+        service=service,
+        log_records=log_records,
+        verbose=verbose,
     )
-
-    if service:
-        if not rabbitmq_url:
-            raise click.BadParameter(
-                "RabbitMQ URL is required when --service is set")
-
-        worker_args = [WorkerSettings(**base_settings.__dict__)
-                       for _ in range(worker)]
-        if worker == 1:
-            click.echo(run_worker(worker_args[0]))
-        else:
-            with multiprocessing.Pool(processes=worker) as pool:
-                log.info("Spawned %d worker processes (service mode)", worker)
-                for result in pool.imap_unordered(run_worker, worker_args):
-                    click.echo(result)
-        return
-
-    # Create PostgreSQL connection for counting
-    postgres = PostgresAsync(resolved_dsn)
-
-    async def count_pending_domains():
-        async with await postgres.get_session() as session:
-            # Use efficient SQLAlchemy aggregate query with LEFT JOIN
-            # Count domains that don't have any A records processed yet
-            stmt = select(func.count(Domain.id)).outerjoin(ARecord).where(
-                ARecord.domain_id.is_(None)
-            )
-            result = await session.exec(stmt)
-            return result.first()
-
-    total_docs = asyncio.run(count_pending_domains())
-    click.echo(f"[INFO] total domains to resolve: {total_docs}")
-
-    if total_docs == 0:
-        click.echo("[INFO] Nothing to resolve")
-        return
-
-    if rabbitmq_url:
-        domains = iter_pending_domains(postgres)
-        log.info("Publishing DNS jobs to RabbitMQ at %s", rabbitmq_url)
-        published = asyncio.run(
-            enqueue_domains(
-                rabbitmq_url=rabbitmq_url,
-                queue_name=queue_name,
-                domains=domains,
-                worker_count=worker,
-                purge_queue=purge_queue,
-            )
-        )
-        log.info("Queued %d domains onto RabbitMQ queue '%s'",
-                 published, queue_name)
-
-        worker_args = [WorkerSettings(**base_settings.__dict__)
-                       for _ in range(worker)]
-        with multiprocessing.Pool(processes=worker) as pool:
-            log.info("Spawned %d worker processes", worker)
-            for result in pool.imap_unordered(run_worker, worker_args):
-                click.echo(result)
-    else:
-        chunk_size = math.ceil(total_docs / worker)
-        tasks = []
-        start = 0
-        while start < total_docs:
-            limit = min(chunk_size, total_docs - start)
-            settings = DirectWorkerSettings(
-                **base_settings.__dict__,
-                skip=start,
-                limit=limit,
-            )
-            tasks.append(settings)
-            start += limit
-
-        with multiprocessing.Pool(processes=worker) as pool:
-            log.info("Spawned %d direct worker processes", worker)
-            for result in pool.imap_unordered(run_worker_direct, tasks):
-                click.echo(result)
 
 
 def run_separate_services():

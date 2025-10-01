@@ -9,6 +9,8 @@ import logging
 import math
 import multiprocessing
 import os
+from pathlib import Path
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +29,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.sql import Select
 from sqlmodel import Field, SQLModel
+
+# Ensure the repository root is on ``sys.path`` so shared modules can be imported
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
 
 from shared.models.postgres import Domain, PortService
 

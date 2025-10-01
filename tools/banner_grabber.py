@@ -243,7 +243,7 @@ async def persist_batch_results(
                         updated_at=bindparam("updated_at"),
                     )
                 )
-                await session.exec(stmt, params)
+                await session.exec(stmt, params=params)
 
                 state_stmt = insert(BannerScanState).values(
                     [

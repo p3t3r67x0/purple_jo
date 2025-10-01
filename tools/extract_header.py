@@ -186,7 +186,6 @@ def _pending_domains_select() -> Select:
         .where(Domain.header_content_type.is_(None))
         .where(Domain.header_status.is_(None))
         .where(HeaderScanState.header_scan_failed.is_(None))
-        .distinct()
     )
 
 

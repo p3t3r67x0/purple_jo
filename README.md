@@ -31,17 +31,17 @@ sudo apt update
 sudo apt install postgresql postgresql-contrib
 
 # Create database and user
-sudo -u postgres psql -c "CREATE DATABASE purple_jo;"
-sudo -u postgres psql -c "CREATE USER purple_jo WITH PASSWORD 'change-me';"
-sudo -u postgres psql -c "GRANT CONNECT ON DATABASE purple_jo TO purple_jo;"
-sudo -u postgres psql -c "GRANT USAGE ON SCHEMA public TO purple_jo;"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE purple_jo TO purple_jo;"
+sudo -u postgres psql -c "CREATE DATABASE netscanner;"
+sudo -u postgres psql -c "CREATE USER netscanner WITH PASSWORD 'change-me';"
+sudo -u postgres psql -c "GRANT CONNECT ON DATABASE netscanner TO netscanner;"
+sudo -u postgres psql -c "GRANT USAGE ON SCHEMA public TO netscanner;"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE netscanner TO netscanner;"
 ```
 
 Set the DSN in your `.env` (or shell):
 
 ```
-POSTGRES_DSN=postgresql+asyncpg://purple_jo:change-me@127.0.0.1/purple_jo
+POSTGRES_DSN=postgresql+asyncpg://netscanner:change-me@127.0.0.1/netscanner
 ```
 
 Apply migrations to prepare the schema:
@@ -104,16 +104,16 @@ Once running, interactive documentation is available at:
 
 ### Core Endpoints
 
-| Endpoint          | Method | Description                     | Parameters                            |
-| ----------------- | ------ | ------------------------------- | ------------------------------------- |
-| `/query/{domain}` | GET    | Query domain information        | `domain`, `page`, `page_size`         |
-| `/dns`            | GET    | Latest DNS records              | `page`, `page_size`                   |
-| `/ip/{ipv4}`      | GET    | IPv4 address lookup             | `ipv4`, `page`, `page_size`           |
-| `/asn`            | GET    | ASN information                 | `page`, `page_size`, `country_code`   |
-| `/match/{query}`  | GET    | Advanced search with conditions | `query`, `page`, `page_size`          |
-| `/graph/{site}`   | GET    | Network relationship graph      | `site`, `page`, `page_size`           |
-| `/contact`        | POST   | Submit contact form (email)     | `name`, `email`, `subject`, `message`, `token?` |
-| `/admin/contact/messages` | GET | (Admin) Recent contact submissions | `limit`, `since_minutes` (auth required) |
+| Endpoint                  | Method | Description                        | Parameters                                      |
+| ------------------------- | ------ | ---------------------------------- | ----------------------------------------------- |
+| `/query/{domain}`         | GET    | Query domain information           | `domain`, `page`, `page_size`                   |
+| `/dns`                    | GET    | Latest DNS records                 | `page`, `page_size`                             |
+| `/ip/{ipv4}`              | GET    | IPv4 address lookup                | `ipv4`, `page`, `page_size`                     |
+| `/asn`                    | GET    | ASN information                    | `page`, `page_size`, `country_code`             |
+| `/match/{query}`          | GET    | Advanced search with conditions    | `query`, `page`, `page_size`                    |
+| `/graph/{site}`           | GET    | Network relationship graph         | `site`, `page`, `page_size`                     |
+| `/contact`                | POST   | Submit contact form (email)        | `name`, `email`, `subject`, `message`, `token?` |
+| `/admin/contact/messages` | GET    | (Admin) Recent contact submissions | `limit`, `since_minutes` (auth required)        |
 
 ### Real-time Features
 
@@ -168,21 +168,21 @@ Invalid token response (HTTP 401):
 
 Environment variables controlling the contact subsystem:
 
-| Variable                | Default                  | Description                                    |
-| ----------------------- | ------------------------ | ---------------------------------------------- |
-| `SMTP_HOST`             | `localhost`              | SMTP server host                               |
-| `SMTP_PORT`             | `25`                     | SMTP server port                               |
-| `SMTP_USER`             | (unset)                  | Username (if authentication needed)            |
-| `SMTP_PASSWORD`         | (unset)                  | Password (if authentication needed)            |
-| `SMTP_STARTTLS`         | `false`                  | Enable STARTTLS (`true/false`)                 |
-| `CONTACT_TO`            | `hello@netscanner.io`    | Destination email address                      |
-| `CONTACT_FROM`          | (falls back to user)     | Envelope/Sender address                        |
-| `CONTACT_RATE_LIMIT`    | `5`                      | Max submissions per window per IP              |
-| `CONTACT_RATE_WINDOW`   | `3600`                   | Window length in seconds                       |
-| `CONTACT_TOKEN`         | (unset)                  | Shared secret token (used only if no captcha)  |
-| `HCAPTCHA_SECRET`       | (unset)                  | hCaptcha secret (enables hCaptcha)             |
-| `RECAPTCHA_SECRET`      | (unset)                  | reCAPTCHA secret (enables reCAPTCHA)           |
-| `CONTACT_IP_DENYLIST`   | (unset)                  | Comma list of IPs / CIDRs to block             |
+| Variable              | Default               | Description                                   |
+| --------------------- | --------------------- | --------------------------------------------- |
+| `SMTP_HOST`           | `localhost`           | SMTP server host                              |
+| `SMTP_PORT`           | `25`                  | SMTP server port                              |
+| `SMTP_USER`           | (unset)               | Username (if authentication needed)           |
+| `SMTP_PASSWORD`       | (unset)               | Password (if authentication needed)           |
+| `SMTP_STARTTLS`       | `false`               | Enable STARTTLS (`true/false`)                |
+| `CONTACT_TO`          | `hello@netscanner.io` | Destination email address                     |
+| `CONTACT_FROM`        | (falls back to user)  | Envelope/Sender address                       |
+| `CONTACT_RATE_LIMIT`  | `5`                   | Max submissions per window per IP             |
+| `CONTACT_RATE_WINDOW` | `3600`                | Window length in seconds                      |
+| `CONTACT_TOKEN`       | (unset)               | Shared secret token (used only if no captcha) |
+| `HCAPTCHA_SECRET`     | (unset)               | hCaptcha secret (enables hCaptcha)            |
+| `RECAPTCHA_SECRET`    | (unset)               | reCAPTCHA secret (enables reCAPTCHA)          |
+| `CONTACT_IP_DENYLIST` | (unset)               | Comma list of IPs / CIDRs to block            |
 
 Admin OAuth flow:
 
@@ -364,156 +364,158 @@ sudo systemctl start netscanner-api
 Example Nginx config with CORS support and rate limiting:
 
 ```nginx
-# Rate limiting zones - add this to the http block in nginx.conf
-http {
-    # Rate limiting zones
-    limit_req_zone $binary_remote_addr zone=api_general:10m rate=10r/s;
-    limit_req_zone $binary_remote_addr zone=api_search:10m rate=5r/s;
-    limit_req_zone $binary_remote_addr zone=api_live:10m rate=2r/s;
-    limit_req_zone $binary_remote_addr zone=api_trends:10m rate=1r/s;
+# ===============================
+# Rate limiting zones
+# ===============================
+limit_req_zone $binary_remote_addr zone=api_search:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=api_live:10m rate=5r/s;
+limit_req_zone $binary_remote_addr zone=api_trends:10m rate=3r/s;
+limit_req_zone $binary_remote_addr zone=api_general:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=conn_limit_per_ip:10m;
 
-    # Connection limiting
-    limit_conn_zone $binary_remote_addr zone=conn_limit_per_ip:10m;
-}
-
-server {
-    listen 80;
-    server_name api.example.com;
-
-    # Redirect HTTP to HTTPS
-    return 301 https://$server_name$request_uri;
-}
 
 server {
     listen 443 ssl http2;
-    server_name api.example.com;
+    listen [::]:443 ssl http2;
+    server_name api.netscanner.io;
 
-    # SSL configuration
-    ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
-
+    # ===========================
     # Security headers
-    add_header X-Frame-Options DENY;
-    add_header X-Content-Type-Options nosniff;
-    add_header X-XSS-Protection "1; mode=block";
+    # ===========================
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
-    # Connection limits
-    limit_conn conn_limit_per_ip 20;
+    # ===========================
+    # Global CORS headers
+    # ===========================
+    add_header 'Access-Control-Allow-Origin' '*' always;
+    add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+    add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
 
-    # Rate limiting for specific endpoints
-    location ~ ^/(match|query|graph) {
-        # Stricter rate limiting for search/query endpoints
-        limit_req zone=api_search burst=10 nodelay;
-        limit_req_status 429;
-
-        # CORS headers
-        if ($request_method = 'OPTIONS') {
-            add_header 'Access-Control-Allow-Origin' 'https://example.com' always;
-            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
-            add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
-            add_header 'Access-Control-Max-Age' 1728000 always;
-            add_header 'Content-Type' 'text/plain; charset=utf-8' always;
-            add_header 'Content-Length' 0 always;
+    # ===========================
+    # Handle OPTIONS preflight requests
+    # ===========================
+    location / {
+        if ($request_method = OPTIONS) {
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS';
+            add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+            add_header 'Access-Control-Max-Age' 1728000;
+            add_header 'Content-Type' 'text/plain; charset=utf-8';
+            add_header 'Content-Length' 0;
             return 204;
         }
 
-        add_header 'Access-Control-Allow-Origin' 'https://example.com' always;
-        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
-        add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
+        limit_req zone=api_general burst=20 nodelay;
+        limit_req_status 429;
 
-        # Proxy to FastAPI
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # ===========================
+    # Search/query endpoints
+    # ===========================
+    location ~ ^/(match|query|graph) {
+        limit_req zone=api_search burst=10 nodelay;
+        limit_req_status 429;
+
+        # Handle CORS preflight
+        if ($request_method = OPTIONS) {
+            add_header 'Access-Control-Allow-Origin' '*' always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+            add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
+            add_header 'Access-Control-Max-Age' 1728000 always;
+            add_header 'Content-Type' 'text/plain; charset=utf-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $http_host;
-        proxy_set_header X-Forwarded-Port $server_port;
     }
 
-    location /live/ {
-        # Rate limiting for live scan endpoints
+    # ===========================
+    # Live endpoints (WebSocket)
+    # ===========================
+    location ^~ /live {
         limit_req zone=api_live burst=5 nodelay;
         limit_req_status 429;
 
-        # CORS headers
-        add_header 'Access-Control-Allow-Origin' 'https://example.com' always;
-        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
-        add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
-
-        # Proxy to FastAPI with WebSocket support
         proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $http_host;
-        proxy_set_header X-Forwarded-Port $server_port;
-
-        # WebSocket support
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_read_timeout 86400;
         proxy_send_timeout 86400;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    location /trends/ {
-        # More restrictive rate limiting for analytics endpoints
+    # ===========================
+    # Trends/analytics endpoints
+    # ===========================
+    location ^~ /trends {
         limit_req zone=api_trends burst=3 nodelay;
         limit_req_status 429;
 
-        # CORS headers
-        add_header 'Access-Control-Allow-Origin' 'https://example.com' always;
-        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
-        add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
-
-        # Proxy to FastAPI
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $http_host;
-        proxy_set_header X-Forwarded-Port $server_port;
-    }
-
-    location / {
-        # General rate limiting for other endpoints
-        limit_req zone=api_general burst=20 nodelay;
-        limit_req_status 429;
-
-        # CORS headers
-        if ($request_method = 'OPTIONS') {
-            add_header 'Access-Control-Allow-Origin' 'https://example.com' always;
+        # Handle CORS preflight
+        if ($request_method = OPTIONS) {
+            add_header 'Access-Control-Allow-Origin' '*' always;
             add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
             add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
             add_header 'Access-Control-Max-Age' 1728000 always;
-            add_header 'Content-Type' 'text/plain; charset=utf-8' always;
-            add_header 'Content-Length' 0 always;
+            add_header 'Content-Type' 'text/plain; charset=utf-8';
+            add_header 'Content-Length' 0;
             return 204;
         }
 
-        add_header 'Access-Control-Allow-Origin' 'https://example.com' always;
-        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
-        add_header 'Access-Control-Allow-Headers' 'Authorization,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
-
-        # Proxy to FastAPI
+        # Normal proxying
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $http_host;
-        proxy_set_header X-Forwarded-Port $server_port;
-
-        # WebSocket support
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 86400;
     }
+
+    # ===========================
+    # SSL Certificates (Certbot)
+    # ===========================
+    ssl_certificate /etc/letsencrypt/live/api.netscanner.io/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.netscanner.io/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+}
+
+# ===============================
+# HTTP → HTTPS redirect
+# ===============================
+server {
+    listen 80;
+    listen [::]:80;
+    server_name api.netscanner.io;
+
+    if ($host = api.netscanner.io) {
+        return 301 https://$host$request_uri;
+    }
+
+    return 404;
 }
 ```
 

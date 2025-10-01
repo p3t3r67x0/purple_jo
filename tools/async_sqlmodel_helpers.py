@@ -51,7 +51,8 @@ def asyncpg_pool_dsn(dsn: str) -> str:
         raise RuntimeError("Invalid POSTGRES_DSN configuration") from exc
 
     drivername = url.drivername.split("+", 1)[0]
-    return str(url.set(drivername=drivername))
+    updated_url = url.set(drivername=drivername)
+    return updated_url.render_as_string(hide_password=False)
 
 
 def resolve_async_dsn(explicit: Optional[str] = None) -> str:

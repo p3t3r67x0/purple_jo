@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
+
 import asyncio
 import contextlib
 import logging
@@ -722,4 +727,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    CLITool(main).run()

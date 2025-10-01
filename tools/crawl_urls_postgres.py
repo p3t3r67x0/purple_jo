@@ -8,6 +8,11 @@ Maintains the same high-throughput architecture while using the new database bac
 
 from __future__ import annotations
 
+try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
+
 from importlib import import_module
 
 try:
@@ -142,6 +147,150 @@ class CrawlJob:
     message: aio_pika.abc.AbstractIncomingMessage
     stop: bool = False
 
+
+class CrawlUrlsPostgresTool:
+    """Orchestrate the PostgreSQL-backed crawler workflows."""
+
+    def __init__(
+        self,
+        worker: int,
+        postgres_dsn: str,
+        concurrency: int,
+        request_timeout: float,
+        connect_timeout: float,
+        max_redirects: int,
+        max_retries: int,
+        schemes: tuple[str, ...],
+        verbose_urls: bool,
+        log_level: str,
+        rabbitmq_url: str | None,
+        queue_name: str,
+        prefetch: int,
+        enqueue: bool,
+        purge_queue: bool,
+        skip: int,
+        limit: int,
+    ) -> None:
+        self.worker = worker
+        self.postgres_dsn = postgres_dsn
+        self.concurrency = concurrency
+        self.request_timeout = request_timeout
+        self.connect_timeout = connect_timeout
+        self.max_redirects = max_redirects
+        self.max_retries = max_retries
+        self.schemes = schemes
+        self.verbose_urls = verbose_urls
+        self.log_level = log_level
+        self.rabbitmq_url = rabbitmq_url
+        self.queue_name = queue_name
+        self.prefetch = prefetch
+        self.enqueue = enqueue
+        self.purge_queue = purge_queue
+        self.skip = skip
+        self.limit = limit
+
+    async def _enqueue_all(self, postgres_dsn: str) -> None:
+        domains: list[str] = []
+        async for domain in iter_pending_domains_postgres(postgres_dsn):
+            domains.append(domain)
+
+        if not domains:
+            log.info("No pending domains to enqueue")
+            return
+
+        log.info("Enqueueing %d domains", len(domains))
+        sent = await enqueue_domains(
+            self.rabbitmq_url,
+            self.queue_name,
+            domains,
+            self.worker,
+            self.purge_queue,
+        )
+        log.info("Enqueued %d domains", sent)
+
+    def _run_rabbitmq(self, postgres_dsn: str) -> None:
+        settings = WorkerSettings(
+            rabbitmq_url=self.rabbitmq_url,
+            queue_name=self.queue_name,
+            postgres_dsn=postgres_dsn,
+            concurrency=self.concurrency,
+            prefetch=self.prefetch,
+            request_timeout=self.request_timeout,
+            connect_timeout=self.connect_timeout,
+            max_redirects=self.max_redirects,
+            max_retries=self.max_retries,
+            schemes=list(self.schemes),
+            verbose_urls=self.verbose_urls,
+            log_level=self.log_level,
+        )
+
+        with multiprocessing.Pool(self.worker) as pool:
+            results = pool.map(run_worker_rabbit, [settings] * self.worker)
+
+        success_count = sum(1 for result in results if not result.startswith("[ERROR]"))
+        log.info(
+            "Workers completed: %d successful, %d failed",
+            success_count,
+            self.worker - success_count,
+        )
+
+        if success_count < self.worker:
+            sys.exit(1)
+
+    def _run_direct(self, postgres_dsn: str) -> None:
+        chunk_size = self.limit // self.worker
+        remainder = self.limit % self.worker
+
+        settings_list: list[DirectWorkerSettings] = []
+        current_skip = self.skip
+        for index in range(self.worker):
+            worker_limit = chunk_size + (1 if index < remainder else 0)
+            settings_list.append(
+                DirectWorkerSettings(
+                    postgres_dsn=postgres_dsn,
+                    skip=current_skip,
+                    limit=worker_limit,
+                    concurrency=self.concurrency,
+                    request_timeout=self.request_timeout,
+                    connect_timeout=self.connect_timeout,
+                    max_redirects=self.max_redirects,
+                    max_retries=self.max_retries,
+                    schemes=list(self.schemes),
+                    verbose_urls=self.verbose_urls,
+                    log_level=self.log_level,
+                )
+            )
+            current_skip += worker_limit
+
+        with multiprocessing.Pool(self.worker) as pool:
+            results = pool.map(run_worker_direct, settings_list)
+
+        success_count = sum(1 for result in results if not result.startswith("[ERROR]"))
+        log.info(
+            "Workers completed: %d successful, %d failed",
+            success_count,
+            self.worker - success_count,
+        )
+
+        if success_count < self.worker:
+            sys.exit(1)
+
+    def run(self) -> None:
+        configure_logging(self.log_level)
+        postgres_dsn = resolve_async_dsn(self.postgres_dsn)
+
+        if self.enqueue:
+            if not self.rabbitmq_url:
+                click.echo("--rabbitmq-url is required for --enqueue mode", err=True)
+                sys.exit(1)
+
+            asyncio.run(self._enqueue_all(postgres_dsn))
+            return
+
+        if self.rabbitmq_url:
+            self._run_rabbitmq(postgres_dsn)
+        else:
+            self._run_direct(postgres_dsn)
 
 class PostgresAsync:
     """Async PostgreSQL database operations for the crawler."""
@@ -740,92 +889,26 @@ def main(
     limit: int,
 ) -> None:
     """URL crawler using PostgreSQL backend."""
-    configure_logging(log_level)
-
-    postgres_dsn = resolve_async_dsn(postgres_dsn)
-
-    if enqueue:
-        if not rabbitmq_url:
-            click.echo(
-                "--rabbitmq-url is required for --enqueue mode", err=True)
-            sys.exit(1)
-
-        async def enqueue_all():
-            domains = []
-            async for domain in iter_pending_domains_postgres(postgres_dsn):
-                domains.append(domain)
-
-            if not domains:
-                log.info("No pending domains to enqueue")
-                return
-
-            log.info("Enqueueing %d domains", len(domains))
-            sent = await enqueue_domains(rabbitmq_url, queue_name, domains, worker, purge_queue)
-            log.info("Enqueued %d domains", sent)
-
-        asyncio.run(enqueue_all())
-        return
-
-    if rabbitmq_url:
-        # RabbitMQ mode
-        settings = WorkerSettings(
-            rabbitmq_url=rabbitmq_url,
-            queue_name=queue_name,
-            postgres_dsn=postgres_dsn,
-            concurrency=concurrency,
-            prefetch=prefetch,
-            request_timeout=request_timeout,
-            connect_timeout=connect_timeout,
-            max_redirects=max_redirects,
-            max_retries=max_retries,
-            schemes=list(schemes),
-            verbose_urls=verbose_urls,
-            log_level=log_level,
-        )
-
-        with multiprocessing.Pool(worker) as pool:
-            results = pool.map(run_worker_rabbit, [settings] * worker)
-
-        success_count = sum(1 for r in results if not r.startswith("[ERROR]"))
-        log.info("Workers completed: %d successful, %d failed",
-                 success_count, worker - success_count)
-
-        if success_count < worker:
-            sys.exit(1)
-    else:
-        # Direct mode
-        chunk_size = limit // worker
-        remainder = limit % worker
-
-        settings_list = []
-        current_skip = skip
-        for i in range(worker):
-            worker_limit = chunk_size + (1 if i < remainder else 0)
-            settings_list.append(DirectWorkerSettings(
-                postgres_dsn=postgres_dsn,
-                skip=current_skip,
-                limit=worker_limit,
-                concurrency=concurrency,
-                request_timeout=request_timeout,
-                connect_timeout=connect_timeout,
-                max_redirects=max_redirects,
-                max_retries=max_retries,
-                schemes=list(schemes),
-                verbose_urls=verbose_urls,
-                log_level=log_level,
-            ))
-            current_skip += worker_limit
-
-        with multiprocessing.Pool(worker) as pool:
-            results = pool.map(run_worker_direct, settings_list)
-
-        success_count = sum(1 for r in results if not r.startswith("[ERROR]"))
-        log.info("Workers completed: %d successful, %d failed",
-                 success_count, worker - success_count)
-
-        if success_count < worker:
-            sys.exit(1)
+    CrawlUrlsPostgresTool(
+        worker=worker,
+        postgres_dsn=postgres_dsn,
+        concurrency=concurrency,
+        request_timeout=request_timeout,
+        connect_timeout=connect_timeout,
+        max_redirects=max_redirects,
+        max_retries=max_retries,
+        schemes=schemes,
+        verbose_urls=verbose_urls,
+        log_level=log_level,
+        rabbitmq_url=rabbitmq_url,
+        queue_name=queue_name,
+        prefetch=prefetch,
+        enqueue=enqueue,
+        purge_queue=purge_queue,
+        skip=skip,
+        limit=limit,
+    ).run()
 
 
 if __name__ == "__main__":
-    main()
+    CLITool(main).run()

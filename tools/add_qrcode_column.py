@@ -2,55 +2,69 @@
 
 """Utility script to add the qrcode column to the domains table."""
 
+from __future__ import annotations
+
 import argparse
 import asyncio
+import logging
 
 import asyncpg
 
-from async_sqlmodel_helpers import asyncpg_pool_dsn
+from tools.async_sqlmodel_helpers import asyncpg_pool_dsn
 
 
-async def add_qrcode_column(postgres_dsn: str) -> None:
-    """Add the qrcode column to the domains table if missing."""
-    conn = await asyncpg.connect(asyncpg_pool_dsn(postgres_dsn))
+LOGGER = logging.getLogger(__name__)
 
-    try:
-        exists = await conn.fetchval(
-            """
-            SELECT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'domains' AND column_name = 'qrcode'
-            )
-            """
+
+class QRCodeColumnAdder:
+    """Ensure the domains table includes a ``qrcode`` column."""
+
+    def __init__(self, postgres_dsn: str) -> None:
+        self.postgres_dsn = postgres_dsn
+
+    @classmethod
+    def build_parser(cls) -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser(description="Add qrcode column")
+        parser.add_argument(
+            "--postgres-dsn",
+            required=True,
+            help="PostgreSQL DSN",
         )
+        return parser
 
-        if not exists:
-            await conn.execute("ALTER TABLE domains ADD COLUMN qrcode TEXT")
-            print("[SUCCESS] Added qrcode column to domains table")
-        else:
-            print("[INFO] QR code column already exists")
+    @classmethod
+    def from_args(cls) -> "QRCodeColumnAdder":
+        args = cls.build_parser().parse_args()
+        return cls(postgres_dsn=args.postgres_dsn)
 
-    except Exception as exc:  # pragma: no cover - defensive logging
-        print(f"[ERROR] Failed to add qrcode column: {exc}")
-        raise
-    finally:
-        await conn.close()
+    async def add_column(self) -> None:
+        conn = await asyncpg.connect(asyncpg_pool_dsn(self.postgres_dsn))
 
+        try:
+            exists = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'domains' AND column_name = 'qrcode'
+                )
+                """
+            )
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Add qrcode column")
-    parser.add_argument(
-        "--postgres-dsn",
-        required=True,
-        help="PostgreSQL DSN",
-    )
-    return parser.parse_args()
+            if not exists:
+                await conn.execute("ALTER TABLE domains ADD COLUMN qrcode TEXT")
+                LOGGER.info("Added qrcode column to domains table")
+            else:
+                LOGGER.info("QR code column already exists")
 
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.exception("Failed to add qrcode column: %s", exc)
+            raise
+        finally:
+            await conn.close()
 
-def main() -> None:
-    args = parse_args()
-    asyncio.run(add_qrcode_column(args.postgres_dsn))
+    def run(self) -> None:
+        asyncio.run(self.add_column())
 
 
 if __name__ == "__main__":
-    main()
+    QRCodeColumnAdder.from_args().run()

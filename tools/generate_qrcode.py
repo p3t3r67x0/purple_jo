@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+try:
+    from tool_runner import CLITool
+except ModuleNotFoundError:
+    from tools.tool_runner import CLITool
 
 import pyqrcode
 import multiprocessing
@@ -207,4 +211,4 @@ def main(workers: int, postgres_dsn: str):
 
 
 if __name__ == "__main__":
-    main()
+    CLITool(main).run()

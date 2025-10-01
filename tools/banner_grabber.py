@@ -222,7 +222,7 @@ async def persist_batch_results(
             if successes:
                 params = [
                     {
-                        "id": domain_id,
+                        "domain_id_bind": domain_id,
                         "domain_id": domain_id,
                         "banner": banner,
                         "updated_at": now,
@@ -231,7 +231,7 @@ async def persist_batch_results(
                 ]
                 stmt = (
                     update(Domain)
-                    .where(Domain.id == bindparam("id"))
+                    .where(Domain.id == bindparam("domain_id_bind"))
                     .values(
                         banner=bindparam("banner"),
                         updated_at=bindparam("updated_at"),

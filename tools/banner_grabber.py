@@ -242,6 +242,7 @@ async def persist_batch_results(
                         banner=bindparam("banner"),
                         updated_at=bindparam("updated_at"),
                     )
+                    .execution_options(synchronize_session=False)
                 )
                 await session.exec(stmt, params=params)
 

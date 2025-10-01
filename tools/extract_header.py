@@ -9,6 +9,7 @@ import logging
 import math
 import multiprocessing
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import AsyncIterator, Dict, List, Optional, Set, Tuple
@@ -16,12 +17,18 @@ from typing import AsyncIterator, Dict, List, Optional, Set, Tuple
 import aio_pika
 from aio_pika import DeliveryMode, Message
 from aiormq.exceptions import AMQPConnectionError
-import asyncpg
 import click
 import httpx
 
-from async_sqlmodel_helpers import asyncpg_pool_dsn
+from async_sqlmodel_helpers import resolve_async_dsn
 from fake_useragent import UserAgent
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.sql import Select
+from sqlmodel import Field, SQLModel
+
+from shared.models.postgres import Domain, PortService
 
 
 STOP_SENTINEL = b"__STOP__"
@@ -103,19 +110,79 @@ class HeaderStats:
         )
 
 
+class HeaderScanState(SQLModel, table=True):
+    """Track domains whose header scans previously failed."""
+
+    __tablename__ = "header_scan_state"
+
+    domain_name: str = Field(primary_key=True, max_length=255)
+    header_scan_failed: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=utcnow, nullable=False)
+
+
 class PostgresAsync:
     def __init__(self, dsn: str) -> None:
-        self._dsn = asyncpg_pool_dsn(dsn)
-        self._pool: Optional[asyncpg.Pool] = None
+        self._raw_dsn = dsn
+        self._engine: Optional[AsyncEngine] = None
+        self._session_factory: Optional[async_sessionmaker[AsyncSession]] = None
 
-    async def get_pool(self) -> asyncpg.Pool:
-        if self._pool is None:
-            self._pool = await asyncpg.create_pool(self._dsn)
-        return self._pool
+    def _get_session_factory(self) -> async_sessionmaker[AsyncSession]:
+        if self._session_factory is None:
+            resolved = resolve_async_dsn(self._raw_dsn)
+            self._engine = create_async_engine(
+                resolved,
+                echo=False,
+                pool_pre_ping=True,
+                pool_recycle=3600,
+                future=True,
+            )
+            self._session_factory = async_sessionmaker(
+                bind=self._engine,
+                expire_on_commit=False,
+                class_=AsyncSession,
+            )
+        return self._session_factory
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        session_factory = self._get_session_factory()
+        async with session_factory() as session:
+            yield session
+
+    async def ensure_header_scan_state(self) -> None:
+        if self._engine is None:
+            self._get_session_factory()
+        assert self._engine is not None
+        async with self._engine.begin() as conn:
+            await conn.run_sync(
+                lambda sync_conn: HeaderScanState.__table__.create(
+                    sync_conn, checkfirst=True
+                )
+            )
 
     async def close(self) -> None:
-        if self._pool:
-            await self._pool.close()
+        if self._engine is not None:
+            await self._engine.dispose()
+            self._engine = None
+            self._session_factory = None
+
+
+def _pending_domains_select() -> Select:
+    return (
+        select(Domain.name)
+        .select_from(Domain)
+        .join(PortService, PortService.domain_id == Domain.id)
+        .join(
+            HeaderScanState,
+            HeaderScanState.domain_name == Domain.name,
+            isouter=True,
+        )
+        .where(PortService.port.in_([80, 443]))
+        .where(Domain.header_content_type.is_(None))
+        .where(Domain.header_status.is_(None))
+        .where(HeaderScanState.header_scan_failed.is_(None))
+        .distinct()
+    )
 
 
 class HeaderRuntime:
@@ -201,73 +268,76 @@ class HeaderRuntime:
         chain: List[str],
     ) -> None:
         timestamp = utcnow()
-        pool = await self.db.get_pool()
-        
         # Extract specific headers to store in dedicated columns
         header_updates = {
-            'header_content_type': headers.get('content-type'),
-            'header_content_length': (
-                int(headers.get('content-length'))
-                if headers.get('content-length', '').isdigit()
+            "header_content_type": headers.get("content-type"),
+            "header_content_length": (
+                int(headers.get("content-length"))
+                if headers.get("content-length", "").isdigit()
                 else None
             ),
-            'header_content_encoding': headers.get('content-encoding'),
-            'header_cache_control': headers.get('cache-control'),
-            'header_etag': headers.get('etag'),
-            'header_set_cookie': headers.get('set-cookie'),
-            'header_location': headers.get('location'),
-            'header_www_authenticate': headers.get('www-authenticate'),
-            'header_access_control_allow_origin': headers.get(
-                'access-control-allow-origin'
+            "header_content_encoding": headers.get("content-encoding"),
+            "header_cache_control": headers.get("cache-control"),
+            "header_etag": headers.get("etag"),
+            "header_set_cookie": headers.get("set-cookie"),
+            "header_location": headers.get("location"),
+            "header_www_authenticate": headers.get("www-authenticate"),
+            "header_access_control_allow_origin": headers.get(
+                "access-control-allow-origin"
             ),
-            'header_strict_transport_security': headers.get(
-                'strict-transport-security'
+            "header_strict_transport_security": headers.get(
+                "strict-transport-security"
             ),
-            'header_status': headers.get('status'),
-            'header_server': headers.get('server'),
-            'header_x_powered_by': headers.get('x-powered-by'),
+            "header_status": headers.get("status"),
+            "header_server": headers.get("server"),
+            "header_x_powered_by": headers.get("x-powered-by"),
         }
 
-        async with pool.acquire() as conn:
-            # Build the SET clause dynamically for non-null values
-            set_clauses = ['updated_at = $2']
-            params = [domain, timestamp]
-            param_idx = 3
-            
-            for column, value in header_updates.items():
-                if value is not None:
-                    set_clauses.append(f'{column} = ${param_idx}')
-                    params.append(value)
-                    param_idx += 1
-            
-            set_clause = ', '.join(set_clauses)
-            
-            await conn.execute(f"""
-                INSERT INTO domains (name, created_at, updated_at)
-                VALUES ($1, $2, $2)
-                ON CONFLICT (name) DO UPDATE SET {set_clause}
-            """, *params)
+        async with self.db.session() as session:
+            update_values = {
+                column: value for column, value in header_updates.items() if value is not None
+            }
+            statement = insert(Domain).values(
+                name=domain,
+                created_at=timestamp,
+                updated_at=timestamp,
+                **update_values,
+            )
+            if update_values:
+                statement = statement.on_conflict_do_update(
+                    index_elements=[Domain.__table__.c.name],
+                    set_={**update_values, "updated_at": timestamp},
+                )
+            else:
+                statement = statement.on_conflict_do_update(
+                    index_elements=[Domain.__table__.c.name],
+                    set_={"updated_at": timestamp},
+                )
+
+            await session.execute(statement)
+            await session.commit()
 
     async def _mark_failed(self, domain: str) -> None:
         timestamp = utcnow()
-        pool = await self.db.get_pool()
-        
-        async with pool.acquire() as conn:
-            # Create a simple state table for tracking failed scans
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS header_scan_state (
-                    domain_name VARCHAR(255) PRIMARY KEY,
-                    header_scan_failed TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT NOW()
+        await self.db.ensure_header_scan_state()
+
+        async with self.db.session() as session:
+            result = await session.exec(
+                select(HeaderScanState).where(
+                    HeaderScanState.domain_name == domain
                 )
-            """)
-            
-            await conn.execute("""
-                INSERT INTO header_scan_state (domain_name, header_scan_failed)
-                VALUES ($1, $2)
-                ON CONFLICT (domain_name) DO UPDATE SET
-                    header_scan_failed = $2
-            """, domain, timestamp)
+            )
+            state = result.one_or_none()
+
+            if state is None:
+                state = HeaderScanState(
+                    domain_name=domain, header_scan_failed=timestamp
+                )
+                session.add(state)
+            else:
+                state.header_scan_failed = timestamp
+
+            await session.commit()
 
     def _log_headers(
         self,
@@ -391,74 +461,40 @@ async def iter_pending_domains(
     postgres_dsn: str,
     batch_size: int = 10_000,
 ) -> AsyncIterator[str]:
-    pool = await asyncpg.create_pool(asyncpg_pool_dsn(postgres_dsn))
+    db = PostgresAsync(postgres_dsn)
     try:
-        async with pool.acquire() as conn:
-            # Ensure the header_scan_state table exists
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS header_scan_state (
-                    domain_name VARCHAR(255) PRIMARY KEY,
-                    header_scan_failed TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            # Query domains that have port 80 or 443 but no header data
-            query = """
-                SELECT DISTINCT d.name, d.updated_at
-                FROM domains d
-                JOIN port_services ps ON d.id = ps.domain_id
-                LEFT JOIN header_scan_state hss ON d.name = hss.domain_name
-                WHERE ps.port IN (80, 443)
-                AND d.header_content_type IS NULL
-                AND d.header_status IS NULL
-                AND hss.header_scan_failed IS NULL
-                ORDER BY d.updated_at DESC
-                LIMIT $1
-            """
-            rows = await conn.fetch(query, batch_size)
-            
-            for row in rows:
-                yield row['name']
+        await db.ensure_header_scan_state()
+        async with db.session() as session:
+            stmt = (
+                _pending_domains_select()
+                .order_by(Domain.updated_at.desc())
+                .limit(batch_size)
+            )
+            result = await session.exec(stmt)
+            for domain_name in result.all():
+                yield domain_name
     finally:
-        await pool.close()
+        await db.close()
 
 
 async def direct_worker(settings: DirectWorkerSettings) -> str:
     runtime = HeaderRuntime(settings)
     try:
-        pool = await runtime.db.get_pool()
-        
-        async with pool.acquire() as conn:
-            # Ensure the header_scan_state table exists
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS header_scan_state (
-                    domain_name VARCHAR(255) PRIMARY KEY,
-                    header_scan_failed TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            # Query domains that need header scanning
-            query = """
-                SELECT DISTINCT d.name, d.updated_at
-                FROM domains d
-                JOIN port_services ps ON d.id = ps.domain_id
-                LEFT JOIN header_scan_state hss ON d.name = hss.domain_name
-                WHERE ps.port IN (80, 443)
-                AND d.header_content_type IS NULL
-                AND d.header_status IS NULL
-                AND hss.header_scan_failed IS NULL
-                ORDER BY d.updated_at DESC
-                OFFSET $1 LIMIT $2
-            """
-            rows = await conn.fetch(query, settings.skip, settings.limit)
+        await runtime.db.ensure_header_scan_state()
+
+        async with runtime.db.session() as session:
+            stmt = (
+                _pending_domains_select()
+                .order_by(Domain.updated_at.desc())
+                .offset(settings.skip)
+                .limit(settings.limit)
+            )
+            rows = (await session.exec(stmt)).all()
 
         pending: Set[asyncio.Task[None]] = set()
         semaphore = asyncio.Semaphore(max(1, settings.concurrency))
 
-        for row in rows:
-            domain = row['name']
+        for domain in rows:
             if not domain:
                 continue
 
@@ -619,30 +655,15 @@ def main(
 
     # Count pending domains using PostgreSQL
     async def count_and_process():
-        pool = await asyncpg.create_pool(asyncpg_pool_dsn(postgres_dsn))
+        db = PostgresAsync(postgres_dsn)
         try:
-            async with pool.acquire() as conn:
-                # Ensure the header_scan_state table exists
-                await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS header_scan_state (
-                        domain_name VARCHAR(255) PRIMARY KEY,
-                        header_scan_failed TIMESTAMP,
-                        created_at TIMESTAMP DEFAULT NOW()
-                    )
-                """)
-                
-                query = """
-                    SELECT COUNT(DISTINCT d.name)
-                    FROM domains d
-                    JOIN port_services ps ON d.id = ps.domain_id
-                    LEFT JOIN header_scan_state hss ON d.name = hss.domain_name
-                    WHERE ps.port IN (80, 443)
-                    AND d.header_content_type IS NULL
-                    AND d.header_status IS NULL
-                    AND hss.header_scan_failed IS NULL
-                """
-                total_docs = await conn.fetchval(query)
-            
+            await db.ensure_header_scan_state()
+            async with db.session() as session:
+                count_stmt = select(func.count()).select_from(
+                    _pending_domains_select().subquery()
+                )
+                total_docs = (await session.exec(count_stmt)).one()
+
             click.echo(f"[INFO] total domains to scan: {total_docs}")
 
             if total_docs == 0:
@@ -691,7 +712,7 @@ def main(
                     for result in results:
                         click.echo(result)
         finally:
-            await pool.close()
+            await db.close()
     
     asyncio.run(count_and_process())
 

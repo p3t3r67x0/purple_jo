@@ -178,13 +178,11 @@ def _pending_domains_select() -> Select:
     return (
         select(Domain.name)
         .select_from(Domain)
-        .join(PortService, PortService.domain_id == Domain.id)
         .join(
             HeaderScanState,
             HeaderScanState.domain_name == Domain.name,
             isouter=True,
         )
-        .where(PortService.port.in_([80, 443]))
         .where(Domain.header_content_type.is_(None))
         .where(Domain.header_status.is_(None))
         .where(HeaderScanState.header_scan_failed.is_(None))

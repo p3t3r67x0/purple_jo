@@ -1,5 +1,5 @@
 [Unit]
-Description=Purple Jo GeoIP Enrichment Worker
+Description=NetScanner GeoIP Enrichment Worker
 After=network-online.target rabbitmq-server.service
 Wants=network-online.target
 
@@ -13,7 +13,7 @@ Environment=PREFETCH=200
 Environment=MMDB_PATH=/var/lib/netscanner/GeoLite2-City.mmdb
 Environment=EXTRA_ARGS=
 WorkingDirectory=/opt/git/purple_jo
-ExecStart=/opt/git/purple_jo/venv/bin/python \
+ExecStart=/opt/git/purple_jo/tools/venv/bin/python \
     tools/extract_geoip.py serve \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \

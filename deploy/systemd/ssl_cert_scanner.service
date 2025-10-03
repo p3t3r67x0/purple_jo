@@ -1,5 +1,5 @@
 [Unit]
-Description=Purple Jo SSL Certificate Scanner Worker
+Description=NetScanner SSL Certificate Scanner Worker
 After=network-online.target rabbitmq-server.service
 Wants=network-online.target
 
@@ -14,7 +14,7 @@ Environment=TIMEOUT=5.0
 Environment=PORTS=443
 Environment=SSL_SCANNER_EXTRA_ARGS=
 WorkingDirectory=/opt/git/purple_jo
-ExecStart=/opt/git/purple_jo/venv/bin/python \
+ExecStart=/opt/git/purple_jo/tools/venv/bin/python \
     tools/ssl_cert_scanner.py serve \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \

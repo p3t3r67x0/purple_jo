@@ -1,5 +1,5 @@
 [Unit]
-Description=Purple Jo HTTP Header Extraction Worker
+Description=NetScanner HTTP Header Extraction Worker
 After=network-online.target rabbitmq-server.service
 Wants=network-online.target
 
@@ -14,7 +14,7 @@ Environment=REQUEST_TIMEOUT=5.0
 Environment=SCHEMES=http,https
 Environment=EXTRA_ARGS=
 WorkingDirectory=/opt/git/purple_jo
-ExecStart=/opt/git/purple_jo/venv/bin/python \
+ExecStart=/opt/git/purple_jo/tools/venv/bin/python \
     tools/extract_header.py serve \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \

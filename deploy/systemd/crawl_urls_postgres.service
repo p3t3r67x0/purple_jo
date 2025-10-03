@@ -1,5 +1,5 @@
 [Unit]
-Description=Purple Jo Domain Crawler Worker
+Description=NetScanner Domain Crawler Worker
 After=network-online.target rabbitmq-server.service
 Wants=network-online.target
 
@@ -17,7 +17,7 @@ Environment=MAX_RETRIES=2
 Environment=SCHEMES=https,http
 Environment=EXTRA_ARGS=
 WorkingDirectory=/opt/git/purple_jo
-ExecStart=/opt/git/purple_jo/venv/bin/python \
+ExecStart=/opt/git/purple_jo/tools/venv/bin/python \
     tools/crawl_urls_postgres.py serve \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \

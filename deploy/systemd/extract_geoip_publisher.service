@@ -1,5 +1,5 @@
 [Unit]
-Description=Purple Jo GeoIP Publisher
+Description=NetScanner GeoIP Publisher
 After=network-online.target rabbitmq-server.service
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=/etc/netscanner/extract_geoip.env
 WorkingDirectory=/opt/git/purple_jo
-ExecStart=/opt/git/purple_jo/venv/bin/python \
+ExecStart=/opt/git/purple_jo/tools/venv/bin/python \
     tools/extract_geoip.py publish \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \

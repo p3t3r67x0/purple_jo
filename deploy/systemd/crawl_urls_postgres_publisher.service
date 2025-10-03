@@ -1,5 +1,5 @@
 [Unit]
-Description=Purple Jo Domain Crawler Publisher
+Description=NetScanner Domain Crawler Publisher
 After=network-online.target rabbitmq-server.service
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=/etc/netscanner/crawl_urls_postgres.env
 WorkingDirectory=/opt/git/purple_jo
-ExecStart=/opt/git/purple_jo/venv/bin/python \
+ExecStart=/opt/git/purple_jo/tools/venv/bin/python \
     tools/crawl_urls_postgres.py publish \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \

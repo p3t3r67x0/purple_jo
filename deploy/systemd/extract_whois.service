@@ -1,5 +1,5 @@
 [Unit]
-Description=Purple Jo WHOIS Enrichment Worker
+Description=NetScanner WHOIS Enrichment Worker
 After=network-online.target rabbitmq-server.service
 Wants=network-online.target
 
@@ -12,7 +12,7 @@ Environment=CONCURRENCY=10
 Environment=PREFETCH=200
 Environment=EXTRA_ARGS=
 WorkingDirectory=/opt/git/purple_jo
-ExecStart=/opt/git/purple_jo/venv/bin/python \
+ExecStart=/opt/git/purple_jo/tools/venv/bin/python \
     tools/extract_whois.py serve \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \

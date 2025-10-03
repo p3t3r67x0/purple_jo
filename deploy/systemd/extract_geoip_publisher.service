@@ -1,0 +1,23 @@
+[Unit]
+Description=Purple Jo GeoIP Publisher
+After=network-online.target rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/netscanner/extract_geoip.env
+WorkingDirectory=/opt/git/purple_jo
+ExecStart=/opt/git/purple_jo/venv/bin/python \
+    tools/extract_geoip.py publish \
+    --postgres-dsn ${POSTGRES_DSN} \
+    --rabbitmq-url ${RABBITMQ_URL} \
+    --queue-name ${QUEUE_NAME} \
+    --worker-count ${PUBLISHER_WORKER_COUNT} \
+    --batch-size ${PUBLISHER_BATCH_SIZE} \
+    ${PUBLISHER_PURGE_FLAG} \
+    ${PUBLISHER_EXTRA_ARGS}
+User=netscanner
+Group=netscanner
+
+[Install]
+WantedBy=multi-user.target

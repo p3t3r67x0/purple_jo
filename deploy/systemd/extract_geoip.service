@@ -5,15 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/purple_jo/extract_geoip.env
+EnvironmentFile=/etc/netscanner/extract_geoip.env
 Environment=QUEUE_NAME=geoip_enrichment
 Environment=WORKER_PROCESSES=4
 Environment=CONCURRENCY=25
 Environment=PREFETCH=200
-Environment=MMDB_PATH=/var/lib/purple_jo/GeoLite2-City.mmdb
+Environment=MMDB_PATH=/var/lib/netscanner/GeoLite2-City.mmdb
 Environment=EXTRA_ARGS=
-WorkingDirectory=/home/awendelk/git/purple_jo
-ExecStart=/home/awendelk/git/purple_jo/venv/bin/python \
+WorkingDirectory=/opt/git/purple_jo
+ExecStart=/opt/git/purple_jo/venv/bin/python \
     tools/extract_geoip.py serve \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \
@@ -25,8 +25,8 @@ ExecStart=/home/awendelk/git/purple_jo/venv/bin/python \
     ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
-User=awendelk
-#Group=purple_jo
+User=netscanner
+Group=netscanner
 
 [Install]
 WantedBy=multi-user.target

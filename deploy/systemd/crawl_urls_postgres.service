@@ -1,21 +1,24 @@
 [Unit]
-Description=Purple Jo HTTP Header Extraction Worker
+Description=Purple Jo Domain Crawler Worker
 After=network-online.target rabbitmq-server.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/netscanner/extract_header.env
-Environment=QUEUE_NAME=http_headers
+EnvironmentFile=/etc/netscanner/crawl_urls_postgres.env
+Environment=QUEUE_NAME=crawl_domains
 Environment=WORKER_PROCESSES=4
-Environment=CONCURRENCY=200
-Environment=PREFETCH=400
-Environment=REQUEST_TIMEOUT=5.0
-Environment=SCHEMES=http,https
+Environment=CONCURRENCY=500
+Environment=PREFETCH=10
+Environment=REQUEST_TIMEOUT=10.0
+Environment=CONNECT_TIMEOUT=5.0
+Environment=MAX_REDIRECTS=5
+Environment=MAX_RETRIES=2
+Environment=SCHEMES=https,http
 Environment=EXTRA_ARGS=
 WorkingDirectory=/opt/git/purple_jo
 ExecStart=/opt/git/purple_jo/venv/bin/python \
-    tools/extract_header.py serve \
+    tools/crawl_urls_postgres.py serve \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \
     --queue-name ${QUEUE_NAME} \
@@ -23,6 +26,9 @@ ExecStart=/opt/git/purple_jo/venv/bin/python \
     --concurrency ${CONCURRENCY} \
     --prefetch ${PREFETCH} \
     --request-timeout ${REQUEST_TIMEOUT} \
+    --connect-timeout ${CONNECT_TIMEOUT} \
+    --max-redirects ${MAX_REDIRECTS} \
+    --max-retries ${MAX_RETRIES} \
     --schemes ${SCHEMES} \
     ${EXTRA_ARGS}
 Restart=on-failure

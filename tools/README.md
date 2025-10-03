@@ -33,7 +33,7 @@ export POSTGRES_DSN="postgresql+asyncpg://username:password@localhost/netscanner
 - `RABBITMQ_URL` - RabbitMQ connection for distributed processing (optional)
 - `LOG_LEVEL` - Logging verbosity (default: INFO)
 
-**Service Units:** example systemd service and environment files live under `deploy/systemd/` for the RabbitMQ-backed workers (`ssl_cert_scanner`, `extract_header`, `extract_geoip`). Copy the `.env.example` file, fill in credentials, and install the corresponding `.service` unit to run a microservice continuously.
+**Service Units:** example systemd service and environment files live under `deploy/systemd/` for the RabbitMQ-backed workers (`crawl_urls_postgres`, `extract_geoip`, `extract_header`, `extract_whois`, `ssl_cert_scanner`). Copy the `.env.example` file, fill in credentials, and install the corresponding `.service` unit to run a microservice continuously. Each service also has a companion `*-publisher.service` for queue seeding; the shared env files provide `PUBLISHER_*` knobs for worker-count, batch size, and purge behaviour.
 
 **Database Requirements:**
 - PostgreSQL 12+ with async support via asyncpg driver
@@ -50,16 +50,15 @@ Some scripts also depend on external binaries or services (for example `masscan`
 | Script                      | Category      | Purpose                                                                               |
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------- |
 | `banner_grabber.py`         | Enrichment    | Capture SSH banners for domains with open port 22.                                    |
-| `crawl_urls.py`             | Crawling      | Fetch root pages for pending domains and store discovered links.                      |
+| `crawl_urls_postgres.py`    | Crawling      | RabbitMQ microservice that crawls domains and stores discovered URLs in PostgreSQL.   |
 | `cve_2019_19781_scanner.py` | Security      | Probe Citrix ADC appliances for the CVE-2019-19781 path traversal bug.                |
 | `decode_idna.py`            | Normalisation | Convert punycode (`xn--`) hostnames in PostgreSQL back to Unicode.                    |
 | `extract_certstream.py`     | Acquisition   | Subscribe to Certstream and ingest newly seen domains.                                |
 | `extract_domains.py`        | Normalisation | Derive domain names from saved URLs.                                                  |
 | `extract_geoip.py`          | Enrichment    | RabbitMQ microservice that enriches domains with MaxMind GeoIP data.                  |
-| `extract_graph.py`          | Analysis      | Build a relationship graph between domains via DNS/SSL edges.                         |
 | `extract_header.py`         | Enrichment    | RabbitMQ microservice that issues HTTP `HEAD` requests and stores response headers.   |
 | `extract_records.py`        | Enrichment    | Resolve common DNS record types for domains lacking data.                             |
-| `extract_whois.py`          | Enrichment    | Fetch WHOIS/ASN details for `dns` or `ipv4` records.                                  |
+| `extract_whois.py`          | Enrichment    | RabbitMQ microservice that enriches domains with WHOIS/ASN information.               |
 | `generate_qrcode.py`        | Reporting     | Generate base64 PNG QR codes for HTTPS URLs (migrated to PostgreSQL).                 |
 | `generate_sitemap.py`       | Reporting     | Merge Selenium-discovered URLs with an existing sitemap.                              |
 | `import_domains.py`         | Ingestion     | Seed the URL collection from a plaintext list.                                        |
@@ -127,18 +126,15 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 
 ## Crawling, Discovery & Reporting
 
-### crawl_urls.py
-- **Purpose:** Crawl pending domains, following redirects where necessary, persist discovered links, and log crawl outcomes (including the final URL) to PostgreSQL and the console.
+### crawl_urls_postgres.py
+- **Purpose:** Crawl pending domains, follow redirects, and persist discovered links in the `urls` table.
 - **CLI:**
-  - Queue RabbitMQ jobs from PostgreSQL: `python tools/crawl_urls.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name crawl_domains --purge-queue`
-  - Run long-lived workers: `python tools/crawl_urls.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 250 --log-urls`
-  - Direct/batch mode (no RabbitMQ): `python tools/crawl_urls.py --postgres-dsn "postgresql+asyncpg://..." --worker 4 --concurrency 250`
+  - Publish jobs: `python tools/crawl_urls_postgres.py publish --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker-count 8 --purge-queue`
+  - Run workers: `python tools/crawl_urls_postgres.py serve --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker 4 --concurrency 500 --request-timeout 10 --verbose-urls`
 - **Details:**
-  - Publishes `STOP` sentinels after queueing so multiple service instances can exit cleanly once work is drained.
-  - Workers share an async HTTP client per process, honour redirects via `httpx`, and record `final_url` in their crawl summary logs.
-  - Extracts `<a href="…">` values with `lxml`, normalises relative paths with `urljoin`, and bulk-inserts unique URLs into the `urls` table.
-  - Marks domains with `domain_crawled` or `crawl_failed`; insert retries and PostgreSQL writes are resilient to transient errors.
-  - `--log-urls` promotes discovered links to info-level log entries for easier auditing across distributed workers.
+  - Publisher drains uncrawled domains (no `crawl_status` entry) and emits STOP sentinels so service instances exit cleanly once the queue empties.
+  - Workers share an async HTTP client, attempt HTTPS/HTTP in order, extract hyperlinks with BeautifulSoup, and upsert results into `urls` with retry-on-conflict logic.
+  - `--max-redirects`, `--max-retries`, and timeout options allow fine-grained crawl control; `--verbose-urls` promotes every discovered link to INFO for auditing.
 
 ### extract_certstream.py
 - **Purpose:** Listen to the public Certstream feed and add observed hostnames to PostgreSQL.
@@ -175,15 +171,10 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
   - Successful runs write the image filename and `updated_at` timestamp; failures store `image_scan_failed`.
 - **Prerequisites:** Chromium + chromedriver, write access to `screenshots/`, and permissive network egress.
 
-### extract_graph.py
-- **Purpose:** Produce a graph of related domains (SSL SANs, CNAMEs, MX, NS) starting from a seed domain.
-- **CLI:** `python tools/extract_graph.py --host mongodb.internal --domain example.com`
-- **Details:** Uses MongoDB’s `$graphLookup` aggregation to discover relationships and prints a `nodes`/`edges` JSON structure suitable for visualisation.
-
 ## Enrichment Pipelines
 
 ### extract_records.py
-- **Purpose:** Resolve standard DNS records (`A`, `AAAA`, `MX`, `NS`, `SOA`, `CNAME`) for domains missing an `updated_at` timestamp.
+- **Purpose:** Resolve standard DNS records (`A`, `AAAA`, `MX`, `NS`, `SOA`, `CNAME`, `TXT`) for domains missing an `updated_at` timestamp.
 - **CLI:**
   - Queue jobs to RabbitMQ: `python tools/extract_records.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name dns_records --purge-queue`
   - Run distributed workers: `python tools/extract_records.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 200 --log-records`
@@ -225,15 +216,14 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 - **Prerequisites:** A GeoIP2/City `.mmdb` file (GeoLite2 or commercial) readable by the worker processes; see `deploy/systemd/extract_geoip.service` for a systemd example.
 
 ### extract_whois.py
-- **Purpose:** Retrieve ASN/WHOIS data for domains with A records using PostgreSQL.
-- **CLI:** `python tools/extract_whois.py --workers 4 --batch-size 100`
+- **Purpose:** Enrich domains with ASN/WHOIS metadata sourced from the `ipwhois` library.
+- **CLI:**
+  - Publish jobs: `python tools/extract_whois.py publish --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker-count 8 --purge-queue`
+  - Run workers: `python tools/extract_whois.py serve --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker 4 --concurrency 10`
 - **Details:**
-  - **Recently Updated:** Fixed database initialization and worker coordination issues.
-  - Workers atomically claim domains missing WHOIS data via a `whois_state` coordination table to prevent race conditions.
-  - Queries the `ipwhois` library for ASN/registry information and stores results in the `whois_records` table.
-  - Uses async connection pooling and multiprocessing for efficient batch processing.
-  - Automatically initializes required database tables and handles schema setup.
-  - Reads database configuration from `POSTGRES_DSN` environment variable or `.env` file.
+  - Publisher batches domains that lack entries in `whois_records` and enqueues JSON jobs with the domain ID and all associated A-record IPs.
+  - Workers consume from RabbitMQ, resolve WHOIS data via `ipwhois` (first successful IP wins), and upsert results into `whois_records` so hosts without data are not re-queued repeatedly.
+  - Warnings indicate that none of the IPs returned WHOIS metadata; rerun with `--verbose` to surface the underlying exception before deciding on retries.
 
 ### ssl_cert_scanner.py
 - **Purpose:** Perform TLS handshakes, capture certificate metadata, and record supported cipher/protocol combinations.
@@ -270,7 +260,7 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 3. **Derive domains:** Execute `extract_domains.py` to turn stored URLs into registerable domains.
 4. **Resolve DNS:** Use `extract_records.py` to enrich each domain with DNS answers stored in relational tables.
 5. **Network enrichment:** Launch `extract_geoip.py`, `extract_header.py`, `ssl_cert_scanner.py`, `extract_whois.py`, `banner_grabber.py`, and `masscan_scanner.py` to gather network metadata.
-6. **Crawling & reporting:** Run `crawl_urls.py`, `generate_qrcode.py`, `screenshot_scraper.py`, and `generate_sitemap.py` for additional context and presentation outputs.
+6. **Crawling & reporting:** Run `crawl_urls_postgres.py`, `generate_qrcode.py`, `screenshot_scraper.py`, and `generate_sitemap.py` for additional context and presentation outputs.
 7. **Continuous discovery:** Keep `extract_certstream.py` (and optional security checks like `cve_2019_19781_scanner.py`) running to ingest newly observed assets.
 
 **Performance Tips:**

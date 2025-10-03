@@ -24,16 +24,16 @@ python tools/extract_domains.py --workers 4 --host localhost
 
 First, run the schema migration to add the required column:
 ```bash
-cd /home/awendelk/git/purple_jo
+cd /opt/git/purple_jo
 python tools/migrate_urls_schema.py \
-  --postgres-dsn "postgresql+asyncpg://awendelk:pass@localhost/netscanner"
+  --postgres-dsn "postgresql+asyncpg://netscanner:pass@localhost/netscanner"
 ```
 
 Then run the domain extraction:
 ```bash
 python tools/extract_domains.py \
   --workers 4 \
-  --postgres-dsn "postgresql+asyncpg://awendelk:pass@localhost/netscanner"
+  --postgres-dsn "postgresql+asyncpg://netscanner:pass@localhost/netscanner"
 ```
 
 ## Functionality

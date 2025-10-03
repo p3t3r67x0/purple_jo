@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/purple_jo/ssl_cert_scanner.env
+EnvironmentFile=/etc/netscanner/ssl_cert_scanner.env
 Environment=QUEUE_NAME=ssl_scans
 Environment=WORKER_PROCESSES=4
 Environment=CONCURRENCY=100
@@ -13,8 +13,8 @@ Environment=PREFETCH=400
 Environment=TIMEOUT=5.0
 Environment=PORTS=443
 Environment=SSL_SCANNER_EXTRA_ARGS=
-WorkingDirectory=/home/awendelk/git/purple_jo
-ExecStart=/home/awendelk/git/purple_jo/venv/bin/python \
+WorkingDirectory=/opt/git/purple_jo
+ExecStart=/opt/git/purple_jo/venv/bin/python \
     tools/ssl_cert_scanner.py serve \
     --postgres-dsn ${POSTGRES_DSN} \
     --rabbitmq-url ${RABBITMQ_URL} \
@@ -27,8 +27,8 @@ ExecStart=/home/awendelk/git/purple_jo/venv/bin/python \
     ${SSL_SCANNER_EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
-User=awendelk
-#Group=purple_jo
+User=netscanner
+Group=netscanner
 
 [Install]
 WantedBy=multi-user.target

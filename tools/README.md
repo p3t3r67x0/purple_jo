@@ -35,6 +35,15 @@ export POSTGRES_DSN="postgresql+asyncpg://username:password@localhost/netscanner
 
 **Service Units:** example systemd service and environment files live under `deploy/systemd/` for the RabbitMQ-backed workers (`crawl_urls_postgres`, `extract_domains`, `extract_geoip`, `extract_header`, `extract_whois`, `ssl_cert_scanner`). Copy the `.env.example` file, fill in credentials, and install the corresponding `.service` unit to run a microservice continuously. Each service also has a companion `*-publisher.service` for queue seeding; the shared env files provide `PUBLISHER_*` knobs for worker-count, batch size, and purge behaviour.
 
+## Microservice Workflow
+
+The crawling, enrichment, and extraction tools now follow a common pattern:
+
+1. **Publish pending work** – use `python tools/<name>.py publish ...` to batch-select items from PostgreSQL and enqueue JSON jobs onto RabbitMQ (STOP sentinels are appended automatically).
+2. **Serve work** – run `python tools/<name>.py serve ...` (or enable the corresponding systemd worker unit) to spin up one or more processes that consume from the queue.
+
+Each `publish` command accepts `--worker-count` (STOP signals), `--batch-size`, and `--purge-queue/--no-purge-queue`. Each `serve` command exposes tuning flags for concurrency, prefetch, and per-service options (timeouts, schemes, log verbosity, etc.).
+
 **Database Requirements:**
 - PostgreSQL 12+ with async support via asyncpg driver
 - Database schema initialized via Alembic migrations (`alembic upgrade head`)
@@ -57,7 +66,7 @@ Some scripts also depend on external binaries or services (for example `masscan`
 | `extract_domains.py`        | Normalisation | RabbitMQ microservice that extracts registerable domains from stored URLs.            |
 | `extract_geoip.py`          | Enrichment    | RabbitMQ microservice that enriches domains with MaxMind GeoIP data.                  |
 | `extract_header.py`         | Enrichment    | RabbitMQ microservice that issues HTTP `HEAD` requests and stores response headers.   |
-| `extract_records.py`        | Enrichment    | Resolve common DNS record types for domains lacking data.                             |
+| `extract_records.py`        | Enrichment    | RabbitMQ microservice that resolves DNS records and persists them to PostgreSQL.      |
 | `extract_whois.py`          | Enrichment    | RabbitMQ microservice that enriches domains with WHOIS/ASN information.               |
 | `generate_qrcode.py`        | Reporting     | Generate base64 PNG QR codes for HTTPS URLs (migrated to PostgreSQL).                 |
 | `generate_sitemap.py`       | Reporting     | Merge Selenium-discovered URLs with an existing sitemap.                              |
@@ -68,13 +77,6 @@ Some scripts also depend on external binaries or services (for example `masscan`
 | `masscan_scanner.py`        | Security      | Run `masscan` against claimed IPs and persist open-port data.                         |
 | `screenshot_scraper.py`     | Reporting     | Capture Chrome screenshots of HTTPS landing pages.                                    |
 | `ssl_cert_scanner.py`       | Enrichment    | RabbitMQ microservice that captures TLS certificates, cipher suites, and TLS support. |
-
-## Utility Scripts
-
-| Script                         | Category | Purpose                                                              |
-| ------------------------------ | -------- | -------------------------------------------------------------------- |
-| `add_qrcode_column.py`         | Database | Add the qrcode column to the domains table (one-time setup utility). |
-| `fix_alembic_consolidation.sh` | Database | Fix Alembic version references after migration consolidation.        |
 
 The remainder of this guide documents the behaviour, CLI flags, and workflow for each utility.
 
@@ -177,15 +179,14 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 ## Enrichment Pipelines
 
 ### extract_records.py
-- **Purpose:** Resolve standard DNS records (`A`, `AAAA`, `MX`, `NS`, `SOA`, `CNAME`, `TXT`) for domains missing an `updated_at` timestamp.
+- **Purpose:** Resolve standard DNS records (`A`, `AAAA`, `MX`, `NS`, `SOA`, `CNAME`, `TXT`) for domains lacking stored data.
 - **CLI:**
-  - Queue jobs to RabbitMQ: `python tools/extract_records.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --queue-name dns_records --purge-queue`
-  - Run distributed workers: `python tools/extract_records.py --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --service --worker 4 --concurrency 200 --log-records`
-  - Direct mode: `python tools/extract_records.py --postgres-dsn "postgresql+asyncpg://..." --worker 4 --concurrency 200`
+  - Publish jobs: `python tools/extract_records.py publish --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker-count 8 --purge-queue`
+  - Run workers: `python tools/extract_records.py serve --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker 4 --concurrency 500 --dns-timeout 1`
 - **Details:**
-  - Uses RabbitMQ to distribute domains across async workers; workers resolve DNS in parallel via `asyncio.to_thread` and write results through SQLModel/PostgreSQL.
-  - Stores DNS records in separate tables (a_records, mx_records, etc.) with foreign keys to domains, clears stale claim markers, and logs per-domain summaries.
-  - Emits STOP messages so service instances shut down cleanly once the queue is drained.
+  - Publisher batches domains without DNS records, enqueues them, and appends STOP sentinels so service instances exit cleanly when queues drain.
+  - Workers fan out DNS queries via resolver pools, persist results into dedicated tables, and optionally log full payloads when `--log-records` is specified.
+  - Timeout, concurrency, and systemd templates under `deploy/systemd/` mirror the other RabbitMQ-backed microservices.
 
 ### banner_grabber.py
 - **Purpose:** Fetch SSH banners from IPs referenced by domain A records stored in PostgreSQL.
@@ -261,7 +262,7 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 1. **Database setup:** Initialize schema with `alembic upgrade head`
 2. **Seed data:** Run `import_domains.py`, `import_ip.py`, and `insert_asn.py` as needed to populate PostgreSQL.
 3. **Derive domains:** Use `extract_domains.py publish` + `serve` to turn stored URLs into registerable domains.
-4. **Resolve DNS:** Use `extract_records.py` to enrich each domain with DNS answers stored in relational tables.
+4. **Resolve DNS:** Use `extract_records.py publish` + `serve` to enrich each domain with DNS answers stored in relational tables.
 5. **Network enrichment:** Launch `extract_geoip.py`, `extract_header.py`, `ssl_cert_scanner.py`, `extract_whois.py`, `banner_grabber.py`, and `masscan_scanner.py` to gather network metadata.
 6. **Crawling & reporting:** Run `crawl_urls_postgres.py`, `generate_qrcode.py`, `screenshot_scraper.py`, and `generate_sitemap.py` for additional context and presentation outputs.
 7. **Continuous discovery:** Keep `extract_certstream.py` (and optional security checks like `cve_2019_19781_scanner.py`) running to ingest newly observed assets.

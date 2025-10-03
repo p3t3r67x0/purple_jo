@@ -1,0 +1,32 @@
+[Unit]
+Description=NetScanner DNS Record Extraction Worker
+After=network-online.target rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/netscanner/extract_records.env
+Environment=QUEUE_NAME=dns_records
+Environment=WORKER_PROCESSES=4
+Environment=CONCURRENCY=500
+Environment=PREFETCH=800
+Environment=DNS_TIMEOUT=1.0
+Environment=EXTRA_ARGS=
+WorkingDirectory=/opt/git/purple_jo
+ExecStart=/opt/git/purple_jo/venv/bin/python \
+    tools/extract_records.py serve \
+    --postgres-dsn ${POSTGRES_DSN} \
+    --rabbitmq-url ${RABBITMQ_URL} \
+    --queue-name ${QUEUE_NAME} \
+    --worker ${WORKER_PROCESSES} \
+    --concurrency ${CONCURRENCY} \
+    --prefetch ${PREFETCH} \
+    --dns-timeout ${DNS_TIMEOUT} \
+    ${EXTRA_ARGS}
+Restart=on-failure
+RestartSec=5
+User=netscanner
+Group=netscanner
+
+[Install]
+WantedBy=multi-user.target

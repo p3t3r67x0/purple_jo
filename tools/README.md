@@ -33,7 +33,7 @@ export POSTGRES_DSN="postgresql+asyncpg://username:password@localhost/netscanner
 - `RABBITMQ_URL` - RabbitMQ connection for distributed processing (optional)
 - `LOG_LEVEL` - Logging verbosity (default: INFO)
 
-**Service Units:** example systemd service and environment files live under `deploy/systemd/` for the RabbitMQ-backed workers (`crawl_urls_postgres`, `extract_geoip`, `extract_header`, `extract_whois`, `ssl_cert_scanner`). Copy the `.env.example` file, fill in credentials, and install the corresponding `.service` unit to run a microservice continuously. Each service also has a companion `*-publisher.service` for queue seeding; the shared env files provide `PUBLISHER_*` knobs for worker-count, batch size, and purge behaviour.
+**Service Units:** example systemd service and environment files live under `deploy/systemd/` for the RabbitMQ-backed workers (`crawl_urls_postgres`, `extract_domains`, `extract_geoip`, `extract_header`, `extract_whois`, `ssl_cert_scanner`). Copy the `.env.example` file, fill in credentials, and install the corresponding `.service` unit to run a microservice continuously. Each service also has a companion `*-publisher.service` for queue seeding; the shared env files provide `PUBLISHER_*` knobs for worker-count, batch size, and purge behaviour.
 
 **Database Requirements:**
 - PostgreSQL 12+ with async support via asyncpg driver
@@ -54,7 +54,7 @@ Some scripts also depend on external binaries or services (for example `masscan`
 | `cve_2019_19781_scanner.py` | Security      | Probe Citrix ADC appliances for the CVE-2019-19781 path traversal bug.                |
 | `decode_idna.py`            | Normalisation | Convert punycode (`xn--`) hostnames in PostgreSQL back to Unicode.                    |
 | `extract_certstream.py`     | Acquisition   | Subscribe to Certstream and ingest newly seen domains.                                |
-| `extract_domains.py`        | Normalisation | Derive domain names from saved URLs.                                                  |
+| `extract_domains.py`        | Normalisation | RabbitMQ microservice that extracts registerable domains from stored URLs.            |
 | `extract_geoip.py`          | Enrichment    | RabbitMQ microservice that enriches domains with MaxMind GeoIP data.                  |
 | `extract_header.py`         | Enrichment    | RabbitMQ microservice that issues HTTP `HEAD` requests and stores response headers.   |
 | `extract_records.py`        | Enrichment    | Resolve common DNS record types for domains lacking data.                             |
@@ -118,11 +118,14 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
   - Updates the `updated_at` timestamp alongside the new value.
 
 ### extract_domains.py
-- **Purpose:** Derive domain names from stored URLs and create entries in the domains table.
-- **CLI:** `python tools/extract_domains.py --worker 4 --postgres-dsn "postgresql+asyncpg://..."`
+- **Purpose:** Derive registerable domains from stored URLs and persist them to the `domains` table.
+- **CLI:**
+  - Publish jobs: `python tools/extract_domains.py publish --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker-count 8 --purge-queue`
+  - Run workers: `python tools/extract_domains.py serve --postgres-dsn "postgresql+asyncpg://..." --rabbitmq-url amqp://guest:guest@rabbitmq/ --worker 4 --concurrency 250 --verbose-urls`
 - **Details:**
-  - Looks for URLs lacking `domain_extracted`, extracts the registerable domain (skipping raw IPv4s), and inserts into the domains table.
-  - Marks processed URLs with `domain_extracted` to prevent duplicate work.
+  - Publisher batches URLs with `domain_extracted IS NULL`, queues JSON payloads (`url_id`, `url`), and emits STOP sentinels for each worker.
+  - Workers attempt to parse registerable domains (skipping IPv4s), upsert names into `domains`, and always stamp the originating URL’s `domain_extracted` timestamp to avoid reprocessing.
+  - `--verbose-urls` promotes each successful extraction to INFO logs; see `deploy/systemd/extract_domains.service` and `_publisher.service` for production-ready systemd units.
 
 ## Crawling, Discovery & Reporting
 
@@ -257,7 +260,7 @@ The remainder of this guide documents the behaviour, CLI flags, and workflow for
 
 1. **Database setup:** Initialize schema with `alembic upgrade head`
 2. **Seed data:** Run `import_domains.py`, `import_ip.py`, and `insert_asn.py` as needed to populate PostgreSQL.
-3. **Derive domains:** Execute `extract_domains.py` to turn stored URLs into registerable domains.
+3. **Derive domains:** Use `extract_domains.py publish` + `serve` to turn stored URLs into registerable domains.
 4. **Resolve DNS:** Use `extract_records.py` to enrich each domain with DNS answers stored in relational tables.
 5. **Network enrichment:** Launch `extract_geoip.py`, `extract_header.py`, `ssl_cert_scanner.py`, `extract_whois.py`, `banner_grabber.py`, and `masscan_scanner.py` to gather network metadata.
 6. **Crawling & reporting:** Run `crawl_urls_postgres.py`, `generate_qrcode.py`, `screenshot_scraper.py`, and `generate_sitemap.py` for additional context and presentation outputs.

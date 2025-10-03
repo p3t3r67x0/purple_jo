@@ -1,0 +1,30 @@
+[Unit]
+Description=NetScanner Domain Extraction Worker
+After=network-online.target rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/purple_jo/extract_domains.env
+Environment=QUEUE_NAME=extract_domains
+Environment=WORKER_PROCESSES=4
+Environment=CONCURRENCY=250
+Environment=PREFETCH=200
+Environment=EXTRA_ARGS=
+WorkingDirectory=/opt/git/purple_jo
+ExecStart=/opt/git/purple_jo/tools/venv/bin/python \
+    tools/extract_domains.py serve \
+    --postgres-dsn ${POSTGRES_DSN} \
+    --rabbitmq-url ${RABBITMQ_URL} \
+    --queue-name ${QUEUE_NAME} \
+    --worker ${WORKER_PROCESSES} \
+    --concurrency ${CONCURRENCY} \
+    --prefetch ${PREFETCH} \
+    ${EXTRA_ARGS}
+Restart=on-failure
+RestartSec=5
+User=netscanner
+Group=netscanner
+
+[Install]
+WantedBy=multi-user.target
